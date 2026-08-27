@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StrixMaid</title>
+<!--
+  Phase 0 临时页面。
+  正式前端是 React + Vite（见 docs/design.md §4），构建产物会覆盖整个 web/dist。
+  这一页只为证明「rust-embed 静态资源 + API 调用」这条链路是通的：
+  单文件、内联 CSS/JS、零外部请求、深浅色跟随系统。
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:      #fbfbfc;
+    --panel:   #ffffff;
+    --border:  #e3e4e8;
+    --fg:      #16171a;
+    --muted:   #6b6f76;
+    --accent:  #4f46e5;
+    --ok:      #15803d;
+    --err:     #b91c1c;
+    --code-bg: #f4f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #0f1013;
+      --panel:   #17181c;
+      --border:  #2a2c32;
+      --fg:      #e7e8ea;
+      --muted:   #9aa0a8;
+      --accent:  #a5b4fc;
+      --ok:      #4ade80;
+      --err:     #f87171;
+      --code-bg: #1e2026;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC",
+          "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 1.5rem; letter-spacing: -.01em; }
+  .tag {
+    font-size: .75rem; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: .1rem .55rem;
+  }
+  .lede { color: var(--muted); margin: .5rem 0 2rem; }
+  section {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1rem 1.15rem; margin-bottom: 1rem;
+  }
+  h2 {
+    margin: 0 0 .75rem; font-size: .8rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  }
+  h2 code {
+    text-transform: none; letter-spacing: 0; color: var(--fg);
+    background: var(--code-bg); border-radius: 4px; padding: .1rem .4rem;
+    font-size: .85rem;
+  }
+  dl { display: grid; grid-template-columns: minmax(7rem, auto) 1fr; gap: .4rem 1rem; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  dd.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .state { color: var(--muted); font-style: italic; }
+  .err { color: var(--err); }
+  .dot { color: var(--ok); }
+  footer { color: var(--muted); font-size: .875rem; margin-top: 1.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>StrixMaid</h1>
+    <span class="tag">Phase 0 骨架</span>
+  </header>
+  <p class="lede">
+    此页由二进制内嵌的 <code class="mono">web/dist</code> 提供，下面两块内容实时来自后端 API。
+  </p>
+
+  <section>
+    <h2><code>GET /api/v1/health</code></h2>
+    <div id="health" class="state">请求中…</div>
+  </section>
+
+  <section>
+    <h2><code>GET /api/v1/system/info</code></h2>
+    <div id="sysinfo" class="state">请求中…</div>
+  </section>
+
+  <footer>
+    <span id="docs-slot"></span>
+  </footer>
+</main>
+
+<script>
+(() => {
+  const el = (id) => document.getElementById(id);
+
+  /** 渲染成定义列表；值里的对象递归展平成 "a.b" 形式的键。 */
+  function renderPairs(target, pairs) {
+    const dl = document.createElement('dl');
+    for (const [k, v] of pairs) {
+      const dt = document.createElement('dt');
+      dt.textContent = k;
+      const dd = document.createElement('dd');
+      dd.className = 'mono';
+      dd.textContent = v;
+      dl.append(dt, dd);
+    }
+    target.replaceChildren(dl);
+  }
+
+  function flatten(obj, prefix = '', out = []) {
+    for (const [k, v] of Object.entries(obj)) {
+      const key = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) flatten(v, key, out);
+      else out.push([key, v === null ? '—' : String(v)]);
+    }
+    return out;
+  }
+
+  function fail(target, e) {
+    target.className = 'err';
+    target.textContent = `请求失败：${e}`;
+  }
+
+  async function get(path) {
+    const r = await fetch(path, { headers: { accept: 'application/json' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }
+
+  get('/api/v1/health')
+    .then((d) => {
+      const box = el('health');
+      box.className = '';
+      renderPairs(box, [
+        ['status', d.status],
+        ['version', d.version],
+        ['uptime_secs', d.uptime_secs],
+      ]);
+      // 起来之后每 5 秒刷一次 uptime，顺便证明连接一直是活的。
+      setInterval(async () => {
+        try {
+          const n = await get('/api/v1/health');
+          box.querySelectorAll('dd')[2].textContent = n.uptime_secs;
+        } catch { /* 忽略瞬时失败，下一轮再试 */ }
+      }, 5000);
+    })
+    .catch((e) => fail(el('health'), e.message));
+
+  get('/api/v1/system/info')
+    .then((d) => {
+      const box = el('sysinfo');
+      box.className = '';
+      renderPairs(box, flatten(d));
+    })
+    .catch((e) => fail(el('sysinfo'), e.message));
+
+  // API 文档只在 debug 构建（或开了 apidoc feature 的 release）里存在，
+  // 因此先探一下再决定是否给链接，避免留一个必然 404 的入口。
+  fetch('/api/docs', { method: 'GET' })
+    .then((r) => {
+      const slot = el('docs-slot');
+      if (r.ok) {
+        slot.innerHTML = '<span class="dot">●</span> API 文档：<a href="/api/docs">/api/docs</a>'
+          + ' · <a href="/api/v1/openapi.json">openapi.json</a>';
+      } else {
+        slot.textContent = 'API 文档未启用（release 构建默认不暴露；需要时用 --features apidoc 构建）。';
+      }
+    })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

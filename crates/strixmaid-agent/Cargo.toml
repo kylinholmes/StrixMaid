@@ -1,0 +1,16 @@
+[package]
+name         = "strixmaid-agent"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+strixmaid-core = { version = "0.1.0", path = "../strixmaid-core" }
+strixmaid-types = { version = "0.1.0", path = "../strixmaid-types" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

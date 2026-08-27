@@ -1,0 +1,15 @@
+#%PAM-1.0
+# StrixMaid 的 PAM 服务配置 —— Debian / Ubuntu 系模板。
+# 安装到 /etc/pam.d/strixmaid（config.toml 的 pam_service 默认即 "strixmaid"）。
+#
+# 认证 / 账户 / 密码栈直接复用系统公共配置，因此 pam_unix、2FA（如 pam_google_authenticator）、
+# SSSD / LDAP 等只要在 common-* 里生效，这里就自动生效。
+auth       required     pam_env.so
+@include common-auth
+@include common-account
+@include common-password
+
+# 会话：pam_systemd 负责创建 loginctl 会话与 XDG_RUNTIME_DIR（用户级 unit 的前提，design.md §5.4）。
+session    required     pam_loginuid.so
+session    optional     pam_keyinit.so force revoke
+@include common-session
