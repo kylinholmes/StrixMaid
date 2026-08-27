@@ -618,3 +618,7 @@ Phase 0 期间固化的几条实现约定：
 虚拟机管理、SELinux、kdump、sosreport、会话录制、SCAP、高级存储（LVM / RAID / LUKS / iSCSI / Stratis / btrfs）、firewalld、完整告警系统（规则引擎 + 通知渠道）、插件机制、发行版特有功能、MOTD、TLS。
 
 理由见 `cockpit-feature-inventory.md` §0 与 §14——这些恰是 Cockpit 投入最大、使用频率最低、且移植性最差的部分。
+
+---
+
+> 现状与目标的差距分析见 [`gap-analysis.md`](./gap-analysis.md)，后续工作方案见 [`roadmap/`](./roadmap/README.md)。
