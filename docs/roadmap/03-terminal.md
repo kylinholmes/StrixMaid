@@ -14,6 +14,26 @@
 | worker | 见 `01-worker-execution.md`，本方案依赖其 RPC 与 fd 传递 |
 | 前端 | `/debug` 页无终端面板；xterm.js 未 vendor |
 
+### 已落地的地基（commit `5b13c06`）
+
+§4.1 要的帧格式改造与 fd 传递已经做完，后续工作可以直接用：
+
+| 项 | 位置 |
+|---|---|
+| 帧头 `u32 len + u8 fd_count` | `types/src/ipc.rs`：`FRAME_HEADER_LEN=5`、`MAX_FRAME_FDS=4`、`encode_with_fds`、`parse_header -> (len, fd_count)` |
+| 收 fd 的读端 | `core/src/session/framing.rs`：`FdFrameReader`（整条连接每帧都走 `recvmsg`） |
+| 发 fd 的写端 | 同上：`write_msg_with_fds` |
+| worker 侧交出 fd | `core/src/worker/mod.rs`：`FdHandler`、`Dispatcher::register_fd`、`dispatch_with_fds`；`serve` 已会把 fd 随 `Result` 帧发出 |
+| 主进程侧取 fd | `core/src/session/worker_handle.rs`：`WorkerHandle::call_with_fds` |
+| RPC 契约 | `types/src/rpc.rs`：`TERM_OPEN`/`TERM_RESIZE`/`TERM_CLOSE` 与 `TermOpenParams`/`TermOpenResult`/`TermResizeParams`/`TermCloseParams` |
+| 配置 | `core/src/config.rs`：`TerminalConfig { idle_timeout_secs=1800, max_per_session=8 }` |
+| xterm 资产 | `server/src/debug/vendor/`：`xterm.js.gz`(5.5.0)、`xterm.css.gz`、`addon-fit.js.gz`(0.10.0) |
+
+一处与 §4.5 的偏差：`TermOpenParams` **不含身份判断**，只把 `user` 作为 admin worker 的
+目标用户名透传。以谁的身份跑由「发给哪个 worker」决定，而不是由参数决定——把身份
+放进参数就等于让 worker 自己判断该不该切身份，那正是 `design.md` §5.1 要避免的自建鉴权。
+`TermOpenResult` 相应地回带 `shell`/`user`/`uid` 实际值，供主进程回填 `TerminalInfo`。
+
 ## 3. 设计约束
 
 - `design.md` §2.2：PTY 在 worker 内。
@@ -133,6 +153,15 @@ vendor `@xterm/xterm` 5.x 的 `xterm.js` 与 `xterm.css`，以及 `@xterm/addon-
 6. **root 环境**：`user` 指定其他用户且已提权 → shell 内 `id -u` 为目标用户；`/proc/<pid>/status` 的 `Uid` 四列一致（无残留特权）。
 
 ## 7. 验收标准
+
+> **实施状态（2026-08-28）**：主体已完成，但下列验收项**尚未满足**，详见
+> [`docs/HANDOFF.md`](../HANDOFF.md)：
+>
+> - `{"t":"exit"}` 目前不带 `code`（退出码在 worker 里，没有通道送到主进程），故 6.3 未过；
+> - 空闲 / shell 退出 / 登出这三种关闭**没有审计记录**（它们发生在 core 内部），故本节最后一条未过；
+> - `/debug` 终端面板**从未在浏览器中运行过**；
+> - `user` 指定其他用户的 setuid 路径**从未运行过**（开发机非 root），6.6 待 Linux+root 补测。
+
 
 - 6.2–6.5 通过；
 - 刷新页面后终端内容与光标位置恢复（xterm.js 回放后自动定位）；

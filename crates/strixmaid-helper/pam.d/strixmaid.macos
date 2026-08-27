@@ -1,0 +1,24 @@
+# StrixMaid 的 PAM 服务配置 —— macOS 模板。
+#
+# 安装到 /etc/pam.d/strixmaid（config.toml 的 pam_service 默认即 "strixmaid"）。
+# macOS 用的是 OpenPAM，语法与 Linux-PAM 兼容，但**模块名与可用模块完全不同**，
+# 因此不能复用 debian / rhel 模板。
+#
+# ⚠️ macOS 是 StrixMaid 的开发与联调平台，不是交付目标（design.md §2.1）。
+#    这份模板存在的意义是让认证链路能在开发机上跑通，不是给生产用的。
+#
+# 各模块的作用：
+#   pam_opendirectory  向 Open Directory 校验密码。macOS 的真实用户不在 /etc/passwd 里，
+#                      本机账户、移动账户、绑定的 AD/LDAP 账户都由它统一处理。
+#   pam_permit         账户与会话阶段直接放行。macOS 没有 pam_nologin / pam_systemd
+#                      的对应物，也没有 loginctl 会话的概念。
+#   pam_uwtmp          记录登录/登出到 utmpx，让 `who` 能看到这个会话。可选。
+
+auth       required     pam_opendirectory.so
+account    required     pam_opendirectory.so
+password   required     pam_opendirectory.so
+
+# 会话：Linux 侧靠 pam_systemd 建 loginctl 会话与 XDG_RUNTIME_DIR（design.md §5.4），
+# macOS 没有等价机制，pam_open_session 只是走个过场。
+session    required     pam_uwtmp.so
+session    required     pam_permit.so

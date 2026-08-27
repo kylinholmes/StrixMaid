@@ -1,0 +1,1819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  StrixMaid 指标面板样稿 —— 配套 docs/roadmap/08-metrics-and-panel.md
+  自包含单文件，无外部请求，双击即可打开。
+  内联 uPlot v1.6.32（MIT, https://github.com/leeoniya/uPlot），版权头见下方脚本块。
+-->
+<title>StrixMaid 指标面板</title>
+
+<style>.uplot, .uplot *, .uplot *::before, .uplot *::after {box-sizing: border-box;}.uplot {font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";line-height: 1.5;width: min-content;}.u-title {text-align: center;font-size: 18px;font-weight: bold;}.u-wrap {position: relative;user-select: none;}.u-over, .u-under {position: absolute;}.u-under {overflow: hidden;}.uplot canvas {display: block;position: relative;width: 100%;height: 100%;}.u-axis {position: absolute;}.u-legend {font-size: 14px;margin: auto;text-align: center;}.u-inline {display: block;}.u-inline * {display: inline-block;}.u-inline tr {margin-right: 16px;}.u-legend th {font-weight: 600;}.u-legend th > * {vertical-align: middle;display: inline-block;}.u-legend .u-marker {width: 1em;height: 1em;margin-right: 4px;background-clip: padding-box !important;}.u-inline.u-live th::after {content: ":";vertical-align: middle;}.u-inline:not(.u-live) .u-value {display: none;}.u-series > * {padding: 4px;}.u-series th {cursor: pointer;}.u-legend .u-off > * {opacity: 0.3;}.u-select {background: rgba(0,0,0,0.07);position: absolute;pointer-events: none;}.u-cursor-x, .u-cursor-y {position: absolute;left: 0;top: 0;pointer-events: none;will-change: transform;}.u-hz .u-cursor-x, .u-vt .u-cursor-y {height: 100%;border-right: 1px dashed #607D8B;}.u-hz .u-cursor-y, .u-vt .u-cursor-x {width: 100%;border-bottom: 1px dashed #607D8B;}.u-cursor-pt {position: absolute;top: 0;left: 0;border-radius: 50%;border: 0 solid;pointer-events: none;will-change: transform;/*this has to be !important since we set inline "background" shorthand */background-clip: padding-box !important;}.u-axis.u-off, .u-select.u-off, .u-cursor-x.u-off, .u-cursor-y.u-off, .u-cursor-pt.u-off {display: none;}</style>
+
+<style>
+/* ============================================================
+   Windows 10 视觉语言：一律直角、1px 描边、无阴影、Segoe UI。
+   （圆角是 Windows 11 才引入的，标准控件 4px；Win10 全部为 0。）
+   中性色一律偏青，不用纯灰；图表底板与进度槽按所属资源的色相染色。
+   ============================================================ */
+:root{
+  --hue:#0C97AB;
+  --ground:#EBF0F0; --surface:#FFFFFF; --surface-2:#F2F6F6; --surface-3:#DEE7E7;
+  --line:#CBD7D7; --line-2:#E3EAEA; --line-strong:#93A3A3;
+  --ink:#0A1414; --ink-2:#3E4C4C; --ink-3:#677676;
+  --accent:#0078D7; --sel:#CCE8FF; --sel-line:#7EB9E8;
+  --c-cpu:#0C97AB; --c-gpu:#3F8632; --c-mem:#7A5CD4; --c-disk:#B06A22; --c-net:#B44579;
+  --ok:#107C41; --warn:#8A6100; --crit:#C42B1C;
+  --tint-plate:5%; --tint-track:20%;
+  --band:.20; --fill:.28; --gridA:.14;
+  --f-ui:"Segoe UI","Segoe UI Variable","Microsoft YaHei UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB","Noto Sans CJK SC",system-ui,-apple-system,sans-serif;
+  --f-mono:Consolas,"Cascadia Mono",ui-monospace,"SF Mono",Menlo,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --hue:#12A6BA;
+    --ground:#141A1B; --surface:#1E2526; --surface-2:#262F30; --surface-3:#323C3D;
+    --line:#354040; --line-2:#2B3434; --line-strong:#586465;
+    --ink:#EEF5F5; --ink-2:#BAC8C8; --ink-3:#889797;
+    --accent:#4CC2FF; --sel:#0A3A56; --sel-line:#2A6E96;
+    --c-cpu:#12A6BA; --c-gpu:#4E9A3D; --c-mem:#8A6FE0; --c-disk:#C0762A; --c-net:#C25086;
+    --ok:#4BB07A; --warn:#D9A227; --crit:#E86B60;
+    --tint-plate:7%; --tint-track:24%;
+    --band:.26; --fill:.32; --gridA:.13;
+  }
+}
+:root[data-theme="dark"]{
+  --hue:#12A6BA;
+  --ground:#141A1B; --surface:#1E2526; --surface-2:#262F30; --surface-3:#323C3D;
+  --line:#354040; --line-2:#2B3434; --line-strong:#586465;
+  --ink:#EEF5F5; --ink-2:#BAC8C8; --ink-3:#889797;
+  --accent:#4CC2FF; --sel:#0A3A56; --sel-line:#2A6E96;
+  --c-cpu:#12A6BA; --c-gpu:#4E9A3D; --c-mem:#8A6FE0; --c-disk:#C0762A; --c-net:#C25086;
+  --ok:#4BB07A; --warn:#D9A227; --crit:#E86B60;
+  --tint-plate:7%; --tint-track:24%;
+  --band:.26; --fill:.32; --gridA:.13;
+}
+
+*{box-sizing:border-box; border-radius:0}
+.u-cursor-pt{border-radius:0 !important}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--f-ui); font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1260px; margin:0 auto; padding:0 24px 96px}
+h1,h2,h3{font-weight:600; text-wrap:balance; margin:0}
+:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+code{font-family:var(--f-mono); font-size:.9em; background:var(--surface-2); border:1px solid var(--line); padding:0 4px; color:var(--ink)}
+
+.themebar{display:flex; justify-content:flex-end; align-items:center; gap:9px; padding:16px 0 0; font-size:11px; color:var(--ink-3); letter-spacing:.08em; text-transform:uppercase}
+.eyebrow{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); margin:0}
+
+.masthead{padding:44px 0 36px; border-bottom:1px solid var(--line)}
+.masthead h1{font-size:clamp(27px,4.2vw,42px); line-height:1.15; letter-spacing:-.015em; margin:12px 0 0; font-weight:300}
+.masthead h1 b{font-weight:600}
+.masthead .lede{max-width:64ch; color:var(--ink-2); margin:18px 0 0; font-size:15px}
+.masthead .lede strong{color:var(--ink); font-weight:600}
+.masthead .lede code{background:transparent; border:0; padding:0; color:var(--ink)}
+.tally{display:flex; flex-wrap:wrap; margin:30px 0 0; border:1px solid var(--line); background:var(--surface)}
+.tally div{flex:1 1 176px; padding:14px 18px; border-right:1px solid var(--line)}
+.tally div:last-child{border-right:0}
+.tally dt{font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); margin:0}
+.tally dd{margin:4px 0 0; font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.01em}
+.tally dd s{color:var(--ink-3); text-decoration-color:var(--crit); font-weight:400; margin-right:8px; font-size:20px}
+.tally dd em{font-style:normal; color:var(--ink-3); font-size:12px; font-weight:400; margin-left:7px}
+
+section.blk{padding:56px 0 0}
+section.blk > h2{font-size:22px; letter-spacing:-.01em; margin-bottom:6px}
+section.blk > p.sub{color:var(--ink-2); max-width:68ch; margin:0 0 24px}
+
+/* ---------------- 应用窗口 ---------------- */
+.win{border:1px solid var(--line-strong); background:var(--surface)}
+.win-bar{display:flex; align-items:center; gap:14px; padding:0 12px; height:34px; background:var(--surface-2); border-bottom:1px solid var(--line); font-size:12px; color:var(--ink-2)}
+.win-bar .host{color:var(--ink); font-weight:600}
+.win-bar .tab{color:var(--ink); border-bottom:2px solid var(--accent); height:100%; display:flex; align-items:center; padding:0 2px}
+.win-bar .spacer{flex:1}
+.win-bar .clock{font-variant-numeric:tabular-nums; font-size:11.5px; color:var(--ink-3)}
+.win-body{display:grid; grid-template-columns:266px 1fr; height:var(--win-h,660px)}
+
+/* Win10 的滚动条：方头、浅槽、灰拇指 */
+.rail,.d-body{scrollbar-width:thin; scrollbar-color:var(--line-strong) var(--surface-2)}
+.rail::-webkit-scrollbar,.d-body::-webkit-scrollbar{width:12px}
+.rail::-webkit-scrollbar-track,.d-body::-webkit-scrollbar-track{background:var(--surface-2); border-left:1px solid var(--line)}
+.rail::-webkit-scrollbar-thumb,.d-body::-webkit-scrollbar-thumb{background:var(--line-strong); border:3px solid var(--surface-2)}
+.rail::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
+
+/* 左栏 */
+.rail{border-right:1px solid var(--line); background:var(--surface); overflow-y:auto; padding:2px}
+.rail-h{font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-3); padding:10px 10px 6px; margin:0}
+.res{
+  display:grid; grid-template-columns:1fr auto; align-items:center; gap:6px;
+  padding:8px; border:1px solid transparent; border-left:3px solid transparent;
+}
+.res:hover{background:var(--surface-2)}
+.res[aria-current="true"]{background:var(--sel); border-color:var(--sel-line); border-left-color:var(--hue)}
+.res-main{
+  display:grid; grid-template-columns:72px 1fr; gap:10px; align-items:center;
+  width:100%; min-width:0; text-align:left; padding:0; border:0;
+  background:none; color:inherit; font:inherit; cursor:pointer;
+}
+.res-main > div{min-width:0}
+.res.child{padding-left:20px}
+.res.child .res-main{grid-template-columns:56px 1fr}
+.res.child .spark{width:56px}
+.res .thumb{position:relative; height:38px}
+.res .spark,.res .ph{width:72px; height:34px; border:1px solid var(--line); background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.res .rail-psi{position:absolute; left:0; bottom:0; width:100%; height:3px; background:color-mix(in oklab, var(--hue) var(--tint-track), var(--surface-2))}
+.res .rail-psi i{display:block; height:100%; background:var(--ok); width:4%; transition:width .5s linear, background-color .5s linear}
+.res .nm{font-size:13px; font-weight:600; line-height:1.35; display:flex; align-items:center; gap:6px}
+.res .cnt{font-size:10.5px; font-weight:400; color:var(--ink-3); border:1px solid var(--line); padding:0 4px}
+.res .vl{font-size:11.5px; color:var(--ink-2); font-variant-numeric:tabular-nums; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.res .badge{display:inline-block; padding:0 4px; background:var(--crit); color:#fff; font-size:9.5px; font-weight:400}
+.twist{
+  border:1px solid var(--line); background:var(--surface-2); color:var(--ink-2);
+  width:19px; height:19px; line-height:1; font-size:10px; cursor:pointer; padding:0;
+  display:flex; align-items:center; justify-content:center;
+}
+.twist:hover{background:var(--surface-3)}
+
+/* 右栏 */
+/* 头部固定，正文滚动；scrollbar-gutter 恒占位，滚动条出现时图表宽度不跳 */
+.detail{min-width:0; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden}
+.d-top{padding:14px 20px 11px; border-bottom:1px solid var(--line); background:var(--surface); display:flex; flex-direction:column; gap:9px}
+.d-body{padding:14px 20px 18px; overflow-y:auto; scrollbar-gutter:stable; display:flex; flex-direction:column; gap:13px}
+.d-head{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap}
+.d-head h3{font-size:19px}
+.d-head .model{font-size:12px; color:var(--ink-3); margin-left:auto; text-align:right}
+.crumb{font-size:11.5px; color:var(--ink-3)}
+.crumb button{background:none; border:0; color:var(--accent); font:inherit; cursor:pointer; padding:0; text-decoration:underline}
+
+.chart-tools{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.seg{display:inline-flex; border:1px solid var(--line-strong); background:var(--surface)}
+.seg button{font-size:11.5px; padding:3px 10px; border:0; background:var(--surface-2); color:var(--ink-2); cursor:pointer; border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button:hover{background:var(--surface-3)}
+.seg button[aria-pressed="true"]{background:var(--sel); color:var(--ink); font-weight:600}
+.chart-tools .note{font-size:11px; color:var(--ink-3); margin-left:auto; text-align:right}
+
+.plot{position:relative; border:1px solid var(--line-strong); background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.plot .lb{position:absolute; font-size:10.5px; color:var(--ink-3); pointer-events:none; z-index:2}
+.plot .tl{top:3px; left:6px} .plot .tr{top:3px; right:6px}
+.plot .bl{bottom:2px; left:6px} .plot .br{bottom:2px; right:6px}
+.tip{
+  position:absolute; pointer-events:none; opacity:0; transition:opacity .1s; z-index:200;
+  background:var(--surface); border:1px solid var(--line-strong); padding:5px 8px;
+  font-size:11.5px; line-height:1.55; white-space:nowrap; font-variant-numeric:tabular-nums;
+}
+.tip b{font-weight:600}
+.tip .sw{display:inline-block; width:8px; height:8px; margin-right:5px; vertical-align:-1px}
+/* uPlot 游标线：跟随所属资源的色相，不用库默认的蓝灰 */
+.u-hz .u-cursor-x{border-right:1px dashed var(--hue) !important; opacity:.75}
+.uplot{width:auto !important; font-family:var(--f-ui)}
+
+.legend{display:flex; gap:15px; flex-wrap:wrap; font-size:11.5px; color:var(--ink-2)}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.legend i{width:11px; height:3px; display:block}
+.legend i.dash{background:none !important; border-top:2px dashed; height:0}
+
+.grids{display:grid; grid-template-columns:1fr 1fr; gap:12px 32px; align-items:start}
+.stats{display:grid; grid-template-columns:repeat(3,1fr); gap:14px 12px}
+.stat dt{font-size:11.5px; color:var(--ink-3); margin:0}
+.stat dd{margin:0; font-size:19px; font-weight:400; font-variant-numeric:tabular-nums; letter-spacing:-.015em; line-height:1.35}
+.stat dd small{font-size:11px; color:var(--ink-3); margin-left:3px}
+.stat dd.sm{font-size:15px}
+.facts{display:grid; grid-template-columns:auto 1fr; gap:5px 16px; font-size:12.5px; align-self:start}
+.facts dt{color:var(--ink-3); margin:0; white-space:nowrap}
+.facts dd{margin:0; font-variant-numeric:tabular-nums; text-align:right; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+.compo{display:flex; height:32px; border:1px solid var(--line-strong); background:color-mix(in oklab, var(--hue) var(--tint-track), var(--surface-2))}
+.compo i{display:block; height:100%; border-right:1px solid var(--surface); transition:width .5s linear}
+.compo i:last-child{border-right:0}
+.compo-l{display:flex; gap:16px; flex-wrap:wrap; font-size:11.5px; color:var(--ink-2); margin-top:6px}
+.compo-l span{display:inline-flex; align-items:center; gap:6px}
+.compo-l i{width:9px; height:9px; display:block}
+
+/* 逻辑处理器：按 socket 分块 */
+.sock{margin-bottom:9px}
+.sock h4{font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); font-weight:400; margin:0 0 5px}
+.cores{display:grid; grid-template-columns:repeat(8,1fr); gap:3px}
+.cell{position:relative; height:54px; border:1px solid var(--line); background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.cell .cl{position:absolute; top:2px; left:4px; font-size:9px; color:var(--ink-3); z-index:2; pointer-events:none}
+/* 核数超过阈值就换热力图：一张 canvas，实例数与核数无关 */
+.heat{position:relative; border:1px solid var(--line); padding:2px;
+      background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.heatleg{display:flex; align-items:center; gap:9px; font-size:11px; color:var(--ink-3)}
+.heatleg .ramp{height:9px; flex:0 0 160px; border:1px solid var(--line)}
+.heatleg .legnote{margin-left:6px}
+
+/* 组概览 / 挂载点表 */
+.gtbl{width:100%; border-collapse:collapse; font-size:13px}
+.gtbl caption{text-align:left; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); padding:0 0 7px}
+.gtbl th{text-align:left; font-weight:400; font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); padding:0 10px 6px; border-bottom:1px solid var(--line-strong); white-space:nowrap}
+.gtbl th.r,.gtbl td.r{text-align:right}
+.gtbl td{padding:13px 10px; border-bottom:1px solid var(--line); vertical-align:middle; font-variant-numeric:tabular-nums}
+.gtbl tr:last-child td{border-bottom:0}
+.gtbl tr.tot td{border-top:1px solid var(--line-strong); border-bottom:0; color:var(--ink); padding:11px 10px}
+.gtbl tr.tot td em{font-style:normal; color:var(--ink-3); font-size:11.5px}
+/* 组行里的数字，和详情页 .stat 用同一套字号与色阶 */
+.gtbl .num{font-size:19px; font-weight:400; letter-spacing:-.015em; line-height:1.25; color:var(--ink)}
+.gtbl .num small{font-size:11px; color:var(--ink-3); margin-left:2px; font-weight:400}
+.gtbl tr.tot .num{font-weight:600}
+.gtbl .path{font-family:var(--f-mono); font-size:13.5px; color:var(--ink); font-weight:600}
+.gtbl .dev{font-family:var(--f-mono); font-size:14px; color:var(--ink); font-weight:600}
+.gtbl .sub{font-family:var(--f-mono); font-size:11px; color:var(--ink-3)}
+.gtbl .bar{height:12px; border:1px solid var(--line-strong); background:color-mix(in oklab, var(--hue) var(--tint-track), var(--surface-2)); min-width:96px}
+.gtbl .bar i{display:block; height:100%}
+/* 成员缩略图：与左栏同构，只是放大，并同样带一条 PSI 压力带 */
+.gtbl .thumbcell{width:1px; white-space:nowrap}
+.gtbl .mini{width:154px; height:50px; border:1px solid var(--line); background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.gtbl .minipsi{width:154px; height:3px; margin-top:3px; background:color-mix(in oklab, var(--hue) var(--tint-track), var(--surface-2))}
+.gtbl .minipsi i{display:block; height:100%; background:var(--ok); width:4%; transition:width .5s linear, background-color .5s linear}
+.gtbl tr.link{cursor:pointer}
+.gtbl tr.link:hover td{background:var(--surface-2)}
+.gtbl tr.link:hover .dev,.gtbl tr.link:hover .path{color:var(--hue)}
+.gtbl tr.link:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+
+details.tbl{border-top:1px solid var(--line); padding-top:8px}
+details.tbl summary{font-size:11.5px; color:var(--ink-3); cursor:pointer}
+details.tbl table{width:100%; border-collapse:collapse; margin-top:6px; font-size:11.5px; font-variant-numeric:tabular-nums}
+details.tbl th,details.tbl td{text-align:right; padding:2px 8px; border-bottom:1px solid var(--line); color:var(--ink-2)}
+details.tbl th{color:var(--ink-3); font-weight:400; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase}
+details.tbl td:first-child,details.tbl th:first-child{text-align:left}
+
+.callout{margin-top:12px; border:1px solid var(--line); border-left:3px solid var(--hue); background:var(--surface); padding:12px 15px; font-size:13px; color:var(--ink-2); max-width:76ch}
+.callout b{color:var(--ink); font-weight:600}
+.callout code{font-size:12px}
+
+.rules{display:grid; grid-template-columns:repeat(auto-fit,minmax(276px,1fr)); gap:1px; background:var(--line); border:1px solid var(--line)}
+.rule{background:var(--surface); padding:18px 20px}
+.rule h3{font-size:15px; margin-bottom:6px}
+.rule p{margin:0; font-size:13px; color:var(--ink-2)}
+.rule .k{font-size:10.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--ink-3); display:block; margin-bottom:8px}
+
+.ledger{overflow-x:auto; border:1px solid var(--line); background:var(--surface)}
+table.led{width:100%; border-collapse:collapse; font-size:12.5px; min-width:780px}
+table.led th{text-align:left; padding:8px 13px; font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3); font-weight:400; border-bottom:1px solid var(--line-strong); background:var(--surface-2); position:sticky; top:0; z-index:1}
+table.led td{padding:8px 13px; border-bottom:1px solid var(--line); vertical-align:top; color:var(--ink-2)}
+table.led tr:last-child td{border-bottom:0}
+table.led td.m{font-family:var(--f-mono); font-size:11.5px; color:var(--ink); white-space:nowrap; line-height:1.7}
+table.led td.m em{font-style:normal; color:var(--ink-3)}
+table.led tr.grp td{background:var(--surface-2); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink); font-weight:600; padding:9px 13px; border-bottom:1px solid var(--line-strong)}
+table.led tr.grp td span{float:right; font-weight:400; letter-spacing:0; text-transform:none; color:var(--ink-3); font-size:11.5px}
+.chip{display:inline-block; font-size:10.5px; letter-spacing:.05em; padding:1px 6px; white-space:nowrap; border:1px solid; background:transparent}
+.chip.keep{color:var(--ok); border-color:var(--ok)}
+.chip.merge{color:var(--c-cpu); border-color:var(--c-cpu)}
+.chip.drop{color:var(--crit); border-color:var(--crit)}
+.chip.move{color:var(--c-mem); border-color:var(--c-mem)}
+.chip.add{color:var(--accent); border-color:var(--accent)}
+.chip.ask{color:var(--ink-3); border-color:var(--line-strong)}
+
+pre.files{font-family:var(--f-mono); font-size:12px; line-height:1.75; background:var(--surface); border:1px solid var(--line); padding:16px 18px; overflow-x:auto; margin:0; color:var(--ink-2)}
+pre.files b{color:var(--ink); font-weight:600}
+pre.files i{color:var(--ink-3); font-style:normal}
+ol.open{margin:0; padding:0; list-style:none; counter-reset:q; display:flex; flex-direction:column; gap:10px}
+ol.open li{counter-increment:q; background:var(--surface); border:1px solid var(--line); padding:14px 16px 14px 48px; position:relative; font-size:13.5px; color:var(--ink-2); max-width:82ch}
+ol.open li::before{content:"Q" counter(q); position:absolute; left:15px; top:14px; font-size:11px; color:var(--ink-3); font-family:var(--f-mono)}
+ol.open li b{color:var(--ink); font-weight:600; display:block; margin-bottom:2px; font-size:14px}
+
+.swatches{display:flex; flex-wrap:wrap; border:1px solid var(--line); background:var(--surface); margin-top:18px}
+.sw-i{flex:1 1 130px; padding:11px 13px; border-right:1px solid var(--line)}
+.sw-i:last-child{border-right:0}
+.sw-i b{display:block; width:100%; height:20px; margin-bottom:7px}
+.sw-i dt{font-size:12px; font-weight:600; margin:0}
+.sw-i dd{margin:1px 0 0; font-family:var(--f-mono); font-size:10.5px; color:var(--ink-3)}
+
+
+/* 挂载点折叠行 */
+.gtbl tr.mtot td{background:var(--surface-2)}
+.gtbl .tw{display:inline-block; width:13px; color:var(--ink-3); font-size:10px}
+
+/* ================= 样稿参数面板（浮在窗口外，不属于产品界面） ================= */
+.pbtn{
+  border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2);
+  font:inherit; font-size:11.5px; padding:3px 10px; cursor:pointer;
+}
+.pbtn:hover{background:var(--surface-2); color:var(--ink)}
+.pbtn[aria-expanded="true"]{background:var(--sel); color:var(--ink); border-color:var(--sel-line)}
+.prow{display:flex; justify-content:flex-end; margin-bottom:8px}
+.ppanel{
+  position:fixed; right:18px; top:96px; width:266px; max-height:calc(100vh - 130px); overflow-y:auto;
+  background:var(--surface); border:1px solid var(--line-strong); z-index:900;
+  padding:12px 14px 14px; font-size:12px; box-shadow:0 6px 24px rgba(0,0,0,.18);
+  scrollbar-gutter:stable;
+}
+.ppanel[hidden]{display:none}
+.ppanel h4{font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-3);
+           font-weight:400; margin:14px 0 7px; padding-top:10px; border-top:1px solid var(--line)}
+.ppanel h4:first-of-type{margin-top:4px; padding-top:0; border-top:0}
+.ptitle{display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--ink)}
+.ptitle button{margin-left:auto; border:1px solid var(--line); background:var(--surface-2);
+               color:var(--ink-2); font:inherit; font-size:14px; line-height:1; width:20px; height:20px; cursor:pointer}
+.pfield{display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px; margin-bottom:7px}
+.pfield label{color:var(--ink-2)}
+.pfield output{font-variant-numeric:tabular-nums; color:var(--ink); font-size:11.5px; min-width:44px; text-align:right}
+.pfield input[type=range]{grid-column:1/-1; width:100%; height:16px; accent-color:var(--accent)}
+.pcolors{display:grid; grid-template-columns:1fr 1fr; gap:6px}
+.pcolor{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--ink-2)}
+.pcolor input[type=color]{width:26px; height:20px; border:1px solid var(--line); background:none; padding:0; cursor:pointer}
+.preset{width:100%; margin-top:9px; border:1px solid var(--line-strong); background:var(--surface-2);
+        color:var(--ink-2); font:inherit; font-size:11.5px; padding:4px; cursor:pointer}
+.preset:hover{background:var(--surface-3); color:var(--ink)}
+.pseg{display:flex; flex-wrap:wrap; gap:3px}
+.pseg button{border:1px solid var(--line); background:var(--surface-2); color:var(--ink-2);
+             font:inherit; font-size:11px; padding:2px 8px; cursor:pointer}
+.pseg button[aria-pressed="true"]{background:var(--sel); color:var(--ink); border-color:var(--sel-line); font-weight:600}
+@media (max-width:1400px){ .ppanel{top:auto; bottom:18px; max-height:56vh} }
+
+/* ================= 组页的成员区 ================= */
+.zlabel{font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); margin-bottom:6px}
+.mzone{border:1px solid var(--line); background:var(--surface-2); padding:5px;
+       max-height:var(--mzone-h,252px); overflow-y:auto; scrollbar-gutter:stable}
+.mzone::-webkit-scrollbar{width:12px}
+.mzone::-webkit-scrollbar-track{background:var(--surface-3); border-left:1px solid var(--line)}
+.mzone::-webkit-scrollbar-thumb{background:var(--line-strong); border:3px solid var(--surface-3)}
+.mgrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--mcell-w,132px),1fr)); gap:4px}
+.mcell{position:relative; height:82px; padding:0; border:1px solid var(--line); cursor:pointer;
+       font:inherit; color:inherit; text-align:left;
+       background:color-mix(in oklab, var(--hue) var(--tint-plate), var(--surface))}
+.mcell:hover{border-color:var(--hue)}
+.mcell:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+.mcell .vfill{position:absolute; left:0; right:0; top:0; bottom:3px}
+.vname{position:absolute; top:4px; left:6px; font-family:var(--f-mono); font-size:11px; font-weight:600; color:var(--ink); z-index:2; pointer-events:none}
+.vtype{position:absolute; top:4px; right:6px; font-size:9px; letter-spacing:.03em; color:var(--ink-3); border:1px solid var(--line); padding:0 3px; z-index:2; pointer-events:none; background:var(--surface)}
+.vval{position:absolute; bottom:6px; left:6px; font-size:20px; line-height:1.1; color:var(--ink); font-variant-numeric:tabular-nums; z-index:2; pointer-events:none}
+.vval small{font-size:10px; color:var(--ink-3); margin-left:1px}
+.mpsi{position:absolute; left:0; bottom:0; width:100%; height:3px;
+      background:color-mix(in oklab, var(--hue) var(--tint-track), var(--surface-2))}
+.mpsi i{display:block; height:100%; background:var(--ok); transition:width .5s linear, background-color .5s linear}
+
+@media (max-width:960px){
+  .win-body{grid-template-columns:1fr}
+  .rail{border-right:0; border-bottom:1px solid var(--line)}
+  .grids{grid-template-columns:1fr}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .cores{grid-template-columns:repeat(4,1fr)}
+}
+@media (prefers-reduced-motion:reduce){ *{transition:none !important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="themebar">
+  <span>主题</span>
+  <div class="seg" id="themeseg">
+    <button type="button" data-t="light">浅色</button>
+    <button type="button" data-t="dark">深色</button>
+    <button type="button" data-t="system" aria-pressed="true">跟随系统</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <p class="eyebrow">StrixMaid · design.md §7 修订提案 · 第 3 稿 · 2026-08-28</p>
+  <h1>指标砍掉一半，<b>面板才开始有主次</b></h1>
+  <p class="lede">现在 <code>CATALOG</code> 里有 58 种指标。按 <strong>§7.4 那台样机</strong>（16 核 / 4 盘 / 2 网卡 / 3 挂载点，每核明细开启）铺出 229 条 series。问题不在采集成本——读几个 <code>/proc</code> 文件而已——在于<strong>面板上没有主次</strong>：打开页面看到两百条曲线，等于什么都没看到。任务管理器的做法正相反：少数几个入口，每个入口一张大图加六个数字。这一稿按那个密度重裁采集项，补上 GPU，并把同类资源收进可展开的<strong>资源组</strong>。</p>
+  <dl class="tally">
+    <div><dt>指标种类</dt><dd><s>58</s>34<em>−41%</em></dd></div>
+    <div><dt>其中 GPU 为新增</dt><dd>+4<em>能力探测</em></dd></div>
+    <div><dt>样机 series（含 1 块 GPU）</dt><dd><s>229</s>71<em>−69%</em></dd></div>
+    <div><dt>Normal 预设占用</dt><dd><s>≈100MB</s>≈35MB<em>−65%</em></dd></div>
+  </dl>
+</header>
+
+<section class="blk">
+  <h2>面板</h2>
+  <p class="sub">全部图表由 <strong>uPlot v1.6.32 实机绘制</strong>（整页 20 余个实例，1 Hz 全量 <code>setData</code>），不是示意图——所见即上线后的样子。样稿里的机器故意配得比样机大，好让分组看出效果：<strong>2 路 CPU / 2 块 GPU / 3 块盘 / 2 张网卡 / 7 个挂载点</strong>。<strong>组默认折叠</strong>：左栏点组头进组页，组页里<strong>点某个成员格</strong>直达它的详情页，点 <code>+</code> 才把成员平铺到左栏。CPU 页的「逻辑处理器」里可以切 16 / 32 / 64 / 256 核，看阈值两侧的两种渲染。</p>
+
+  <div class="prow">
+    <button class="pbtn" type="button" id="pbtn" aria-expanded="false" aria-controls="ppanel">样稿参数</button>
+  </div>
+  <div class="ppanel" id="ppanel" hidden aria-label="样稿参数"></div>
+
+  <div class="win">
+    <div class="win-bar">
+      <span class="host">web-03.sh</span>
+      <span class="tab">性能</span>
+      <span class="spacer"></span>
+      <span class="clock" id="clock">采集间隔 2s</span>
+    </div>
+    <div class="win-body">
+      <nav class="rail" id="rail" aria-label="资源"><p class="rail-h">资源</p></nav>
+      <div class="detail" id="detail"></div>
+    </div>
+  </div>
+
+  <div class="callout" id="signature">
+    <b>左栏每条走势下面那道 3 像素的细条，是任务管理器没有的一行。</b>
+    它画的是这个资源的 PSI 停滞比例——<code>psi.cpu.some</code> / <code>psi.memory.some</code> / <code>psi.io.some</code>。
+    CPU 20% 但 <code>io.some</code> 60% 的机器，体感是卡死的，而所有传统面板都会显示「一切正常」。
+    这道细条让「资源没满但任务在等」这件事，在你还没点进任何一页的时候就已经是红的。
+    组头上的那道，取的是组内成员的最大值——一块盘卡住，整组就是红的。
+  </div>
+</section>
+
+
+<section class="blk">
+  <h2>资源组：一台 24 盘的机器不能铺 24 行</h2>
+  <p class="sub">同类资源收进组。组头是入口也是摘要，展开才出成员。这一层<strong>不需要任何新指标</strong>。</p>
+  <div class="rules">
+    <div class="rule">
+      <span class="k">聚合语义</span>
+      <h3>速率求和，饱和度取最大</h3>
+      <p>组头那行数字必须分开算：<code>disk.read_bytes</code>、<code>net.rx_bytes</code> 这类速率<b>求和</b>才有意义；<code>disk.util</code>、<code>gpu.usage</code>、PSI 这类饱和度<b>求和毫无意义</b>，要取最忙的那个。所以组头显示的是「合计吞吐 · 最忙成员 87%」两段，而不是一个平均数——平均数会把一块打满的盘藏进七块闲盘里。</p>
+    </div>
+    <div class="rule">
+      <span class="k">成员格</span>
+      <h3>有身份的印名字，没身份的不印</h3>
+      <p>成员格里放什么，和「有没有详情页」是同一个判据——<b>成员有没有身份</b>。<code>nvme0n1</code> 有型号、有 SMART、有挂载点，名字必须印在格子上，格子还带类型标记（NVMe / HDD），因为异构机器里 HDD 的 87% 和 NVMe 的 87% 差一个量级。<code>cpu137</code> 只有一个编号，没有任何可写的详情，名字不必印，多了直接转热力图。<b>同一个属性同时决定了层数和成员视图的形态。</b></p>
+    </div>
+    <div class="rule">
+      <span class="k">分组依据</span>
+      <h3>是元数据问题，不是指标问题</h3>
+      <p>多路 CPU 的逻辑处理器网格按 socket 分块，依据是 <code>/sys/devices/system/cpu/cpuN/topology/physical_package_id</code>；网卡分组看 <code>/sys/class/net/*/device</code>；分区归盘看 <code>/sys/block</code>。<b>全都是 <code>/api/v1/system/info</code> 里的静态拓扑</b>，不进时序库，不增加一条 series。</p>
+    </div>
+    <div class="rule">
+      <span class="k">高核数</span>
+      <h3>超过 32 核换热力图</h3>
+      <p>每核一张小图，在 32 核以内还读得动；再多就既画不下、也没人逐核看历史。超过阈值换成<b>单张 canvas 的热力图</b>——一格一个逻辑处理器，颜色深浅是当前占用，仍按 socket 分块。<b>渲染实例数与核数无关</b>，256 核和 16 核的成本一样。而且这时要回答的问题本来就变了：不是「这个核过去怎样」，是「现在哪个核烫」。</p>
+    </div>
+    <div class="rule">
+      <span class="k">页面骨架</span>
+      <h3>组页和详情页是同一个骨架</h3>
+      <p>组页从上到下：<b>聚合图 → 成员区 → 数字与静态事实</b>。成员区在组页里的位置，正对应磁盘详情页里挂载点表的位置——都是「这一页下面挂着什么」。<b>成员区高度封顶、内部自己滚</b>，所以哪怕六十块盘，底下那块文本也不会被顶到看不见的地方。组默认折叠，二十块盘在左栏也只占一行；<b>只有一个成员就不是组</b>，单网卡的机器不该看到「网络　1 个　+」这种废话。</p>
+    </div>
+  </div>
+</section>
+
+<section class="blk">
+  <h2>存储并进磁盘了</h2>
+  <p class="sub">上一稿单独开了「存储」页，那是错的。</p>
+  <div class="callout" style="--hue:var(--c-disk); max-width:none">
+    <b>挂载点属于它所在的那块盘，就该列在那块盘的页里。</b>
+    这样一并解决了上一稿要专门写一段话解释的问题：<code>/</code> 和 <code>/var</code> 的读写速率为什么一模一样——
+    因为它们就列在 <code>nvme0n1</code> 这一页上，共享设备级计数器这件事不言自明，不需要再解释。
+    <br><br>
+    读写速率本身<b>不是新指标</b>：<code>/proc/self/mountinfo</code> 第三列是挂载点后端设备的 <code>major:minor</code>，
+    拿它索引 <code>/proc/diskstats</code> 就能把已有的 <code>disk.read_bytes</code> / <code>write_bytes</code> 归到挂载点上。是一次 join。
+    <br><br>
+    <b>跨设备的全局视图放在磁盘组概览页</b>——所有盘一张表，所有挂载点一张表，
+    「哪个文件系统要满了」一眼看完，不用逐块盘点进去。没有块设备的挂载点（tmpfs、nfs、overlay）也归在那里，
+    它们没有 <code>disk.*</code> 可 join，速率列显示 <code>—</code>，这是事实不是缺陷。
+  </div>
+</section>
+
+<section class="blk">
+  <h2>凭什么砍得掉</h2>
+  <p class="sub">不是挑冷门的删，是三条能复述的规则。每一条删掉的指标都能指回它归属的规则。</p>
+  <div class="rules">
+    <div class="rule">
+      <span class="k">规则一</span>
+      <h3>派生量不存</h3>
+      <p><code>fs.usage</code> 就是 <code>used / total</code>，<code>mem.swap_free</code> 就是 <code>swap_total − swap_used</code>，<code>cpu.idle</code> 就是 100 减掉其余。存一条能算出来的曲线，等于白扔一整条 series 的五层桶。前端做一次除法的成本是零。</p>
+    </div>
+    <div class="rule">
+      <span class="k">规则二</span>
+      <h3>同向计数器合成一条异常信号</h3>
+      <p><code>net.{rx,tx}_{errors,drops}</code> 四条，平时全是零，出事时一起涨。它们要回答的是同一个问题：这张网卡在丢包吗。合成一条 <code>net.errors</code>，非零即异常，面板打红角标；真要分方向，<code>ip -s link</code> 一条命令的事。</p>
+    </div>
+    <div class="rule">
+      <span class="k">规则三</span>
+      <h3>慢变量不进时序库</h3>
+      <p>inode 用量一天动不了一个百分点。它是<b>健康检查项，不是曲线</b>——五层桶存一年，存的是一条几乎水平的直线。挪进 <code>GET /api/v1/system/health</code> 做阈值判断，超了报警，不占 series。</p>
+    </div>
+  </div>
+</section>
+
+<section class="blk">
+  <h2>逐条清单</h2>
+  <p class="sub">按 <code>catalog.rs</code> 里 <code>CATALOG</code> 的原顺序走一遍。<span class="chip keep">保留</span> 上面板 · <span class="chip merge">合并</span> 几条并成一条 · <span class="chip drop">删除</span> 不再采集 · <span class="chip move">移出</span> 换个 API 承载 · <span class="chip add">新增</span> 这一稿加的。</p>
+  <div class="ledger">
+  <table class="led">
+    <thead><tr><th style="width:186px">指标</th><th style="width:92px">处置</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="3">CPU 总<span>9 → 5</span></td></tr>
+      <tr><td class="m">cpu.usage</td><td><span class="chip keep">保留</span></td><td>主曲线，面板上唯一的实线。</td></tr>
+      <tr><td class="m">cpu.system</td><td><span class="chip keep">保留</span></td><td>内核时间，在主曲线下方画深色填充——任务管理器的「显示内核时间」。软中断风暴、系统调用打满都从这条露头。</td></tr>
+      <tr><td class="m">cpu.iowait</td><td><span class="chip keep">保留</span></td><td>Linux 特有，也是「CPU 不高但机器很慢」的第一现场证据。</td></tr>
+      <tr><td class="m">cpu.irq <em>← irq + softirq</em></td><td><span class="chip merge">合并</span></td><td>合成一条「中断」。硬中断和软中断要分开看的场合只有网卡多队列调优，那时该上 <code>perf</code>，不是看面板。</td></tr>
+      <tr><td class="m">cpu.steal</td><td><span class="chip keep">保留</span></td><td>宿主机偷走的时间。<b>能力探测到非虚拟化时整条隐藏</b>，物理机上不占位。</td></tr>
+      <tr><td class="m">cpu.user</td><td><span class="chip drop">删除</span></td><td>规则一。<code>user + nice = usage − system − 中断 − steal</code>，这是恒等式不是近似——各档时间占比之和恒为 100。</td></tr>
+      <tr><td class="m">cpu.nice</td><td><span class="chip drop">删除</span></td><td>并进 user 一起显示。现代系统上 nice 时间几乎恒为 0，单列一条曲线看一年也是平的。</td></tr>
+      <tr><td class="m">cpu.idle</td><td><span class="chip drop">删除</span></td><td>规则一，<code>100 − 其余</code>。</td></tr>
+
+      <tr class="grp"><td colspan="3">CPU 每核<span>9×N → 1×N</span></td></tr>
+      <tr><td class="m">cpu.core.usage</td><td><span class="chip keep">保留</span></td><td>逻辑处理器网格，任务管理器同款；多路机器按 socket 分块，依据是静态拓扑不是新指标。单核跑满而总占用不高，只有这张网格能一眼看出来。</td></tr>
+      <tr><td class="m">cpu.core.{user,nice,system,<br>idle,iowait,irq,softirq,steal}</td><td><span class="chip drop">删除</span></td><td>面板上几乎没人看第 97 核的 softirq 历史。<b>连带删掉 <code>metrics.per_core_detail</code> 配置项</b>——它存在的唯一理由就是开关这 8 条。128 核机器：1152 → 128。</td></tr>
+
+      <tr class="grp"><td colspan="3">GPU（每卡，新增）<span>0 → 4</span></td></tr>
+      <tr><td class="m">gpu.usage</td><td><span class="chip add">新增</span></td><td>利用率。amdgpu 直读 <code>/sys/class/drm/cardN/device/gpu_busy_percent</code>，零依赖零成本。</td></tr>
+      <tr><td class="m">gpu.mem_used<br>gpu.mem_total</td><td><span class="chip add">新增</span></td><td>显存。amdgpu 的 <code>mem_info_vram_used</code> / <code>mem_info_vram_total</code>，单位字节。</td></tr>
+      <tr><td class="m">gpu.temp</td><td><span class="chip add">新增</span></td><td>温度，走 <code>hwmon</code>。任务管理器 GPU 页底部就有这一格，而且它是唯一能提前预告降频的指标。</td></tr>
+      <tr><td class="m">gpu.power · gpu.freq<br>按引擎拆分（3D/编解码）</td><td><span class="chip ask">⭕ 后置</span></td><td>按引擎拆分要读 <code>/proc/&lt;pid&gt;/fdinfo</code> 的 <code>drm-engine-*</code> 再按进程聚合（amdgpu 内核 5.14+、i915 5.19+）——成本比前面四条高一个量级，P0 不做。</td></tr>
+
+      <tr class="grp"><td colspan="3">内存<span>10 → 6</span></td></tr>
+      <tr><td class="m">mem.total · mem.used<br>mem.available</td><td><span class="chip keep">保留</span></td><td>组成条与主曲线的三个支点。<code>available</code> 是 Linux 上唯一能回答「还能开多大进程」的数字。</td></tr>
+      <tr><td class="m">mem.cached <em>← cached + buffers</em></td><td><span class="chip merge">合并</span></td><td>现代内核里 buffers 是 page cache 的一小块，单列出来不产生任何决策差异。</td></tr>
+      <tr><td class="m">mem.swap_total<br>mem.swap_used</td><td><span class="chip keep">保留</span></td><td>swap 一旦开始涨就是内存告急的确凿信号。</td></tr>
+      <tr><td class="m">mem.free</td><td><span class="chip drop">删除</span></td><td>规则一，而且它<b>对 Linux 是个误导数字</b>——free 少不等于内存紧张，那是 page cache 在干活。留着只会让人误判。</td></tr>
+      <tr><td class="m">mem.swap_free</td><td><span class="chip drop">删除</span></td><td>规则一。</td></tr>
+      <tr><td class="m">mem.dirty</td><td><span class="chip drop">删除</span></td><td>脏页堆积是写回排障的深水区，真出问题时 <code>psi.io</code> 会先叫，而且叫得更早。</td></tr>
+
+      <tr class="grp"><td colspan="3">负载与进程<span>5 → 3</span></td></tr>
+      <tr><td class="m">load.1m</td><td><span class="chip keep">保留</span></td><td>作为 CPU 页右下角的一个数字，不单独画图。</td></tr>
+      <tr><td class="m">procs.total<br>procs.running</td><td><span class="chip keep">保留</span></td><td>对位任务管理器的「进程 / 线程」。running 就是运行队列长度，和 load 是一对。</td></tr>
+      <tr><td class="m">load.5m · load.15m</td><td><span class="chip drop">删除</span></td><td>5 分钟和 15 分钟均值<b>本来就是 1 分钟值的移动平均</b>。内核之所以替我们平滑，是因为 <code>uptime</code> 没有历史；而我们存着五层完整曲线，趋势直接看图，不需要内核代劳。</td></tr>
+
+      <tr class="grp"><td colspan="3">PSI<span>6 → 5</span></td></tr>
+      <tr><td class="m">psi.cpu.some<br>psi.memory.{some,full}<br>psi.io.{some,full}</td><td><span class="chip keep">保留</span></td><td>产品的差异化在这儿，一条不动。<code>some</code> 进左栏压力带，<code>full</code>（所有任务都停摆）进各页的数字格。</td></tr>
+      <tr><td class="m">psi.cpu.full</td><td><span class="chip drop">删除</span></td><td>内核在整机层面对 cpu 的 <code>full</code> 没有定义，恒输出 0——它只在 cgroup 层有意义。我们存的是一列零。</td></tr>
+
+      <tr class="grp"><td colspan="3">磁盘（每设备）<span>6 → 5</span></td></tr>
+      <tr><td class="m">disk.util</td><td><span class="chip keep">保留</span></td><td>「活动时间」，磁盘页第一张图，任务管理器同名同义。组头取组内最大值。</td></tr>
+      <tr><td class="m">disk.read_bytes<br>disk.write_bytes</td><td><span class="chip keep">保留</span></td><td>第二张图，读写分向叠加。<b>挂载点的 IO 速度也复用这两条</b>，不另建 series。组头取合计。</td></tr>
+      <tr><td class="m">disk.await</td><td><span class="chip keep">保留</span></td><td>「平均响应时间」。util 满而 await 不高是正常的顺序读；两个都高才是排队。</td></tr>
+      <tr><td class="m">disk.iops <em>← read + write</em></td><td><span class="chip merge">合并</span></td><td>方向已经由上面两条 bytes 给出了。IOPS 在这里只回答一个问题：打满的是大 IO 还是小 IO——合计值足够。</td></tr>
+
+      <tr class="grp"><td colspan="3">文件系统（每挂载点）<span>5 → 2</span></td></tr>
+      <tr><td class="m">fs.used · fs.total</td><td><span class="chip keep">保留</span></td><td>列在所属磁盘的详情页里，画条不画曲线；跨设备的全表在磁盘组概览页。</td></tr>
+      <tr><td class="m">fs.usage</td><td><span class="chip drop">删除</span></td><td>规则一。</td></tr>
+      <tr><td class="m">fs.inodes_used<br>fs.inodes_total</td><td><span class="chip move">移出</span></td><td>规则三。挪进 <code>/api/v1/system/health</code>，和 failed units、磁盘超阈值、需重启并列——它本来就属于那一类。</td></tr>
+
+      <tr class="grp"><td colspan="3">网络（每接口）<span>8 → 3</span></td></tr>
+      <tr><td class="m">net.rx_bytes<br>net.tx_bytes</td><td><span class="chip keep">保留</span></td><td>吞吐图的全部内容。任务管理器的网络页也只有这两条。组头取合计。</td></tr>
+      <tr><td class="m">net.errors <em>← 4 条 errors/drops</em></td><td><span class="chip merge">合并</span></td><td>规则二。</td></tr>
+      <tr><td class="m">net.rx_packets<br>net.tx_packets</td><td><span class="chip drop">删除</span></td><td>唯一用途是除出平均包长来判断小包攻击。那是抓包该干的事。</td></tr>
+
+      <tr class="grp"><td colspan="3">仍待定<span>+1</span></td></tr>
+      <tr><td class="m">cpu.freq</td><td><span class="chip ask">待定</span></td><td>任务管理器 CPU 页最显眼的第二个数字。全核平均取自 <code>scaling_cur_freq</code>。虚拟机上常常读不到，走能力探测隐藏。<b>这条是加不是减，要不要加你定。</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="blk">
+  <h2>侧栏的顺序不是随手排的</h2>
+  <p class="sub">GPU 加进来之后侧栏变成五类，配色被逼出了一个硬约束。</p>
+  <div class="callout" style="--hue:var(--c-gpu); max-width:none">
+    <b>绿（GPU）和琥珀（磁盘）是红绿色盲下的经典撞色对</b>，两者相邻时 deutan ΔE 只有 3.7，远低于 8 的下限。
+    穷举验证过：在固定亮度环上遍历全部五色组合，要让五个颜色在 protan / deutan / tritan 三种色觉下两两都安全，
+    最好情况的最差 ΔE 也只有 <b>4.9</b>——<b>五个类别色两两全安全，是不存在的</b>。
+    <br><br>
+    所以解法不是换色，是排序：把 GPU 挪到 CPU 后面（算力放一起，也更合逻辑），让它只与青、紫相邻，避开琥珀。
+    按 <b>CPU · GPU · 内存 · 磁盘 · 网络</b> 这个相邻序，暗色与亮色两套配色的五项检查全部通过。
+    每一行还都带文字标签，颜色从来不是唯一的身份编码。
+    <br><br>
+    中性色也全部偏青，不用纯灰；图表底板与进度槽按所属资源的色相染 5–7%，
+    所以每一页的底色都轻微不同——不是装饰，是让你切页时立刻知道自己在哪一类资源里。
+  </div>
+  <div class="swatches">
+    <div class="sw-i"><b style="background:var(--c-cpu)"></b><dt>CPU</dt><dd>#12A6BA / #0C97AB</dd></div>
+    <div class="sw-i"><b style="background:var(--c-gpu)"></b><dt>GPU</dt><dd>#4E9A3D / #3F8632</dd></div>
+    <div class="sw-i"><b style="background:var(--c-mem)"></b><dt>内存</dt><dd>#8A6FE0 / #7A5CD4</dd></div>
+    <div class="sw-i"><b style="background:var(--c-disk)"></b><dt>磁盘</dt><dd>#C0762A / #B06A22</dd></div>
+    <div class="sw-i"><b style="background:var(--c-net)"></b><dt>网络</dt><dd>#C25086 / #B44579</dd></div>
+  </div>
+</section>
+
+<section class="blk">
+  <h2>要动的文件</h2>
+  <p class="sub">改动集中在采集侧与前端，查询、聚合、存储三层不受影响——它们对 series 的名字是无感的。</p>
+  <pre class="files"><b>crates/strixmaid-core/src/metrics/catalog.rs</b>
+  <i>删 28 个名字常量，加 GPU 一组，重写 CATALOG；给 MetricDef 加一个 `panel` 字段</i>
+  <i>（Cpu / Gpu / Memory / Disk / Network），前端按它分组，不再硬编码指标名前缀</i>
+
+<b>crates/strixmaid-core/src/metrics/collect/linux/</b>{cpu,mem,load,psi,disk,fs,net}<b>.rs</b>
+<b>crates/strixmaid-core/src/metrics/collect/macos/</b>{cpu,mem,load,fs,net}<b>.rs</b>
+  <i>停止产出删除项；合并项（cpu.irq / mem.cached / disk.iops / net.errors）在采集器里做加法</i>
+
+<b>crates/strixmaid-core/src/metrics/collect/linux/gpu.rs</b>  <i>← 新文件</i>
+  <i>probe()：枚举 /sys/class/drm/card*，能读到 gpu_busy_percent 才算可用</i>
+  <i>macos 侧同名文件用 IOKit 的 PerformanceStatistics 取，联调时不至于整页空白</i>
+
+<b>crates/strixmaid-types/src/system.rs</b> · <b>strixmaid-server/src/routes/system.rs</b>
+  <i>SystemInfo 补拓扑：CPU socket ↔ 逻辑核映射、块设备 ↔ 挂载点映射、网卡分组</i>
+  <i>—— 资源组全部靠这些静态字段，不新增任何 series</i>
+
+<b>crates/strixmaid-core/src/metrics/collect/linux/fs.rs</b>
+  <i>解析 /proc/self/mountinfo 的 major:minor，把挂载点映射到块设备名</i>
+
+<b>crates/strixmaid-core/src/metrics/collect/mod.rs</b> · <b>engine.rs</b> · <b>config.rs</b>
+  <i>default_collectors 去掉 per_core_detail 形参；MetricsConfig 删该字段并从 TOML 样例移除</i>
+
+<b>crates/strixmaid-core/src/providers/</b>（health）
+  <i>inode 用量作为一个新的健康检查项接进 /api/v1/system/health</i>
+
+<b>crates/strixmaid-core/src/store/</b>
+  <i>一次性迁移：按删除名单 DELETE FROM series + 五张桶表的级联清理，避免老库里留下永不更新的孤儿 series</i>
+
+<b>web/</b>  <i>前端从零起，uPlot 已验证可用（本页即实机绘制）</i>
+
+<b>docs/design.md</b> §6 §7.1 §7.2 §7.4 §11
+  <i>采集项表加 GPU 组、写进能力探测清单；删掉 per_core_detail 那段论证；</i>
+  <i>数据量从 200/100MB 改到 71/35MB；补一节资源组与聚合语义</i></pre>
+</section>
+
+<section class="blk">
+  <h2>需要你拍板</h2>
+  <ol class="open">
+    <li><b>NVIDIA 怎么接？这条撞上了「静态单二进制优先」。</b>
+      amdgpu 走 sysfs 是白捡的，主进程直读、零依赖。但 NVIDIA 的利用率只有 NVML（<code>libnvidia-ml.so</code>）给得出来，
+      而<b>静态链接 musl 的二进制根本不能 dlopen</b>。三条路：
+      (a) NVIDIA 探测与采集下放到 <code>strixmaid-helper</code>——它本来就是动态 glibc，符合原则四，但要给 IPC 加一组指标帧；
+      (b) 每 2 秒 fork 一次 <code>nvidia-smi --query-gpu</code>——零链接，但常驻拉起子进程的开销和味道都不好；
+      (c) P0 只支持 sysfs 能读到的（amdgpu / Intel），NVIDIA 直接标 unavailable。我倾向 (a)，但它是这一稿里唯一会动进程拓扑的改动。</li>
+    <li><b>load.5m / load.15m 真的删？</b>这是全表最有争议的一条。论证是「有历史曲线就不需要内核平滑」，成立；但 <code>load: 0.8 1.4 2.1</code> 三元组是运维的肌肉记忆，删了会被骂。折中方案是保留采集但只在 CPU 页角落显示一行文字、不进面板——那就还是 5 条。</li>
+    <li><b>disk.iops 合并会不会太狠？</b>读写分离的 IOPS 在诊断「写放大」时有用（写 IOPS 与写 bytes/秒 的比值）。合并后这个判断做不了。代价是每盘多一条。</li>
+    <li><b>cpu.freq 加不加？</b>加了任务管理器味道对，不加少一条依赖 <code>/sys</code> 且在虚拟机上大概率探测不到的指标。</li>
+    <li><b>老库怎么办？</b>建议启动时按名单硬删。留着的坏处是 <code>/api/v1/metrics/series</code> 会一直吐出永不更新的死 series，前端还得过滤。</li>
+  </ol>
+</section>
+
+</div>
+
+<script>/*! https://github.com/leeoniya/uPlot (v1.6.32) */
+var uPlot=function(){"use strict";const l="u-off",e="u-label",t="width",n="height",i="top",o="bottom",s="left",r="right",u="#000",a=u+"0",f="mousemove",c="mousedown",h="mouseup",d="mouseenter",p="mouseleave",m="dblclick",g="change",x="dppxchange",w="--",_="undefined"!=typeof window,b=_?document:null,v=_?window:null,k=_?navigator:null;let y,M;function S(l,e){if(null!=e){let t=l.classList;!t.contains(e)&&t.add(e)}}function T(l,e){let t=l.classList;t.contains(e)&&t.remove(e)}function E(l,e,t){l.style[e]=t+"px"}function z(l,e,t,n){let i=b.createElement(l);return null!=e&&S(i,e),null!=t&&t.insertBefore(i,n),i}function D(l,e){return z("div",l,e)}const P=new WeakMap;function A(e,t,n,i,o){let s="translate("+t+"px,"+n+"px)";s!=P.get(e)&&(e.style.transform=s,P.set(e,s),0>t||0>n||t>i||n>o?S(e,l):T(e,l))}const W=new WeakMap;function Y(l,e,t){let n=e+t;n!=W.get(l)&&(W.set(l,n),l.style.background=e,l.style.borderColor=t)}const C=new WeakMap;function H(l,e,t,n){let i=e+""+t;i!=C.get(l)&&(C.set(l,i),l.style.height=t+"px",l.style.width=e+"px",l.style.marginLeft=n?-e/2+"px":0,l.style.marginTop=n?-t/2+"px":0)}const F={passive:!0},R={...F,capture:!0};function G(l,e,t,n){e.addEventListener(l,t,n?R:F)}function I(l,e,t){e.removeEventListener(l,t,F)}function L(l,e,t,n){let i;t=t||0;let o=2147483647>=(n=n||e.length-1);for(;n-t>1;)i=o?t+n>>1:sl((t+n)/2),l>e[i]?t=i:n=i;return l-e[t]>e[n]-l?n:t}function O(l){return(e,t,n)=>{let i=-1,o=-1;for(let o=t;n>=o;o++)if(l(e[o])){i=o;break}for(let i=n;i>=t;i--)if(l(e[i])){o=i;break}return[i,o]}}_&&function l(){let e=devicePixelRatio;y!=e&&(y=e,M&&I(g,M,l),M=matchMedia(`(min-resolution: ${y-.001}dppx) and (max-resolution: ${y+.001}dppx)`),G(g,M,l),v.dispatchEvent(new CustomEvent(x)))}();const N=l=>null!=l,j=l=>null!=l&&l>0,U=O(N),V=O(j);function B(l,e,t,n){let i=hl(l),o=hl(e);l==e&&(-1==i?(l*=t,e/=t):(l/=t,e*=t));let s=10==t?dl:pl,r=1==o?ul:sl,u=(1==i?sl:ul)(s(ol(l))),a=r(s(ol(e))),f=cl(t,u),c=cl(t,a);return 10==t&&(0>u&&(f=Al(f,-u)),0>a&&(c=Al(c,-a))),n||2==t?(l=f*i,e=c*o):(l=Pl(l,f),e=Dl(e,c)),[l,e]}function $(l,e,t,n){let i=B(l,e,t,n);return 0==l&&(i[0]=0),0==e&&(i[1]=0),i}const J=.1,q={mode:3,pad:J},K={pad:0,soft:null,mode:0},X={min:K,max:K};function Z(l,e,t,n){return Ol(t)?ll(l,e,t):(K.pad=t,K.soft=n?0:null,K.mode=n?3:0,ll(l,e,X))}function Q(l,e){return null==l?e:l}function ll(l,e,t){let n=t.min,i=t.max,o=Q(n.pad,0),s=Q(i.pad,0),r=Q(n.hard,-gl),u=Q(i.hard,gl),a=Q(n.soft,gl),f=Q(i.soft,-gl),c=Q(n.mode,0),h=Q(i.mode,0),d=e-l,p=dl(d),m=fl(ol(l),ol(e)),g=dl(m),x=ol(g-p);(1e-24>d||x>10)&&(d=0,0!=l&&0!=e||(d=1e-24,2==c&&a!=gl&&(o=0),2==h&&f!=-gl&&(s=0)));let w=d||m||1e3,_=dl(w),b=cl(10,sl(_)),v=Al(Pl(l-w*(0==d?0==l?.1:1:o),b/10),24),k=a>l||1!=c&&(3!=c||v>a)&&(2!=c||a>v)?gl:a,y=fl(r,k>v&&l>=k?k:al(k,v)),M=Al(Dl(e+w*(0==d?0==e?.1:1:s),b/10),24),S=e>f||1!=h&&(3!=h||f>M)&&(2!=h||M>f)?-gl:f,T=al(u,M>S&&S>=e?S:fl(S,M));return y==T&&0==y&&(T=100),[y,T]}const el=new Intl.NumberFormat(_?k.language:"en-US"),tl=l=>el.format(l),nl=Math,il=nl.PI,ol=nl.abs,sl=nl.floor,rl=nl.round,ul=nl.ceil,al=nl.min,fl=nl.max,cl=nl.pow,hl=nl.sign,dl=nl.log10,pl=nl.log2,ml=(l,e=1)=>nl.asinh(l/e),gl=1/0;function xl(l){return 1+(0|dl((l^l>>31)-(l>>31)))}function wl(l,e,t){return al(fl(l,e),t)}function _l(l){return"function"==typeof l}function bl(l){return _l(l)?l:()=>l}const vl=l=>l,kl=(l,e)=>e,yl=()=>null,Ml=()=>!0,Sl=(l,e)=>l==e,Tl=/\.\d*?(?=9{6,}|0{6,})/gm,El=l=>{if(Il(l)||Wl.has(l))return l;const e=""+l,t=e.match(Tl);if(null==t)return l;let n=t[0].length-1;if(-1!=e.indexOf("e-")){let[l,t]=e.split("e");return+`${El(l)}e${t}`}return Al(l,n)};function zl(l,e){return El(Al(El(l/e))*e)}function Dl(l,e){return El(ul(El(l/e))*e)}function Pl(l,e){return El(sl(El(l/e))*e)}function Al(l,e=0){if(Il(l))return l;let t=10**e;return rl(l*t*(1+Number.EPSILON))/t}const Wl=new Map;function Yl(l){return((""+l).split(".")[1]||"").length}function Cl(l,e,t,n){let i=[],o=n.map(Yl);for(let s=e;t>s;s++){let e=ol(s),t=Al(cl(l,s),e);for(let r=0;n.length>r;r++){let u=10==l?+`${n[r]}e${s}`:n[r]*t,a=(0>s?e:0)+(o[r]>s?o[r]:0),f=10==l?u:Al(u,a);i.push(f),Wl.set(f,a)}}return i}const Hl={},Fl=[],Rl=[null,null],Gl=Array.isArray,Il=Number.isInteger;function Ll(l){return"string"==typeof l}function Ol(l){let e=!1;if(null!=l){let t=l.constructor;e=null==t||t==Object}return e}function Nl(l){return null!=l&&"object"==typeof l}const jl=Object.getPrototypeOf(Uint8Array),Ul="__proto__";function Vl(l,e=Ol){let t;if(Gl(l)){let n=l.find((l=>null!=l));if(Gl(n)||e(n)){t=Array(l.length);for(let n=0;l.length>n;n++)t[n]=Vl(l[n],e)}else t=l.slice()}else if(l instanceof jl)t=l.slice();else if(e(l)){t={};for(let n in l)n!=Ul&&(t[n]=Vl(l[n],e))}else t=l;return t}function Bl(l){let e=arguments;for(let t=1;e.length>t;t++){let n=e[t];for(let e in n)e!=Ul&&(Ol(l[e])?Bl(l[e],Vl(n[e])):l[e]=Vl(n[e]))}return l}function $l(l,e,t){for(let n,i=0,o=-1;e.length>i;i++){let s=e[i];if(s>o){for(n=s-1;n>=0&&null==l[n];)l[n--]=null;for(n=s+1;t>n&&null==l[n];)l[o=n++]=null}}}const Jl="undefined"==typeof queueMicrotask?l=>Promise.resolve().then(l):queueMicrotask,ql=["January","February","March","April","May","June","July","August","September","October","November","December"],Kl=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];function Xl(l){return l.slice(0,3)}const Zl=Kl.map(Xl),Ql=ql.map(Xl),le={MMMM:ql,MMM:Ql,WWWW:Kl,WWW:Zl};function ee(l){return(10>l?"0":"")+l}const te={YYYY:l=>l.getFullYear(),YY:l=>(l.getFullYear()+"").slice(2),MMMM:(l,e)=>e.MMMM[l.getMonth()],MMM:(l,e)=>e.MMM[l.getMonth()],MM:l=>ee(l.getMonth()+1),M:l=>l.getMonth()+1,DD:l=>ee(l.getDate()),D:l=>l.getDate(),WWWW:(l,e)=>e.WWWW[l.getDay()],WWW:(l,e)=>e.WWW[l.getDay()],HH:l=>ee(l.getHours()),H:l=>l.getHours(),h:l=>{let e=l.getHours();return 0==e?12:e>12?e-12:e},AA:l=>12>l.getHours()?"AM":"PM",aa:l=>12>l.getHours()?"am":"pm",a:l=>12>l.getHours()?"a":"p",mm:l=>ee(l.getMinutes()),m:l=>l.getMinutes(),ss:l=>ee(l.getSeconds()),s:l=>l.getSeconds(),fff:l=>function(l){return(10>l?"00":100>l?"0":"")+l}(l.getMilliseconds())};function ne(l,e){e=e||le;let t,n=[],i=/\{([a-z]+)\}|[^{]+/gi;for(;t=i.exec(l);)n.push("{"==t[0][0]?te[t[1]]:t[0]);return l=>{let t="";for(let i=0;n.length>i;i++)t+="string"==typeof n[i]?n[i]:n[i](l,e);return t}}const ie=(new Intl.DateTimeFormat).resolvedOptions().timeZone,oe=l=>l%1==0,se=[1,2,2.5,5],re=Cl(10,-32,0,se),ue=Cl(10,0,32,se),ae=ue.filter(oe),fe=re.concat(ue),ce="{YYYY}",he="\n"+ce,de="{M}/{D}",pe="\n"+de,me=pe+"/{YY}",ge="{aa}",xe="{h}:{mm}"+ge,we="\n"+xe,_e=":{ss}",be=null;function ve(l){let e=1e3*l,t=60*e,n=60*t,i=24*n,o=30*i,s=365*i;return[(1==l?Cl(10,0,3,se).filter(oe):Cl(10,-3,0,se)).concat([e,5*e,10*e,15*e,30*e,t,5*t,10*t,15*t,30*t,n,2*n,3*n,4*n,6*n,8*n,12*n,i,2*i,3*i,4*i,5*i,6*i,7*i,8*i,9*i,10*i,15*i,o,2*o,3*o,4*o,6*o,s,2*s,5*s,10*s,25*s,50*s,100*s]),[[s,ce,be,be,be,be,be,be,1],[28*i,"{MMM}",he,be,be,be,be,be,1],[i,de,he,be,be,be,be,be,1],[n,"{h}"+ge,me,be,pe,be,be,be,1],[t,xe,me,be,pe,be,be,be,1],[e,_e,me+" "+xe,be,pe+" "+xe,be,we,be,1],[l,_e+".{fff}",me+" "+xe,be,pe+" "+xe,be,we,be,1]],function(e){return(r,u,a,f,c,h)=>{let d=[],p=c>=s,m=c>=o&&s>c,g=e(a),x=Al(g*l,3),w=Pe(g.getFullYear(),p?0:g.getMonth(),m||p?1:g.getDate()),_=Al(w*l,3);if(m||p){let t=m?c/o:0,n=p?c/s:0,i=x==_?x:Al(Pe(w.getFullYear()+n,w.getMonth()+t,1)*l,3),r=new Date(rl(i/l)),u=r.getFullYear(),a=r.getMonth();for(let o=0;f>=i;o++){let s=Pe(u+n*o,a+t*o,1),r=s-e(Al(s*l,3));i=Al((+s+r)*l,3),i>f||d.push(i)}}else{let o=i>c?c:i,s=_+(sl(a)-sl(x))+Dl(x-_,o);d.push(s);let p=e(s),m=p.getHours()+p.getMinutes()/t+p.getSeconds()/n,g=c/n,w=h/r.axes[u]._space;for(;s=Al(s+c,1==l?0:3),f>=s;)if(g>1){let l=sl(Al(m+g,6))%24,t=e(s).getHours()-l;t>1&&(t=-1),s-=t*n,m=(m+g)%24,.7>Al((s-d[d.length-1])/c,3)*w||d.push(s)}else d.push(s)}return d}}]}const[ke,ye,Me]=ve(1),[Se,Te,Ee]=ve(.001);function ze(l,e){return l.map((l=>l.map(((t,n)=>0==n||8==n||null==t?t:e(1==n||0==l[8]?t:l[1]+t)))))}function De(l,e){return(t,n,i,o,s)=>{let r,u,a,f,c,h,d=e.find((l=>s>=l[0]))||e[e.length-1];return n.map((e=>{let t=l(e),n=t.getFullYear(),i=t.getMonth(),o=t.getDate(),s=t.getHours(),p=t.getMinutes(),m=t.getSeconds(),g=n!=r&&d[2]||i!=u&&d[3]||o!=a&&d[4]||s!=f&&d[5]||p!=c&&d[6]||m!=h&&d[7]||d[1];return r=n,u=i,a=o,f=s,c=p,h=m,g(t)}))}}function Pe(l,e,t){return new Date(l,e,t)}function Ae(l,e){return e(l)}function We(l,e){return(t,n,i,o)=>null==o?w:e(l(n))}Cl(2,-53,53,[1]);const Ye={show:!0,live:!0,isolate:!1,mount:()=>{},markers:{show:!0,width:2,stroke:function(l,e){let t=l.series[e];return t.width?t.stroke(l,e):t.points.width?t.points.stroke(l,e):null},fill:function(l,e){return l.series[e].fill(l,e)},dash:"solid"},idx:null,idxs:null,values:[]},Ce=[0,0];function He(l,e,t,n=!0){return l=>{0==l.button&&(!n||l.target==e)&&t(l)}}function Fe(l,e,t,n=!0){return l=>{(!n||l.target==e)&&t(l)}}const Re={show:!0,x:!0,y:!0,lock:!1,move:function(l,e,t){return Ce[0]=e,Ce[1]=t,Ce},points:{one:!1,show:function(l,e){let i=l.cursor.points,o=D(),s=i.size(l,e);E(o,t,s),E(o,n,s);let r=s/-2;E(o,"marginLeft",r),E(o,"marginTop",r);let u=i.width(l,e,s);return u&&E(o,"borderWidth",u),o},size:function(l,e){return l.series[e].points.size},width:0,stroke:function(l,e){let t=l.series[e].points;return t._stroke||t._fill},fill:function(l,e){let t=l.series[e].points;return t._fill||t._stroke}},bind:{mousedown:He,mouseup:He,click:He,dblclick:He,mousemove:Fe,mouseleave:Fe,mouseenter:Fe},drag:{setScale:!0,x:!0,y:!1,dist:0,uni:null,click:(l,e)=>{e.stopPropagation(),e.stopImmediatePropagation()},_x:!1,_y:!1},focus:{dist:(l,e,t,n,i)=>n-i,prox:-1,bias:0},hover:{skip:[void 0],prox:null,bias:0},left:-10,top:-10,idx:null,dataIdx:null,idxs:null,event:null},Ge={show:!0,stroke:"rgba(0,0,0,0.07)",width:2},Ie=Bl({},Ge,{filter:kl}),Le=Bl({},Ie,{size:10}),Oe=Bl({},Ge,{show:!1}),Ne='12px system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"',je="bold "+Ne,Ue={show:!0,scale:"x",stroke:u,space:50,gap:5,alignTo:1,size:50,labelGap:0,labelSize:30,labelFont:je,side:2,grid:Ie,ticks:Le,border:Oe,font:Ne,lineGap:1.5,rotate:0},Ve={show:!0,scale:"x",auto:!1,sorted:1,min:gl,max:-gl,idxs:[]};function Be(l,e){return e.map((l=>null==l?"":tl(l)))}function $e(l,e,t,n,i,o,s){let r=[],u=Wl.get(i)||0;for(let l=t=s?t:Al(Dl(t,i),u);n>=l;l=Al(l+i,u))r.push(Object.is(l,-0)?0:l);return r}function Je(l,e,t,n,i){const o=[],s=l.scales[l.axes[e].scale].log,r=sl((10==s?dl:pl)(t));i=cl(s,r),10==s&&(i=fe[L(i,fe)]);let u=t,a=i*s;10==s&&(a=fe[L(a,fe)]);do{o.push(u),u+=i,10!=s||Wl.has(u)||(u=Al(u,Wl.get(i))),a>u||(a=(i=u)*s,10==s&&(a=fe[L(a,fe)]))}while(n>=u);return o}function qe(l,e,t,n,i){let o=l.scales[l.axes[e].scale].asinh,s=n>o?Je(l,e,fl(o,t),n,i):[o],r=0>n||t>0?[]:[0];return(-o>t?Je(l,e,fl(o,-n),-t,i):[o]).reverse().map((l=>-l)).concat(r,s)}const Ke=/./,Xe=/[12357]/,Ze=/[125]/,Qe=/1/,lt=(l,e,t,n)=>l.map(((l,i)=>4==e&&0==l||i%n==0&&t.test(l.toExponential()[0>l?1:0])?l:null));function et(l,e,t){let n=l.axes[t],i=n.scale,o=l.scales[i],s=l.valToPos,r=n._space,u=s(10,i),a=s(9,i)-u<r?s(7,i)-u<r?s(5,i)-u<r?Qe:Ze:Xe:Ke;if(a==Qe){let l=ol(s(1,i)-u);if(r>l)return lt(e.slice().reverse(),o.distr,a,ul(r/l)).reverse()}return lt(e,o.distr,a,1)}function tt(l,e,t){let n=l.axes[t],i=n.scale,o=n._space,s=l.valToPos,r=ol(s(1,i)-s(2,i));return o>r?lt(e.slice().reverse(),3,Ke,ul(o/r)).reverse():e}function nt(l,e,t,n){return null==n?w:null==e?"":tl(e)}const it={show:!0,scale:"y",stroke:u,space:30,gap:5,alignTo:1,size:50,labelGap:0,labelSize:30,labelFont:je,side:3,grid:Ie,ticks:Le,border:Oe,font:Ne,lineGap:1.5,rotate:0},ot={scale:null,auto:!0,sorted:0,min:gl,max:-gl},st=(l,e,t,n,i)=>i,rt={show:!0,auto:!0,sorted:0,gaps:st,alpha:1,facets:[Bl({},ot,{scale:"x"}),Bl({},ot,{scale:"y"})]},ut={scale:"y",auto:!0,sorted:0,show:!0,spanGaps:!1,gaps:st,alpha:1,points:{show:function(l,e){let{scale:t,idxs:n}=l.series[0],i=l._data[0],o=l.valToPos(i[n[0]],t,!0),s=l.valToPos(i[n[1]],t,!0);return ol(s-o)/(l.series[e].points.space*y)>=n[1]-n[0]},filter:null},values:null,min:gl,max:-gl,idxs:[],path:null,clip:null};function at(l,e,t){return t/10}const ft={time:!0,auto:!0,distr:1,log:10,asinh:1,min:null,max:null,dir:1,ori:0},ct=Bl({},ft,{time:!1,ori:1}),ht={};function dt(l){let e=ht[l];return e||(e={key:l,plots:[],sub(l){e.plots.push(l)},unsub(l){e.plots=e.plots.filter((e=>e!=l))},pub(l,t,n,i,o,s,r){for(let u=0;e.plots.length>u;u++)e.plots[u]!=t&&e.plots[u].pub(l,t,n,i,o,s,r)}},null!=l&&(ht[l]=e)),e}function pt(l,e,t){const n=l.mode,i=l.series[e],o=2==n?l._data[e]:l._data,s=l.scales,r=l.bbox;let u=o[0],a=2==n?o[1]:o[e],f=2==n?s[i.facets[0].scale]:s[l.series[0].scale],c=2==n?s[i.facets[1].scale]:s[i.scale],h=r.left,d=r.top,p=r.width,m=r.height,g=l.valToPosH,x=l.valToPosV;return 0==f.ori?t(i,u,a,f,c,g,x,h,d,p,m,kt,Mt,Tt,zt,Pt):t(i,u,a,f,c,x,g,d,h,m,p,yt,St,Et,Dt,At)}function mt(l,e){let t=0,n=0,i=Q(l.bands,Fl);for(let l=0;i.length>l;l++){let o=i[l];o.series[0]==e?t=o.dir:o.series[1]==e&&(n|=1==o.dir?1:2)}return[t,1==n?-1:2==n?1:3==n?2:0]}function gt(l,e,t,n,i){let o=l.series[e],s=l.scales[2==l.mode?o.facets[1].scale:o.scale];return-1==i?s.min:1==i?s.max:3==s.distr?1==s.dir?s.min:s.max:0}function xt(l,e,t,n,i,o){return pt(l,e,((l,e,s,r,u,a,f,c,h,d,p)=>{let m=l.pxRound;const g=0==r.ori?Mt:St;let x,w;1==r.dir*(0==r.ori?1:-1)?(x=t,w=n):(x=n,w=t);let _=m(a(e[x],r,d,c)),b=m(f(s[x],u,p,h)),v=m(a(e[w],r,d,c)),k=m(f(1==o?u.max:u.min,u,p,h)),y=new Path2D(i);return g(y,v,k),g(y,_,k),g(y,_,b),y}))}function wt(l,e,t,n,i,o){let s=null;if(l.length>0){s=new Path2D;const r=0==e?Tt:Et;let u=t;for(let e=0;l.length>e;e++){let t=l[e];if(t[1]>t[0]){let l=t[0]-u;l>0&&r(s,u,n,l,n+o),u=t[1]}}let a=t+i-u,f=10;a>0&&r(s,u,n-f/2,a,n+o+f)}return s}function _t(l,e,t,n,i,o,s){let r=[],u=l.length;for(let a=1==i?t:n;a>=t&&n>=a;a+=i)if(null===e[a]){let f=a,c=a;if(1==i)for(;++a<=n&&null===e[a];)c=a;else for(;--a>=t&&null===e[a];)c=a;let h=o(l[f]),d=c==f?h:o(l[c]),p=f-i;h=s>0||0>p||p>=u?h:o(l[p]);let m=c+i;d=0>s||0>m||m>=u?d:o(l[m]),h>d||r.push([h,d])}return r}function bt(l){return 0==l?vl:1==l?rl:e=>zl(e,l)}function vt(l){let e=0==l?kt:yt,t=0==l?(l,e,t,n,i,o)=>{l.arcTo(e,t,n,i,o)}:(l,e,t,n,i,o)=>{l.arcTo(t,e,i,n,o)},n=0==l?(l,e,t,n,i)=>{l.rect(e,t,n,i)}:(l,e,t,n,i)=>{l.rect(t,e,i,n)};return(l,i,o,s,r,u=0,a=0)=>{0==u&&0==a?n(l,i,o,s,r):(u=al(u,s/2,r/2),a=al(a,s/2,r/2),e(l,i+u,o),t(l,i+s,o,i+s,o+r,u),t(l,i+s,o+r,i,o+r,a),t(l,i,o+r,i,o,a),t(l,i,o,i+s,o,u),l.closePath())}}const kt=(l,e,t)=>{l.moveTo(e,t)},yt=(l,e,t)=>{l.moveTo(t,e)},Mt=(l,e,t)=>{l.lineTo(e,t)},St=(l,e,t)=>{l.lineTo(t,e)},Tt=vt(0),Et=vt(1),zt=(l,e,t,n,i,o)=>{l.arc(e,t,n,i,o)},Dt=(l,e,t,n,i,o)=>{l.arc(t,e,n,i,o)},Pt=(l,e,t,n,i,o,s)=>{l.bezierCurveTo(e,t,n,i,o,s)},At=(l,e,t,n,i,o,s)=>{l.bezierCurveTo(t,e,i,n,s,o)};function Wt(){return(l,e,t,n,i)=>pt(l,e,((e,o,s,r,u,a,f,c,h,d,p)=>{let m,g,{pxRound:x,points:w}=e;0==r.ori?(m=kt,g=zt):(m=yt,g=Dt);const _=Al(w.width*y,3);let b=(w.size-w.width)/2*y,v=Al(2*b,3),k=new Path2D,M=new Path2D,{left:S,top:T,width:E,height:z}=l.bbox;Tt(M,S-v,T-v,E+2*v,z+2*v);const D=l=>{if(null!=s[l]){let e=x(a(o[l],r,d,c)),t=x(f(s[l],u,p,h));m(k,e+b,t),g(k,e,t,b,0,2*il)}};if(i)i.forEach(D);else for(let l=t;n>=l;l++)D(l);return{stroke:_>0?k:null,fill:k,clip:M,flags:3}}))}function Yt(l){return(e,t,n,i,o,s)=>{n!=i&&(o!=n&&s!=n&&l(e,t,n),o!=i&&s!=i&&l(e,t,i),l(e,t,s))}}const Ct=Yt(Mt),Ht=Yt(St);function Ft(l){const e=Q(l?.alignGaps,0);return(l,t,n,i)=>pt(l,t,((o,s,r,u,a,f,c,h,d,p,m)=>{[n,i]=U(r,n,i);let g,x,w=o.pxRound,_=l=>w(f(l,u,p,h)),b=l=>w(c(l,a,m,d));0==u.ori?(g=Mt,x=Ct):(g=St,x=Ht);const v=u.dir*(0==u.ori?1:-1),k={stroke:new Path2D,fill:null,clip:null,band:null,gaps:null,flags:1},y=k.stroke;let M=!1;if(i-n<4*p)for(let l=1==v?n:i;l>=n&&i>=l;l+=v){let e=r[l];null===e?M=!0:null!=e&&g(y,_(s[l]),b(e))}else{let e,t,o,a=e=>l.posToVal(e,u.key,!0),f=null,c=null,h=_(s[1==v?n:i]),d=_(s[n]),p=_(s[i]),m=a(1==v?d+1:p-1);for(let l=1==v?n:i;l>=n&&i>=l;l+=v){let n=s[l],i=(1==v?m>n:n>m)?h:_(n),o=r[l];i==h?null!=o?(t=o,null==f?(g(y,i,b(t)),e=f=c=t):f>t?f=t:t>c&&(c=t)):null===o&&(M=!0):(null!=f&&x(y,h,b(f),b(c),b(e),b(t)),null!=o?(t=o,g(y,i,b(t)),f=c=e=t):(f=c=null,null===o&&(M=!0)),h=i,m=a(h+v))}null!=f&&f!=c&&o!=h&&x(y,h,b(f),b(c),b(e),b(t))}let[S,T]=mt(l,t);if(null!=o.fill||0!=S){let e=k.fill=new Path2D(y),r=b(o.fillTo(l,t,o.min,o.max,S)),u=_(s[n]),a=_(s[i]);-1==v&&([a,u]=[u,a]),g(e,a,r),g(e,u,r)}if(!o.spanGaps){let a=[];M&&a.push(..._t(s,r,n,i,v,_,e)),k.gaps=a=o.gaps(l,t,n,i,a),k.clip=wt(a,u.ori,h,d,p,m)}return 0!=T&&(k.band=2==T?[xt(l,t,n,i,y,-1),xt(l,t,n,i,y,1)]:xt(l,t,n,i,y,T)),k}))}function Rt(l,e,t,n,i,o,s=gl){if(l.length>1){let r=null;for(let u=0,a=1/0;l.length>u;u++)if(void 0!==e[u]){if(null!=r){let e=ol(l[u]-l[r]);a>e&&(a=e,s=ol(t(l[u],n,i,o)-t(l[r],n,i,o)))}r=u}}return s}function Gt(l,e,t,n,i){const o=l.length;if(2>o)return null;const s=new Path2D;if(t(s,l[0],e[0]),2==o)n(s,l[1],e[1]);else{let t=Array(o),n=Array(o-1),r=Array(o-1),u=Array(o-1);for(let t=0;o-1>t;t++)r[t]=e[t+1]-e[t],u[t]=l[t+1]-l[t],n[t]=r[t]/u[t];t[0]=n[0];for(let l=1;o-1>l;l++)0===n[l]||0===n[l-1]||n[l-1]>0!=n[l]>0?t[l]=0:(t[l]=3*(u[l-1]+u[l])/((2*u[l]+u[l-1])/n[l-1]+(u[l]+2*u[l-1])/n[l]),isFinite(t[l])||(t[l]=0));t[o-1]=n[o-2];for(let n=0;o-1>n;n++)i(s,l[n]+u[n]/3,e[n]+t[n]*u[n]/3,l[n+1]-u[n]/3,e[n+1]-t[n+1]*u[n]/3,l[n+1],e[n+1])}return s}const It=new Set;function Lt(){for(let l of It)l.syncRect(!0)}_&&(G("resize",v,Lt),G("scroll",v,Lt,!0),G(x,v,(()=>{en.pxRatio=y})));const Ot=Ft(),Nt=Wt();function jt(l,e,t,n){return(n?[l[0],l[1]].concat(l.slice(2)):[l[0]].concat(l.slice(1))).map(((l,n)=>Ut(l,n,e,t)))}function Ut(l,e,t,n){return Bl({},0==e?t:n,l)}function Vt(l,e,t){return null==e?Rl:[e,t]}const Bt=Vt;function $t(l,e,t){return null==e?Rl:Z(e,t,J,!0)}function Jt(l,e,t,n){return null==e?Rl:B(e,t,l.scales[n].log,!1)}const qt=Jt;function Kt(l,e,t,n){return null==e?Rl:$(e,t,l.scales[n].log,!1)}const Xt=Kt;function Zt(l,e,t,n,i){let o=fl(xl(l),xl(e)),s=e-l,r=L(i/n*s,t);do{let l=t[r],e=n*l/s;if(e>=i&&17>=o+(5>l?Wl.get(l):0))return[l,e]}while(++r<t.length);return[0,0]}function Qt(l){let e,t;return[l=l.replace(/(\d+)px/,((l,n)=>(e=rl((t=+n)*y))+"px")),e,t]}function ln(l){l.show&&[l.font,l.labelFont].forEach((l=>{let e=Al(l[2]*y,1);l[0]=l[0].replace(/[0-9.]+px/,e+"px"),l[1]=e}))}function en(u,g,_){const k={mode:Q(u.mode,1)},M=k.mode;function P(l,e,t,n){let i=e.valToPct(l);return n+t*(-1==e.dir?1-i:i)}function W(l,e,t,n){let i=e.valToPct(l);return n+t*(-1==e.dir?i:1-i)}function C(l,e,t,n){return 0==e.ori?P(l,e,t,n):W(l,e,t,n)}k.valToPosH=P,k.valToPosV=W;let F=!1;k.status=0;const R=k.root=D("uplot");null!=u.id&&(R.id=u.id),S(R,u.class),u.title&&(D("u-title",R).textContent=u.title);const O=z("canvas"),K=k.ctx=O.getContext("2d"),X=D("u-wrap",R);G("click",X,(l=>{l.target===el&&(Nn!=Gn||jn!=In)&&Zn.click(k,l)}),!0);const ll=k.under=D("u-under",X);X.appendChild(O);const el=k.over=D("u-over",X),tl=+Q((u=Vl(u)).pxAlign,1),sl=bt(tl);(u.plugins||[]).forEach((l=>{l.opts&&(u=l.opts(k,u)||u)}));const hl=u.ms||.001,pl=k.series=1==M?jt(u.series||[],Ve,ut,!1):function(l,e){return l.map(((l,t)=>0==t?{}:Bl({},e,l)))}(u.series||[null],rt),xl=k.axes=jt(u.axes||[],Ue,it,!0),vl=k.scales={},Tl=k.bands=u.bands||[];Tl.forEach((l=>{l.fill=bl(l.fill||null),l.dir=Q(l.dir,-1)}));const El=2==M?pl[1].facets[0].scale:pl[0].scale,Dl={axes:function(){for(let l=0;xl.length>l;l++){let e=xl[l];if(!e.show||!e._show)continue;let t,n,u=e.side,a=u%2,f=e.stroke(k,l),c=0==u||3==u?-1:1,[h,d]=e._found;if(null!=e.label){let s=rl((e._lpos+e.labelGap*c)*y);_n(e.labelFont[0],f,"center",2==u?i:o),K.save(),1==a?(t=n=0,K.translate(s,rl(lt+st/2)),K.rotate((3==u?-il:il)/2)):(t=rl(Qe+ot/2),n=s);let r=_l(e.label)?e.label(k,l,h,d):e.label;K.fillText(r,t,n),K.restore()}if(0==d)continue;let p=vl[e.scale],m=0==a?ot:st,g=0==a?Qe:lt,x=e._splits,w=2==p.distr?x.map((l=>pn[l])):x,_=2==p.distr?pn[x[1]]-pn[x[0]]:h,b=e.ticks,v=e.border,M=b.show?b.size:0,S=rl(M*y),T=rl((2==e.alignTo?e._size-M-e.gap:e.gap)*y),E=e._rotate*-il/180,z=sl(e._pos*y),D=z+(S+T)*c;n=0==a?D:0,t=1==a?D:0,_n(e.font[0],f,1==e.align?s:2==e.align?r:E>0?s:0>E?r:0==a?"center":3==u?r:s,E||1==a?"middle":2==u?i:o);let P=e.font[1]*e.lineGap,A=x.map((l=>sl(C(l,p,m,g)))),W=e._values;for(let l=0;W.length>l;l++){let e=W[l];if(null!=e){0==a?t=A[l]:n=A[l],e=""+e;let i=-1==e.indexOf("\n")?[e]:e.split(/\n/gm);for(let l=0;i.length>l;l++){let e=i[l];E?(K.save(),K.translate(t,n+l*P),K.rotate(E),K.fillText(e,0,0),K.restore()):K.fillText(e,t,n+l*P)}}}b.show&&zn(A,b.filter(k,w,l,d,_),a,u,z,S,Al(b.width*y,3),b.stroke(k,l),b.dash,b.cap);let Y=e.grid;Y.show&&zn(A,Y.filter(k,w,l,d,_),a,0==a?2:1,0==a?lt:Qe,0==a?st:ot,Al(Y.width*y,3),Y.stroke(k,l),Y.dash,Y.cap),v.show&&zn([z],[1],0==a?1:0,0==a?1:2,1==a?lt:Qe,1==a?st:ot,Al(v.width*y,3),v.stroke(k,l),v.dash,v.cap)}Ci("drawAxes")},series:function(){if(Gt>0){let l=pl.some((l=>l._focus))&&dn!=Tt.alpha;l&&(K.globalAlpha=dn=Tt.alpha),pl.forEach(((l,e)=>{if(e>0&&l.show&&(kn(e,!1),kn(e,!0),null==l._paths)){let t=dn;dn!=l.alpha&&(K.globalAlpha=dn=l.alpha);let n=2==M?[0,g[e][0].length-1]:function(l){let e=wl(Lt-1,0,Gt-1),t=wl(en+1,0,Gt-1);for(;null==l[e]&&e>0;)e--;for(;null==l[t]&&Gt-1>t;)t++;return[e,t]}(g[e]);l._paths=l.paths(k,e,n[0],n[1]),dn!=t&&(K.globalAlpha=dn=t)}})),pl.forEach(((l,e)=>{if(e>0&&l.show){let t=dn;dn!=l.alpha&&(K.globalAlpha=dn=l.alpha),null!=l._paths&&yn(e,!1);{let t=null!=l._paths?l._paths.gaps:null,n=l.points.show(k,e,Lt,en,t),i=l.points.filter(k,e,n,t);(n||i)&&(l.points._paths=l.points.paths(k,e,Lt,en,i),yn(e,!0))}dn!=t&&(K.globalAlpha=dn=t),Ci("drawSeries",e)}})),l&&(K.globalAlpha=dn=1)}}},Pl=(u.drawOrder||["axes","series"]).map((l=>Dl[l]));function Cl(l){const e=3==l.distr?e=>dl(e>0?e:l.clamp(k,e,l.min,l.max,l.key)):4==l.distr?e=>ml(e,l.asinh):100==l.distr?e=>l.fwd(e):l=>l;return t=>{let n=e(t),{_min:i,_max:o}=l;return(n-i)/(o-i)}}function Il(l){let e=vl[l];if(null==e){let t=(u.scales||Hl)[l]||Hl;if(null!=t.from){Il(t.from);let e=Bl({},vl[t.from],t,{key:l});e.valToPct=Cl(e),vl[l]=e}else{e=vl[l]=Bl({},l==El?ft:ct,t),e.key=l;let n=e.time,i=e.range,o=Gl(i);if((l!=El||2==M&&!n)&&(!o||null!=i[0]&&null!=i[1]||(i={min:null==i[0]?q:{mode:1,hard:i[0],soft:i[0]},max:null==i[1]?q:{mode:1,hard:i[1],soft:i[1]}},o=!1),!o&&Ol(i))){let l=i;i=(e,t,n)=>null==t?Rl:Z(t,n,l)}e.range=bl(i||(n?Bt:l==El?3==e.distr?qt:4==e.distr?Xt:Vt:3==e.distr?Jt:4==e.distr?Kt:$t)),e.auto=bl(!o&&e.auto),e.clamp=bl(e.clamp||at),e._min=e._max=null,e.valToPct=Cl(e)}}}Il("x"),Il("y"),1==M&&pl.forEach((l=>{Il(l.scale)})),xl.forEach((l=>{Il(l.scale)}));for(let l in u.scales)Il(l);const jl=vl[El],Ul=jl.distr;let $l,ql;0==jl.ori?(S(R,"u-hz"),$l=P,ql=W):(S(R,"u-vt"),$l=W,ql=P);const Kl={};for(let l in vl){let e=vl[l];null==e.min&&null==e.max||(Kl[l]={min:e.min,max:e.max},e.min=e.max=null)}const Xl=u.tzDate||(l=>new Date(rl(l/hl))),Zl=u.fmtDate||ne,Ql=1==hl?Me(Xl):Ee(Xl),le=De(Xl,ze(1==hl?ye:Te,Zl)),ee=We(Xl,Ae("{YYYY}-{MM}-{DD} {h}:{mm}{aa}",Zl)),te=[],ie=k.legend=Bl({},Ye,u.legend),oe=k.cursor=Bl({},Re,{drag:{y:2==M}},u.cursor),se=ie.show,re=oe.show,ue=ie.markers;let ce,he,de;ie.idxs=te,ue.width=bl(ue.width),ue.dash=bl(ue.dash),ue.stroke=bl(ue.stroke),ue.fill=bl(ue.fill);let pe,me=[],ge=[],xe=!1,we={};if(ie.live){const l=pl[1]?pl[1].values:null;xe=null!=l,pe=xe?l(k,1,0):{_:0};for(let l in pe)we[l]=w}if(se)if(ce=z("table","u-legend",R),de=z("tbody",null,ce),ie.mount(k,ce),xe){he=z("thead",null,ce,de);let l=z("tr",null,he);for(var _e in z("th",null,l),pe)z("th",e,l).textContent=_e}else S(ce,"u-inline"),ie.live&&S(ce,"u-live");const be={show:!0},ve={show:!1},Pe=new Map;function Ce(l,e,t,n=!0){const i=Pe.get(e)||{},o=oe.bind[l](k,e,t,n);o&&(G(l,e,i[l]=o),Pe.set(e,i))}function He(l,e){const t=Pe.get(e)||{};for(let n in t)null!=l&&n!=l||(I(n,e,t[n]),delete t[n]);null==l&&Pe.delete(e)}let Fe=0,Ge=0,Ie=0,Le=0,Oe=0,Ne=0,je=Oe,Ke=Ne,Xe=Ie,Ze=Le,Qe=0,lt=0,ot=0,st=0;k.bbox={};let ht=!1,pt=!1,mt=!1,xt=!1,wt=!1,_t=!1;function vt(l,e,t){(t||l!=k.width||e!=k.height)&&kt(l,e),An(!1),mt=!0,pt=!0,Jn()}function kt(l,e){k.width=Fe=Ie=l,k.height=Ge=Le=e,Oe=Ne=0,function(){let l=!1,e=!1,t=!1,n=!1;xl.forEach((i=>{if(i.show&&i._show){let{side:o,_size:s}=i,r=s+(null!=i.label?i.labelSize:0);r>0&&(o%2?(Ie-=r,3==o?(Oe+=r,n=!0):t=!0):(Le-=r,0==o?(Ne+=r,l=!0):e=!0))}})),Ct[0]=l,Ct[1]=t,Ct[2]=e,Ct[3]=n,Ie-=Rt[1]+Rt[3],Oe+=Rt[3],Le-=Rt[2]+Rt[0],Ne+=Rt[0]}(),function(){let l=Oe+Ie,e=Ne+Le,t=Oe,n=Ne;function i(i,o){switch(i){case 1:return l+=o,l-o;case 2:return e+=o,e-o;case 3:return t-=o,t+o;case 0:return n-=o,n+o}}xl.forEach((l=>{if(l.show&&l._show){let e=l.side;l._pos=i(e,l._size),null!=l.label&&(l._lpos=i(e,l.labelSize))}}))}();let t=k.bbox;Qe=t.left=zl(Oe*y,.5),lt=t.top=zl(Ne*y,.5),ot=t.width=zl(Ie*y,.5),st=t.height=zl(Le*y,.5)}const yt=3;if(k.setSize=function({width:l,height:e}){vt(l,e)},null==oe.dataIdx){let l=oe.hover,e=l.skip=new Set(l.skip??[]);e.add(void 0);let t=l.prox=bl(l.prox),n=l.bias??=0;oe.dataIdx=(l,i,o,s)=>{if(0==i)return o;let r=o,u=t(l,i,o,s)??gl,a=u>=0&&gl>u,f=0==jl.ori?Ie:Le,c=oe.left,h=g[0],d=g[i];if(e.has(d[o])){r=null;let l,t=null,i=null;if(0==n||-1==n)for(l=o;null==t&&l-- >0;)e.has(d[l])||(t=l);if(0==n||1==n)for(l=o;null==i&&l++<d.length;)e.has(d[l])||(i=l);if(null!=t||null!=i)if(a){let l=c-(null==t?-1/0:$l(h[t],jl,f,0)),e=(null==i?1/0:$l(h[i],jl,f,0))-c;l>e?e>u||(r=i):l>u||(r=t)}else r=null==i?t:null==t||o-t>i-o?i:t}else a&&ol(c-$l(h[o],jl,f,0))>u&&(r=null);return r}}const Mt=l=>{oe.event=l};oe.idxs=te,oe._lock=!1;let St=oe.points;St.show=bl(St.show),St.size=bl(St.size),St.stroke=bl(St.stroke),St.width=bl(St.width),St.fill=bl(St.fill);const Tt=k.focus=Bl({},u.focus||{alpha:.3},oe.focus),Et=Tt.prox>=0,zt=Et&&St.one;let Dt=[],Pt=[],At=[];function Wt(l,e){let t=St.show(k,e);if(t instanceof HTMLElement)return S(t,"u-cursor-pt"),S(t,l.class),A(t,-10,-10,Ie,Le),el.insertBefore(t,Dt[e]),t}function Yt(t,n){if(1==M||n>0){let l=1==M&&vl[t.scale].time,e=t.value;t.value=l?Ll(e)?We(Xl,Ae(e,Zl)):e||ee:e||nt,t.label=t.label||(l?"Time":"Value")}if(zt||n>0){t.width=null==t.width?1:t.width,t.paths=t.paths||Ot||yl,t.fillTo=bl(t.fillTo||gt),t.pxAlign=+Q(t.pxAlign,tl),t.pxRound=bt(t.pxAlign),t.stroke=bl(t.stroke||null),t.fill=bl(t.fill||null),t._stroke=t._fill=t._paths=t._focus=null;let l=function(l){return Al(1*(3+2*(l||1)),3)}(fl(1,t.width)),e=t.points=Bl({},{size:l,width:fl(1,.2*l),stroke:t.stroke,space:2*l,paths:Nt,_stroke:null,_fill:null},t.points);e.show=bl(e.show),e.filter=bl(e.filter),e.fill=bl(e.fill),e.stroke=bl(e.stroke),e.paths=bl(e.paths),e.pxAlign=t.pxAlign}if(se){let i=function(t,n){if(0==n&&(xe||!ie.live||2==M))return Rl;let i=[],o=z("tr","u-series",de,de.childNodes[n]);S(o,t.class),t.show||S(o,l);let s=z("th",null,o);if(ue.show){let l=D("u-marker",s);if(n>0){let e=ue.width(k,n);e&&(l.style.border=e+"px "+ue.dash(k,n)+" "+ue.stroke(k,n)),l.style.background=ue.fill(k,n)}}let r=D(e,s);for(var u in t.label instanceof HTMLElement?r.appendChild(t.label):r.textContent=t.label,n>0&&(ue.show||(r.style.color=t.width>0?ue.stroke(k,n):ue.fill(k,n)),Ce("click",s,(l=>{if(oe._lock)return;Mt(l);let e=pl.indexOf(t);if((l.ctrlKey||l.metaKey)!=ie.isolate){let l=pl.some(((l,t)=>t>0&&t!=e&&l.show));pl.forEach(((t,n)=>{n>0&&oi(n,l?n==e?be:ve:be,!0,Fi.setSeries)}))}else oi(e,{show:!t.show},!0,Fi.setSeries)}),!1),Et&&Ce(d,s,(l=>{oe._lock||(Mt(l),oi(pl.indexOf(t),ai,!0,Fi.setSeries))}),!1)),pe){let l=z("td","u-value",o);l.textContent="--",i.push(l)}return[o,i]}(t,n);me.splice(n,0,i[0]),ge.splice(n,0,i[1]),ie.values.push(null)}if(re){te.splice(n,0,null);let l=null;zt?0==n&&(l=Wt(t,n)):n>0&&(l=Wt(t,n)),Dt.splice(n,0,l),Pt.splice(n,0,0),At.splice(n,0,0)}Ci("addSeries",n)}k.addSeries=function(l,e){e=null==e?pl.length:e,l=1==M?Ut(l,e,Ve,ut):Ut(l,e,{},rt),pl.splice(e,0,l),Yt(pl[e],e)},k.delSeries=function(l){if(pl.splice(l,1),se){ie.values.splice(l,1),ge.splice(l,1);let e=me.splice(l,1)[0];He(null,e.firstChild),e.remove()}re&&(te.splice(l,1),Dt.splice(l,1)[0].remove(),Pt.splice(l,1),At.splice(l,1)),Ci("delSeries",l)};const Ct=[!1,!1,!1,!1];function Ht(l,e,t){let[n,i,o,s]=t,r=e%2,u=0;return 0==r&&(s||i)&&(u=0==e&&!n||2==e&&!o?rl(Ue.size/3):0),1==r&&(n||o)&&(u=1==e&&!i||3==e&&!s?rl(it.size/2):0),u}const Ft=k.padding=(u.padding||[Ht,Ht,Ht,Ht]).map((l=>bl(Q(l,Ht)))),Rt=k._padding=Ft.map(((l,e)=>l(k,e,Ct,0)));let Gt,Lt=null,en=null;const tn=1==M?pl[0].idxs:null;let nn,on,sn,rn,un,an,fn,cn,hn,dn,pn=null,mn=!1;function gn(l,e){if(k.data=k._data=g=null==l?[]:l,2==M){Gt=0;for(let l=1;pl.length>l;l++)Gt+=g[l][0].length}else{0==g.length&&(k.data=k._data=g=[[]]),pn=g[0],Gt=pn.length;let l=g;if(2==Ul){l=g.slice();let e=l[0]=Array(Gt);for(let l=0;Gt>l;l++)e[l]=l}k._data=g=l}if(An(!0),Ci("setData"),2==Ul&&(mt=!0),!1!==e){let l=jl;l.auto(k,mn)?xn():ii(El,l.min,l.max),xt=xt||oe.left>=0,_t=!0,Jn()}}function xn(){let l,e;mn=!0,1==M&&(Gt>0?(Lt=tn[0]=0,en=tn[1]=Gt-1,l=g[0][Lt],e=g[0][en],2==Ul?(l=Lt,e=en):l==e&&(3==Ul?[l,e]=B(l,l,jl.log,!1):4==Ul?[l,e]=$(l,l,jl.log,!1):jl.time?e=l+rl(86400/hl):[l,e]=Z(l,e,J,!0))):(Lt=tn[0]=l=null,en=tn[1]=e=null)),ii(El,l,e)}function wn(l,e,t,n,i,o){l??=a,t??=Fl,n??="butt",i??=a,o??="round",l!=nn&&(K.strokeStyle=nn=l),i!=on&&(K.fillStyle=on=i),e!=sn&&(K.lineWidth=sn=e),o!=un&&(K.lineJoin=un=o),n!=an&&(K.lineCap=an=n),t!=rn&&K.setLineDash(rn=t)}function _n(l,e,t,n){e!=on&&(K.fillStyle=on=e),l!=fn&&(K.font=fn=l),t!=cn&&(K.textAlign=cn=t),n!=hn&&(K.textBaseline=hn=n)}function bn(l,e,t,n,i=0){if(n.length>0&&l.auto(k,mn)&&(null==e||null==e.min)){let e=Q(Lt,0),o=Q(en,n.length-1),s=null==t.min?function(l,e,t,n=0,i=!1){let o=i?V:U,s=i?j:N;[e,t]=o(l,e,t);let r=l[e],u=l[e];if(e>-1)if(1==n)r=l[e],u=l[t];else if(-1==n)r=l[t],u=l[e];else for(let n=e;t>=n;n++){let e=l[n];s(e)&&(r>e?r=e:e>u&&(u=e))}return[r??gl,u??-gl]}(n,e,o,i,3==l.distr):[t.min,t.max];l.min=al(l.min,t.min=s[0]),l.max=fl(l.max,t.max=s[1])}}k.setData=gn;const vn={min:null,max:null};function kn(l,e){let t=e?pl[l].points:pl[l];t._stroke=t.stroke(k,l),t._fill=t.fill(k,l)}function yn(l,e){let t=e?pl[l].points:pl[l],{stroke:n,fill:i,clip:o,flags:s,_stroke:r=t._stroke,_fill:u=t._fill,_width:a=t.width}=t._paths;a=Al(a*y,3);let f=null,c=a%2/2;e&&null==u&&(u=a>0?"#fff":r);let h=1==t.pxAlign&&c>0;if(h&&K.translate(c,c),!e){let l=Qe-a/2,e=lt-a/2,t=ot+a,n=st+a;f=new Path2D,f.rect(l,e,t,n)}e?Sn(r,a,t.dash,t.cap,u,n,i,s,o):function(l,e,t,n,i,o,s,r,u,a,f){let c=!1;0!=u&&Tl.forEach(((h,d)=>{if(h.series[0]==l){let l,p=pl[h.series[1]],m=g[h.series[1]],x=(p._paths||Hl).band;Gl(x)&&(x=1==h.dir?x[0]:x[1]);let w=null;p.show&&x&&function(l,e,t){for(e=Q(e,0),t=Q(t,l.length-1);t>=e;){if(null!=l[e])return!0;e++}return!1}(m,Lt,en)?(w=h.fill(k,d)||o,l=p._paths.clip):x=null,Sn(e,t,n,i,w,s,r,u,a,f,l,x),c=!0}})),c||Sn(e,t,n,i,o,s,r,u,a,f)}(l,r,a,t.dash,t.cap,u,n,i,s,f,o),h&&K.translate(-c,-c)}const Mn=3;function Sn(l,e,t,n,i,o,s,r,u,a,f,c){wn(l,e,t,n,i),(u||a||c)&&(K.save(),u&&K.clip(u),a&&K.clip(a)),c?(r&Mn)==Mn?(K.clip(c),f&&K.clip(f),En(i,s),Tn(l,o,e)):2&r?(En(i,s),K.clip(c),Tn(l,o,e)):1&r&&(K.save(),K.clip(c),f&&K.clip(f),En(i,s),K.restore(),Tn(l,o,e)):(En(i,s),Tn(l,o,e)),(u||a||c)&&K.restore()}function Tn(l,e,t){t>0&&(e instanceof Map?e.forEach(((l,e)=>{K.strokeStyle=nn=e,K.stroke(l)})):null!=e&&l&&K.stroke(e))}function En(l,e){e instanceof Map?e.forEach(((l,e)=>{K.fillStyle=on=e,K.fill(l)})):null!=e&&l&&K.fill(e)}function zn(l,e,t,n,i,o,s,r,u,a){let f=s%2/2;1==tl&&K.translate(f,f),wn(r,s,u,a,r),K.beginPath();let c,h,d,p,m=i+(0==n||3==n?-o:o);0==t?(h=i,p=m):(c=i,d=m);for(let n=0;l.length>n;n++)null!=e[n]&&(0==t?c=d=l[n]:h=p=l[n],K.moveTo(c,h),K.lineTo(d,p));K.stroke(),1==tl&&K.translate(-f,-f)}function Dn(l){let e=!0;return xl.forEach(((t,n)=>{if(!t.show)return;let i=vl[t.scale];if(null==i.min)return void(t._show&&(e=!1,t._show=!1,An(!1)));t._show||(e=!1,t._show=!0,An(!1));let o=t.side,s=o%2,{min:r,max:u}=i,[a,f]=function(l,e,t,n){let i,o=xl[l];if(n>0){let s=o._space=o.space(k,l,e,t,n);i=Zt(e,t,o._incrs=o.incrs(k,l,e,t,n,s),n,s)}else i=[0,0];return o._found=i}(n,r,u,0==s?Ie:Le);if(0==f)return;let c=t._splits=t.splits(k,n,r,u,a,f,2==i.distr),h=2==i.distr?c.map((l=>pn[l])):c,d=2==i.distr?pn[c[1]]-pn[c[0]]:a,p=t._values=t.values(k,t.filter(k,h,n,f,d),n,f,d);t._rotate=2==o?t.rotate(k,p,n,f):0;let m=t._size;t._size=ul(t.size(k,p,n,l)),null!=m&&t._size!=m&&(e=!1)})),e}function Pn(l){let e=!0;return Ft.forEach(((t,n)=>{let i=t(k,n,Ct,l);i!=Rt[n]&&(e=!1),Rt[n]=i})),e}function An(l){pl.forEach(((e,t)=>{t>0&&(e._paths=null,l&&(1==M?(e.min=null,e.max=null):e.facets.forEach((l=>{l.min=null,l.max=null}))))}))}let Wn,Yn,Cn,Hn,Fn,Rn,Gn,In,Ln,On,Nn,jn,Un=!1,Vn=!1,Bn=[];function $n(){Vn=!1;for(let l=0;Bn.length>l;l++)Ci(...Bn[l]);Bn.length=0}function Jn(){Un||(Jl(qn),Un=!0)}function qn(){if(ht&&(function(){for(let l in vl){let e=vl[l];null==Kl[l]&&(null==e.min||null!=Kl[El]&&e.auto(k,mn))&&(Kl[l]=vn)}for(let l in vl){let e=vl[l];null==Kl[l]&&null!=e.from&&null!=Kl[e.from]&&(Kl[l]=vn)}null!=Kl[El]&&An(!0);let l={};for(let e in Kl){let t=Kl[e];if(null!=t){let n=l[e]=Vl(vl[e],Nl);if(null!=t.min)Bl(n,t);else if(e!=El||2==M)if(0==Gt&&null==n.from){let l=n.range(k,null,null,e);n.min=l[0],n.max=l[1]}else n.min=gl,n.max=-gl}}if(Gt>0){pl.forEach(((e,t)=>{if(1==M){let n=e.scale,i=Kl[n];if(null==i)return;let o=l[n];if(0==t){let l=o.range(k,o.min,o.max,n);o.min=l[0],o.max=l[1],Lt=L(o.min,g[0]),en=L(o.max,g[0]),en-Lt>1&&(o.min>g[0][Lt]&&Lt++,g[0][en]>o.max&&en--),e.min=pn[Lt],e.max=pn[en]}else e.show&&e.auto&&bn(o,i,e,g[t],e.sorted);e.idxs[0]=Lt,e.idxs[1]=en}else if(t>0&&e.show&&e.auto){let[n,i]=e.facets,o=n.scale,s=i.scale,[r,u]=g[t],a=l[o],f=l[s];null!=a&&bn(a,Kl[o],n,r,n.sorted),null!=f&&bn(f,Kl[s],i,u,i.sorted),e.min=i.min,e.max=i.max}}));for(let e in l){let t=l[e],n=Kl[e];if(null==t.from&&(null==n||null==n.min)){let l=t.range(k,t.min==gl?null:t.min,t.max==-gl?null:t.max,e);t.min=l[0],t.max=l[1]}}}for(let e in l){let t=l[e];if(null!=t.from){let n=l[t.from];if(null==n.min)t.min=t.max=null;else{let l=t.range(k,n.min,n.max,e);t.min=l[0],t.max=l[1]}}}let e={},t=!1;for(let n in l){let i=l[n],o=vl[n];if(o.min!=i.min||o.max!=i.max){o.min=i.min,o.max=i.max;let l=o.distr;o._min=3==l?dl(o.min):4==l?ml(o.min,o.asinh):100==l?o.fwd(o.min):o.min,o._max=3==l?dl(o.max):4==l?ml(o.max,o.asinh):100==l?o.fwd(o.max):o.max,e[n]=t=!0}}if(t){pl.forEach(((l,t)=>{2==M?t>0&&e.y&&(l._paths=null):e[l.scale]&&(l._paths=null)}));for(let l in e)mt=!0,Ci("setScale",l);re&&oe.left>=0&&(xt=_t=!0)}for(let l in Kl)Kl[l]=null}(),ht=!1),mt&&(function(){let l=!1,e=0;for(;!l;){e++;let t=Dn(e),n=Pn(e);l=e==yt||t&&n,l||(kt(k.width,k.height),pt=!0)}}(),mt=!1),pt){if(E(ll,s,Oe),E(ll,i,Ne),E(ll,t,Ie),E(ll,n,Le),E(el,s,Oe),E(el,i,Ne),E(el,t,Ie),E(el,n,Le),E(X,t,Fe),E(X,n,Ge),O.width=rl(Fe*y),O.height=rl(Ge*y),xl.forEach((({_el:e,_show:t,_size:n,_pos:i,side:o})=>{if(null!=e)if(t){let t=o%2==1;E(e,t?"left":"top",i-(3===o||0===o?n:0)),E(e,t?"width":"height",n),E(e,t?"top":"left",t?Ne:Oe),E(e,t?"height":"width",t?Le:Ie),T(e,l)}else S(e,l)})),nn=on=sn=un=an=fn=cn=hn=rn=null,dn=1,_i(!0),Oe!=je||Ne!=Ke||Ie!=Xe||Le!=Ze){An(!1);let l=Ie/Xe,e=Le/Ze;if(re&&!xt&&oe.left>=0){oe.left*=l,oe.top*=e,Cn&&A(Cn,rl(oe.left),0,Ie,Le),Hn&&A(Hn,0,rl(oe.top),Ie,Le);for(let t=0;Dt.length>t;t++){let n=Dt[t];null!=n&&(Pt[t]*=l,At[t]*=e,A(n,ul(Pt[t]),ul(At[t]),Ie,Le))}}if(ei.show&&!wt&&ei.left>=0&&ei.width>0){ei.left*=l,ei.width*=l,ei.top*=e,ei.height*=e;for(let l in ki)E(ti,l,ei[l])}je=Oe,Ke=Ne,Xe=Ie,Ze=Le}Ci("setSize"),pt=!1}Fe>0&&Ge>0&&(K.clearRect(0,0,O.width,O.height),Ci("drawClear"),Pl.forEach((l=>l())),Ci("draw")),ei.show&&wt&&(ni(ei),wt=!1),re&&xt&&(xi(null,!0,!1),xt=!1),ie.show&&ie.live&&_t&&(mi(),_t=!1),F||(F=!0,k.status=1,Ci("ready")),mn=!1,Un=!1}function Kn(l,e){let t=vl[l];if(null==t.from){if(0==Gt){let n=t.range(k,e.min,e.max,l);e.min=n[0],e.max=n[1]}if(e.min>e.max){let l=e.min;e.min=e.max,e.max=l}if(Gt>1&&null!=e.min&&null!=e.max&&1e-16>e.max-e.min)return;l==El&&2==t.distr&&Gt>0&&(e.min=L(e.min,g[0]),e.max=L(e.max,g[0]),e.min==e.max&&e.max++),Kl[l]=e,ht=!0,Jn()}}k.batch=function(l,e=!1){Un=!0,Vn=e,l(k),qn(),e&&Bn.length>0&&queueMicrotask($n)},k.redraw=(l,e)=>{mt=e||!1,!1!==l?ii(El,jl.min,jl.max):Jn()},k.setScale=Kn;let Xn=!1;const Zn=oe.drag;let Qn=Zn.x,li=Zn.y;re&&(oe.x&&(Wn=D("u-cursor-x",el)),oe.y&&(Yn=D("u-cursor-y",el)),0==jl.ori?(Cn=Wn,Hn=Yn):(Cn=Yn,Hn=Wn),Nn=oe.left,jn=oe.top);const ei=k.select=Bl({show:!0,over:!0,left:0,width:0,top:0,height:0},u.select),ti=ei.show?D("u-select",ei.over?el:ll):null;function ni(l,e){if(ei.show){for(let e in l)ei[e]=l[e],e in ki&&E(ti,e,l[e]);!1!==e&&Ci("setSelect")}}function ii(l,e,t){Kn(l,{min:e,max:t})}function oi(e,t,n,i){null!=t.focus&&function(l){if(l!=ui){let e=null==l,t=1!=Tt.alpha;pl.forEach(((n,i)=>{if(1==M||i>0){let o=e||0==i||i==l;n._focus=e?null:o,t&&function(l,e){pl[l].alpha=e,re&&null!=Dt[l]&&(Dt[l].style.opacity=e),se&&me[l]&&(me[l].style.opacity=e)}(i,o?1:Tt.alpha)}})),ui=l,t&&Jn()}}(e),null!=t.show&&pl.forEach(((n,i)=>{0>=i||e!=i&&null!=e||(n.show=t.show,function(e){if(pl[e].show)se&&T(me[e],l);else if(se&&S(me[e],l),re){let l=zt?Dt[0]:Dt[e];null!=l&&A(l,-10,-10,Ie,Le)}}(i),2==M?(ii(n.facets[0].scale,null,null),ii(n.facets[1].scale,null,null)):ii(n.scale,null,null),Jn())})),!1!==n&&Ci("setSeries",e,t),i&&Ii("setSeries",k,e,t)}let si,ri,ui;k.setSelect=ni,k.setSeries=oi,k.addBand=function(l,e){l.fill=bl(l.fill||null),l.dir=Q(l.dir,-1),Tl.splice(e=null==e?Tl.length:e,0,l)},k.setBand=function(l,e){Bl(Tl[l],e)},k.delBand=function(l){null==l?Tl.length=0:Tl.splice(l,1)};const ai={focus:!0};function fi(l,e,t){let n=vl[e];t&&(l=l/y-(1==n.ori?Ne:Oe));let i=Ie;1==n.ori&&(i=Le,l=i-l),-1==n.dir&&(l=i-l);let o=n._min,s=o+l/i*(n._max-o),r=n.distr;return 3==r?cl(10,s):4==r?((l,e=1)=>nl.sinh(l)*e)(s,n.asinh):100==r?n.bwd(s):s}function ci(l,e){E(ti,s,ei.left=l),E(ti,t,ei.width=e)}function hi(l,e){E(ti,i,ei.top=l),E(ti,n,ei.height=e)}se&&Et&&Ce(p,ce,(l=>{oe._lock||(Mt(l),null!=ui&&oi(null,ai,!0,Fi.setSeries))})),k.valToIdx=l=>L(l,g[0]),k.posToIdx=function(l,e){return L(fi(l,El,e),g[0],Lt,en)},k.posToVal=fi,k.valToPos=(l,e,t)=>0==vl[e].ori?P(l,vl[e],t?ot:Ie,t?Qe:0):W(l,vl[e],t?st:Le,t?lt:0),k.setCursor=(l,e,t)=>{Nn=l.left,jn=l.top,xi(null,e,t)};let di=0==jl.ori?ci:hi,pi=1==jl.ori?ci:hi;function mi(l,e){if(null!=l&&(l.idxs?l.idxs.forEach(((l,e)=>{te[e]=l})):(l=>void 0===l)(l.idx)||te.fill(l.idx),ie.idx=te[0]),se&&ie.live){for(let l=0;pl.length>l;l++)(l>0||1==M&&!xe)&&gi(l,te[l]);!function(){if(se&&ie.live)for(let l=2==M?1:0;pl.length>l;l++){if(0==l&&xe)continue;let e=ie.values[l],t=0;for(let n in e)ge[l][t++].firstChild.nodeValue=e[n]}}()}_t=!1,!1!==e&&Ci("setLegend")}function gi(l,e){let t,n=pl[l],i=0==l&&2==Ul?pn:g[l];xe?t=n.values(k,l,e)??we:(t=n.value(k,null==e?null:i[e],l,e),t=null==t?we:{_:t}),ie.values[l]=t}function xi(l,e,t){let n;Ln=Nn,On=jn,[Nn,jn]=oe.move(k,Nn,jn),oe.left=Nn,oe.top=jn,re&&(Cn&&A(Cn,rl(Nn),0,Ie,Le),Hn&&A(Hn,0,rl(jn),Ie,Le)),si=gl,ri=null;let i=0==jl.ori?Ie:Le,o=1==jl.ori?Ie:Le;if(0>Nn||0==Gt||Lt>en){n=oe.idx=null;for(let l=0;pl.length>l;l++){let e=Dt[l];null!=e&&A(e,-10,-10,Ie,Le)}Et&&oi(null,ai,!0,null==l&&Fi.setSeries),ie.live&&(te.fill(n),_t=!0)}else{let l,e,t;1==M&&(l=0==jl.ori?Nn:jn,e=fi(l,El),n=oe.idx=L(e,g[0],Lt,en),t=$l(g[0][n],jl,i,0));let s=-10,r=-10,u=0,a=0,f=!0,c="",h="";for(let l=2==M?1:0;pl.length>l;l++){let d=pl[l],p=te[l],m=null==p?null:1==M?g[l][p]:g[l][1][p],x=oe.dataIdx(k,l,n,e),w=null==x?null:1==M?g[l][x]:g[l][1][x];if(_t=_t||w!=m||x!=p,te[l]=x,l>0&&d.show){let e=null==x?-10:x==n?t:$l(1==M?g[0][x]:g[l][0][x],jl,i,0),p=null==w?-10:ql(w,1==M?vl[d.scale]:vl[d.facets[1].scale],o,0);if(Et&&null!=w){let e=1==jl.ori?Nn:jn,t=ol(Tt.dist(k,l,x,p,e));if(si>t){let n=Tt.bias;if(0!=n){let i=fi(e,d.scale),o=0>i?-1:1;o!=(0>w?-1:1)||(1==o?1==n?i>w:w>i:1==n?w>i:i>w)||(si=t,ri=l)}else si=t,ri=l}}if(_t||zt){let t,n;0==jl.ori?(t=e,n=p):(t=p,n=e);let i,o,d,m,g,x,w=!0,_=St.bbox;if(null!=_){w=!1;let e=_(k,l);d=e.left,m=e.top,i=e.width,o=e.height}else d=t,m=n,i=o=St.size(k,l);if(x=St.fill(k,l),g=St.stroke(k,l),zt)l!=ri||si>Tt.prox||(s=d,r=m,u=i,a=o,f=w,c=x,h=g);else{let e=Dt[l];null!=e&&(Pt[l]=d,At[l]=m,H(e,i,o,w),Y(e,x,g),A(e,ul(d),ul(m),Ie,Le))}}}}if(zt){let l=Tt.prox;if(_t||(null==ui?l>=si:si>l||ri!=ui)){let l=Dt[0];null!=l&&(Pt[0]=s,At[0]=r,H(l,u,a,f),Y(l,c,h),A(l,ul(s),ul(r),Ie,Le))}}}if(ei.show&&Xn)if(null!=l){let[e,t]=Fi.scales,[n,s]=Fi.match,[r,u]=l.cursor.sync.scales,a=l.cursor.drag;if(Qn=a._x,li=a._y,Qn||li){let a,f,c,h,d,{left:p,top:m,width:g,height:x}=l.select,w=l.scales[r].ori,_=l.posToVal,b=null!=e&&n(e,r),v=null!=t&&s(t,u);b&&Qn?(0==w?(a=p,f=g):(a=m,f=x),c=vl[e],h=$l(_(a,r),c,i,0),d=$l(_(a+f,r),c,i,0),di(al(h,d),ol(d-h))):di(0,i),v&&li?(1==w?(a=p,f=g):(a=m,f=x),c=vl[t],h=ql(_(a,u),c,o,0),d=ql(_(a+f,u),c,o,0),pi(al(h,d),ol(d-h))):pi(0,o)}else yi()}else{let l=ol(Ln-Fn),e=ol(On-Rn);if(1==jl.ori){let t=l;l=e,e=t}Qn=Zn.x&&l>=Zn.dist,li=Zn.y&&e>=Zn.dist;let t,n,s=Zn.uni;null!=s?Qn&&li&&(Qn=l>=s,li=e>=s,Qn||li||(e>l?li=!0:Qn=!0)):Zn.x&&Zn.y&&(Qn||li)&&(Qn=li=!0),Qn&&(0==jl.ori?(t=Gn,n=Nn):(t=In,n=jn),di(al(t,n),ol(n-t)),li||pi(0,o)),li&&(1==jl.ori?(t=Gn,n=Nn):(t=In,n=jn),pi(al(t,n),ol(n-t)),Qn||di(0,i)),Qn||li||(di(0,0),pi(0,0))}if(Zn._x=Qn,Zn._y=li,null==l){if(t){if(null!=Ri){let[l,e]=Fi.scales;Fi.values[0]=null!=l?fi(0==jl.ori?Nn:jn,l):null,Fi.values[1]=null!=e?fi(1==jl.ori?Nn:jn,e):null}Ii(f,k,Nn,jn,Ie,Le,n)}if(Et){let l=t&&Fi.setSeries,e=Tt.prox;null==ui?si>e||oi(ri,ai,!0,l):si>e?oi(null,ai,!0,l):ri!=ui&&oi(ri,ai,!0,l)}}_t&&(ie.idx=n,mi()),!1!==e&&Ci("setCursor")}k.setLegend=mi;let wi=null;function _i(l=!1){l?wi=null:(wi=el.getBoundingClientRect(),Ci("syncRect",wi))}function bi(l,e,t,n,i,o){oe._lock||Xn&&null!=l&&0==l.movementX&&0==l.movementY||(vi(l,e,t,n,i,o,0,!1,null!=l),null!=l?xi(null,!0,!0):xi(e,!0,!1))}function vi(l,e,t,n,i,o,s,r,u){if(null==wi&&_i(!1),Mt(l),null!=l)t=l.clientX-wi.left,n=l.clientY-wi.top;else{if(0>t||0>n)return Nn=-10,void(jn=-10);let[l,s]=Fi.scales,r=e.cursor.sync,[u,a]=r.values,[f,c]=r.scales,[h,d]=Fi.match,p=e.axes[0].side%2==1,m=0==jl.ori?Ie:Le,g=1==jl.ori?Ie:Le,x=p?o:i,w=p?i:o,_=p?n:t,b=p?t:n;if(t=null!=f?h(l,f)?C(u,vl[l],m,0):-10:m*(_/x),n=null!=c?d(s,c)?C(a,vl[s],g,0):-10:g*(b/w),1==jl.ori){let l=t;t=n,n=l}}!u||null!=e&&e.cursor.event.type!=f||(t>1&&Ie-1>t||(t=zl(t,Ie)),n>1&&Le-1>n||(n=zl(n,Le))),r?(Fn=t,Rn=n,[Gn,In]=oe.move(k,t,n)):(Nn=t,jn=n)}Object.defineProperty(k,"rect",{get:()=>(null==wi&&_i(!1),wi)});const ki={width:0,height:0,left:0,top:0};function yi(){ni(ki,!1)}let Mi,Si,Ti,Ei;function zi(l,e,t,n,i,o){Xn=!0,Qn=li=Zn._x=Zn._y=!1,vi(l,e,t,n,i,o,0,!0,!1),null!=l&&(Ce(h,b,Di,!1),Ii(c,k,Gn,In,Ie,Le,null));let{left:s,top:r,width:u,height:a}=ei;Mi=s,Si=r,Ti=u,Ei=a}function Di(l,e,t,n,i,o){Xn=Zn._x=Zn._y=!1,vi(l,e,t,n,i,o,0,!1,!0);let{left:s,top:r,width:u,height:a}=ei,f=u>0||a>0,c=Mi!=s||Si!=r||Ti!=u||Ei!=a;if(f&&c&&ni(ei),Zn.setScale&&f&&c){let l=s,e=u,t=r,n=a;if(1==jl.ori&&(l=r,e=a,t=s,n=u),Qn&&ii(El,fi(l,El),fi(l+e,El)),li)for(let l in vl){let e=vl[l];l!=El&&null==e.from&&e.min!=gl&&ii(l,fi(t+n,l),fi(t,l))}yi()}else oe.lock&&(oe._lock=!oe._lock,xi(e,!0,null!=l));null!=l&&(He(h,b),Ii(h,k,Nn,jn,Ie,Le,null))}function Pi(l){oe._lock||(Mt(l),xn(),yi(),null!=l&&Ii(m,k,Nn,jn,Ie,Le,null))}function Ai(){xl.forEach(ln),vt(k.width,k.height,!0)}G(x,v,Ai);const Wi={};Wi.mousedown=zi,Wi.mousemove=bi,Wi.mouseup=Di,Wi.dblclick=Pi,Wi.setSeries=(l,e,t,n)=>{-1!=(t=(0,Fi.match[2])(k,e,t))&&oi(t,n,!0,!1)},re&&(Ce(c,el,zi),Ce(f,el,bi),Ce(d,el,(l=>{Mt(l),_i(!1)})),Ce(p,el,(function(l){if(oe._lock)return;Mt(l);let e=Xn;if(Xn){let l,e,t=!0,n=!0,i=10;0==jl.ori?(l=Qn,e=li):(l=li,e=Qn),l&&e&&(t=i>=Nn||Nn>=Ie-i,n=i>=jn||jn>=Le-i),l&&t&&(Nn=Gn>Nn?0:Ie),e&&n&&(jn=In>jn?0:Le),xi(null,!0,!0),Xn=!1}Nn=-10,jn=-10,te.fill(null),xi(null,!0,!0),e&&(Xn=e)})),Ce(m,el,Pi),It.add(k),k.syncRect=_i);const Yi=k.hooks=u.hooks||{};function Ci(l,e,t){Vn?Bn.push([l,e,t]):l in Yi&&Yi[l].forEach((l=>{l.call(null,k,e,t)}))}(u.plugins||[]).forEach((l=>{for(let e in l.hooks)Yi[e]=(Yi[e]||[]).concat(l.hooks[e])}));const Hi=(l,e,t)=>t,Fi=Bl({key:null,setSeries:!1,filters:{pub:Ml,sub:Ml},scales:[El,pl[1]?pl[1].scale:null],match:[Sl,Sl,Hi],values:[null,null]},oe.sync);2==Fi.match.length&&Fi.match.push(Hi),oe.sync=Fi;const Ri=Fi.key,Gi=dt(Ri);function Ii(l,e,t,n,i,o,s){Fi.filters.pub(l,e,t,n,i,o,s)&&Gi.pub(l,e,t,n,i,o,s)}function Li(){Ci("init",u,g),gn(g||u.data,!1),Kl[El]?Kn(El,Kl[El]):xn(),wt=ei.show&&(ei.width>0||ei.height>0),xt=_t=!0,vt(u.width,u.height)}return Gi.sub(k),k.pub=function(l,e,t,n,i,o,s){Fi.filters.sub(l,e,t,n,i,o,s)&&Wi[l](null,e,t,n,i,o,s)},k.destroy=function(){Gi.unsub(k),It.delete(k),Pe.clear(),I(x,v,Ai),R.remove(),ce?.remove(),Ci("destroy")},pl.forEach(Yt),xl.forEach((function(l,e){if(l._show=l.show,l.show){let t=vl[l.scale];null==t&&(l.scale=l.side%2?pl[1].scale:El,t=vl[l.scale]);let n=t.time;l.size=bl(l.size),l.space=bl(l.space),l.rotate=bl(l.rotate),Gl(l.incrs)&&l.incrs.forEach((l=>{!Wl.has(l)&&Wl.set(l,Yl(l))})),l.incrs=bl(l.incrs||(2==t.distr?ae:n?1==hl?ke:Se:fe)),l.splits=bl(l.splits||(n&&1==t.distr?Ql:3==t.distr?Je:4==t.distr?qe:$e)),l.stroke=bl(l.stroke),l.grid.stroke=bl(l.grid.stroke),l.ticks.stroke=bl(l.ticks.stroke),l.border.stroke=bl(l.border.stroke);let i=l.values;l.values=Gl(i)&&!Gl(i[0])?bl(i):n?Gl(i)?De(Xl,ze(i,Zl)):Ll(i)?function(l,e){let t=ne(e);return(e,n)=>n.map((e=>t(l(e))))}(Xl,i):i||le:i||Be,l.filter=bl(l.filter||(3>t.distr||10!=t.log?3==t.distr&&2==t.log?tt:kl:et)),l.font=Qt(l.font),l.labelFont=Qt(l.labelFont),l._size=l.size(k,null,e,0),l._space=l._rotate=l._incrs=l._found=l._splits=l._values=null,l._size>0&&(Ct[e]=!0,l._el=D("u-axis",X))}})),_?_ instanceof HTMLElement?(_.appendChild(R),Li()):_(k,Li):Li(),k}en.assign=Bl,en.fmtNum=tl,en.rangeNum=Z,en.rangeLog=B,en.rangeAsinh=$,en.orient=pt,en.pxRatio=y,en.join=function(l,e){if(function(l){let e=l[0][0],t=e.length;for(let n=1;l.length>n;n++){let i=l[n][0];if(i.length!=t)return!1;if(i!=e)for(let l=0;t>l;l++)if(i[l]!=e[l])return!1}return!0}(l)){let e=l[0].slice();for(let t=1;l.length>t;t++)e.push(...l[t].slice(1));return function(l,e=100){const t=l.length;if(1>=t)return!0;let n=0,i=t-1;for(;i>=n&&null==l[n];)n++;for(;i>=n&&null==l[i];)i--;if(n>=i)return!0;const o=fl(1,sl((i-n+1)/e));for(let e=l[n],t=n+o;i>=t;t+=o){const n=l[t];if(null!=n){if(e>=n)return!1;e=n}}return!0}(e[0])||(e=function(l){let e=l[0],t=e.length,n=Array(t);for(let l=0;n.length>l;l++)n[l]=l;n.sort(((l,t)=>e[l]-e[t]));let i=[];for(let e=0;l.length>e;e++){let o=l[e],s=Array(t);for(let l=0;t>l;l++)s[l]=o[n[l]];i.push(s)}return i}(e)),e}let t=new Set;for(let e=0;l.length>e;e++){let n=l[e][0],i=n.length;for(let l=0;i>l;l++)t.add(n[l])}let n=[Array.from(t).sort(((l,e)=>l-e))],i=n[0].length,o=new Map;for(let l=0;i>l;l++)o.set(n[0][l],l);for(let t=0;l.length>t;t++){let s=l[t],r=s[0];for(let l=1;s.length>l;l++){let u=s[l],a=Array(i).fill(void 0),f=e?e[t][l]:1,c=[];for(let l=0;u.length>l;l++){let e=u[l],t=o.get(r[l]);null===e?0!=f&&(a[t]=e,2==f&&c.push(t)):a[t]=e}$l(a,c,i),n.push(a)}}return n},en.fmtDate=ne,en.tzDate=function(l,e){let t;return"UTC"==e||"Etc/UTC"==e?t=new Date(+l+6e4*l.getTimezoneOffset()):e==ie?t=l:(t=new Date(l.toLocaleString("en-US",{timeZone:e})),t.setMilliseconds(l.getMilliseconds())),t},en.sync=dt;{en.addGap=function(l,e,t){let n=l[l.length-1];n&&n[0]==e?n[1]=t:l.push([e,t])},en.clipGaps=wt;let l=en.paths={points:Wt};l.linear=Ft,l.stepped=function(l){const e=Q(l.align,1),t=Q(l.ascDesc,!1),n=Q(l.alignGaps,0),i=Q(l.extend,!1);return(l,o,s,r)=>pt(l,o,((u,a,f,c,h,d,p,m,g,x,w)=>{[s,r]=U(f,s,r);let _=u.pxRound,{left:b,width:v}=l.bbox,k=l=>_(d(l,c,x,m)),M=l=>_(p(l,h,w,g)),S=0==c.ori?Mt:St;const T={stroke:new Path2D,fill:null,clip:null,band:null,gaps:null,flags:1},E=T.stroke,z=c.dir*(0==c.ori?1:-1);let D=M(f[1==z?s:r]),P=k(a[1==z?s:r]),A=P,W=P;i&&-1==e&&(W=b,S(E,W,D)),S(E,P,D);for(let l=1==z?s:r;l>=s&&r>=l;l+=z){let t=f[l];if(null==t)continue;let n=k(a[l]),i=M(t);1==e?S(E,n,D):S(E,A,i),S(E,n,i),D=i,A=n}let Y=A;i&&1==e&&(Y=b+v,S(E,Y,D));let[C,H]=mt(l,o);if(null!=u.fill||0!=C){let e=T.fill=new Path2D(E),t=M(u.fillTo(l,o,u.min,u.max,C));S(e,Y,t),S(e,W,t)}if(!u.spanGaps){let i=[];i.push(..._t(a,f,s,r,z,k,n));let h=u.width*y/2,d=t||1==e?h:-h,p=t||-1==e?-h:h;i.forEach((l=>{l[0]+=d,l[1]+=p})),T.gaps=i=u.gaps(l,o,s,r,i),T.clip=wt(i,c.ori,m,g,x,w)}return 0!=H&&(T.band=2==H?[xt(l,o,s,r,E,-1),xt(l,o,s,r,E,1)]:xt(l,o,s,r,E,H)),T}))},l.bars=function(l){const e=Q((l=l||Hl).size,[.6,gl,1]),t=l.align||0,n=l.gap||0;let i=l.radius;i=null==i?[0,0]:"number"==typeof i?[i,0]:i;const o=bl(i),s=1-e[0],r=Q(e[1],gl),u=Q(e[2],1),a=Q(l.disp,Hl),f=Q(l.each,(()=>{})),{fill:c,stroke:h}=a;return(l,e,i,d)=>pt(l,e,((p,m,g,x,w,_,b,v,k,M,S)=>{let T,E,z=p.pxRound,D=t,P=n*y,A=r*y,W=u*y;0==x.ori?[T,E]=o(l,e):[E,T]=o(l,e);const Y=x.dir*(0==x.ori?1:-1);let C,H,F,R=0==x.ori?Tt:Et,G=0==x.ori?f:(l,e,t,n,i,o,s)=>{f(l,e,t,i,n,s,o)},I=Q(l.bands,Fl).find((l=>l.series[0]==e)),L=p.fillTo(l,e,p.min,p.max,null!=I?I.dir:0),O=z(b(L,w,S,k)),N=M,j=z(p.width*y),U=!1,V=null,B=null,$=null,J=null;null==c||0!=j&&null==h||(U=!0,V=c.values(l,e,i,d),B=new Map,new Set(V).forEach((l=>{null!=l&&B.set(l,new Path2D)})),j>0&&($=h.values(l,e,i,d),J=new Map,new Set($).forEach((l=>{null!=l&&J.set(l,new Path2D)}))));let{x0:q,size:K}=a;if(null!=q&&null!=K){D=1,m=q.values(l,e,i,d),2==q.unit&&(m=m.map((e=>l.posToVal(v+e*M,x.key,!0))));let t=K.values(l,e,i,d);H=2==K.unit?t[0]*M:_(t[0],x,M,v)-_(0,x,M,v),N=Rt(m,g,_,x,M,v,N),F=N-H+P}else N=Rt(m,g,_,x,M,v,N),F=N*s+P,H=N-F;1>F&&(F=0),H/2>j||(j=0),5>F&&(z=vl);let X=F>0;H=z(wl(N-F-(X?j:0),W,A)),C=(0==D?H/2:D==Y?0:H)-D*Y*((0==D?P/2:0)+(X?j/2:0));const Z={stroke:null,fill:null,clip:null,band:null,gaps:null,flags:0},ll=U?null:new Path2D;let el=null;if(null!=I)el=l.data[I.series[1]];else{let{y0:t,y1:n}=a;null!=t&&null!=n&&(g=n.values(l,e,i,d),el=t.values(l,e,i,d))}let tl=T*H,nl=E*H;for(let t=1==Y?i:d;t>=i&&d>=t;t+=Y){let n=g[t];if(null==n)continue;if(null!=el){let l=el[t]??0;if(n-l==0)continue;O=b(l,w,S,k)}let i=_(2!=x.distr||null!=a?m[t]:t,x,M,v),o=b(Q(n,L),w,S,k),s=z(i-C),r=z(fl(o,O)),u=z(al(o,O)),f=r-u;if(null!=n){let i=0>n?nl:tl,o=0>n?tl:nl;U?(j>0&&null!=$[t]&&R(J.get($[t]),s,u+sl(j/2),H,fl(0,f-j),i,o),null!=V[t]&&R(B.get(V[t]),s,u+sl(j/2),H,fl(0,f-j),i,o)):R(ll,s,u+sl(j/2),H,fl(0,f-j),i,o),G(l,e,t,s-j/2,u,H+j,f)}}return j>0?Z.stroke=U?J:ll:U||(Z._fill=0==p.width?p._fill:p._stroke??p._fill,Z.width=0),Z.fill=U?B:ll,Z}))},l.spline=function(l){return function(l,e){const t=Q(e?.alignGaps,0);return(e,n,i,o)=>pt(e,n,((s,r,u,a,f,c,h,d,p,m,g)=>{[i,o]=U(u,i,o);let x,w,_,b=s.pxRound,v=l=>b(c(l,a,m,d)),k=l=>b(h(l,f,g,p));0==a.ori?(x=kt,_=Mt,w=Pt):(x=yt,_=St,w=At);const y=a.dir*(0==a.ori?1:-1);let M=v(r[1==y?i:o]),S=M,T=[],E=[];for(let l=1==y?i:o;l>=i&&o>=l;l+=y)if(null!=u[l]){let e=v(r[l]);T.push(S=e),E.push(k(u[l]))}const z={stroke:l(T,E,x,_,w,b),fill:null,clip:null,band:null,gaps:null,flags:1},D=z.stroke;let[P,A]=mt(e,n);if(null!=s.fill||0!=P){let l=z.fill=new Path2D(D),t=k(s.fillTo(e,n,s.min,s.max,P));_(l,S,t),_(l,M,t)}if(!s.spanGaps){let l=[];l.push(..._t(r,u,i,o,y,v,t)),z.gaps=l=s.gaps(e,n,i,o,l),z.clip=wt(l,a.ori,d,p,m,g)}return 0!=A&&(z.band=2==A?[xt(e,n,i,o,D,-1),xt(e,n,i,o,D,1)]:xt(e,n,i,o,D,A)),z}))}(Gt,l)}}return en}();
+</script>
+
+<script>
+(function(){
+"use strict";
+var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+var N = 60, TICK = 1000;
+
+/* ============ 确定性模拟 ============ */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function Ring(seed,o){
+  this.a=new Array(N); this.r=mulberry32(seed);
+  this.base=o.base; this.v=o.base; this.vol=o.vol; this.min=o.min; this.max=o.max;
+  this.sp=o.spikeP||0; this.sa=o.spikeAmp||0; this.pull=o.pull==null?.14:o.pull; this.decay=0;
+  for(var i=0;i<N;i++) this.a[i]=this.step();
+}
+Ring.prototype.step=function(){
+  var r=this.r();
+  if(this.decay>0) this.decay--;
+  else if(r<this.sp){ this.decay=2+Math.floor(this.r()*6); this.v+=this.sa*(.5+this.r()*.5); }
+  this.v += (this.base-this.v)*this.pull + (this.r()-.5)*this.vol*2;
+  if(this.v<this.min)this.v=this.min; if(this.v>this.max)this.v=this.max;
+  return this.v;
+};
+Ring.prototype.push=function(){ this.a.shift(); this.a.push(this.step()); };
+Ring.prototype.last=function(){ return this.a[N-1]; };
+
+var XS=[]; for(var xi=0;xi<N;xi++) XS.push(xi);
+
+/* 机器：2 路 CPU(2×8) / 2 GPU / 3 盘 / 2 网卡 / 7 挂载点 */
+var R={
+  cpu:     new Ring(7,  {base:21,vol:2.6,min:1.5,max:100,spikeP:.05,spikeAmp:52}),
+  iowait:  new Ring(11, {base:.7,vol:.35,min:0,max:22,spikeP:.03,spikeAmp:9}),
+  irq:     new Ring(13, {base:.5,vol:.18,min:0,max:10}),
+  memUsed: new Ring(17, {base:12.4,vol:.05,min:7,max:29,pull:.05}),
+  memCache:new Ring(19, {base:9.1,vol:.04,min:2,max:16,pull:.05})
+};
+var CORES=[], CORE_N=16, SOCKETS=2, GRID_MAX=32;   /* 超过 GRID_MAX 就从小图网格切成热力图 */
+function ensureCores(k){
+  while(CORES.length<k){
+    var i=CORES.length;
+    CORES.push(new Ring(101+i*7,{base:6+(i%9)*7,vol:6,min:0,max:100,spikeP:.05+(i%13===0?.06:0),spikeAmp:70}));
+  }
+}
+ensureCores(256);
+
+function mkKindRing(seed,base,vol,mx,sp,amp){ return new Ring(seed,{base:base,vol:vol,min:0,max:mx,spikeP:sp,spikeAmp:amp}); }
+function devLetter(i){ var t="",k=i+1; while(k>0){ var r=(k-1)%26; t=String.fromCharCode(97+r)+t; k=Math.floor((k-1)/26);} return t; }
+
+var GPU_POOL=[], DISK_POOL=[], NET_POOL=[], MOUNT_POOL=[];
+(function(){
+  for(var i=0;i<8;i++) GPU_POOL.push({id:"gpu"+i,name:"GPU "+i,dev:"card"+i,model:"AMD Radeon Pro W6800",vram:32,drv:"amdgpu 6.7",
+    u:mkKindRing(61+i*11,20+i*14,5,100,.06,44), m:mkKindRing(67+i*11,4+i*6,.35,31.5,0,0), t:mkKindRing(71+i*11,46+i*5,1.1,96,0,0)});
+  var DK=[["NVMe","Samsung PM9A3","PCIe 4.0 ×4","1.9 TB",26,8,.08,62,110,70],
+          ["SSD","Intel D3-S4610","SATA 6 Gb/s","960 GB",11,5,.06,54,38,26],
+          ["HDD","Seagate ST8000NM","SATA 6 Gb/s","8 TB",3,2,.05,74,1.4,3.2]];
+  for(var k=0;k<8;k++) for(var t=0;t<3;t++){
+    var K=DK[t], sd=900+DISK_POOL.length*13;
+    DISK_POOL.push({id:(t===0?"nvme"+k+"n1":"sd"+devLetter(k+(t-1)*8)), dev:(t===0?"nvme"+k+"n1":"sd"+devLetter(k+(t-1)*8)),
+      name:"磁盘 "+DISK_POOL.length, kind:K[0], model:K[1], bus:K[2], cap:K[3],
+      u:mkKindRing(sd,K[4],K[5],100,K[6],K[7]), rd:mkKindRing(sd+1,K[8],K[8]*.4,3000,K[6],K[8]*8), wr:mkKindRing(sd+2,K[9],K[9]*.4,3000,K[6],K[9]*7)});
+  }
+  for(var j=0;j<8;j++) NET_POOL.push({id:"eth"+j,name:"网络 eth"+j,dev:"eth"+j,kind:j<2?"10G":"1G",
+    model:j<2?"Intel X710-DA2":"Intel I350",link:(j<2?"10":"1")+" Gb/s 全双工",ip4:"10.42."+(7+j)+".31/24",mtu:j<2?9000:1500,err:j===0?12:0,
+    rx:mkKindRing(47+j*17,.3+j*.05,.13,120,.05,26), tx:mkKindRing(53+j*17,1.4-j*.15,.5,120,.05,34)});
+  var MP=[["/","ext4",128.4,457.0],["/var","ext4",302.1,420.0],["/boot/efi","vfat",0.012,0.511],
+          ["/srv","xfs",640.0,1800.0],["/data","xfs",2949.0,3640.0],
+          ["/run","tmpfs",0.31,16.0],["/mnt/backup","nfs4",8140.0,12000.0],
+          ["/home","ext4",88.0,900.0],["/opt","ext4",41.5,200.0],["/var/log","ext4",17.2,60.0],
+          ["/backup","xfs",5100.0,8000.0],["/scratch","xfs",210.0,1800.0]];
+  MP.forEach(function(x,i){ MOUNT_POOL.push({p:x[0],fs:x[1],used:x[2],total:x[3],slot:i}); });
+})();
+
+var GPUS=[], DISKS=[], NETS=[], MOUNTS=[];
+var CFG={gpu:2, disk:3, net:2, mount:7, cores:16, winH:660, zoneH:252, cellW:132, psiWarn:12, psiCrit:40};
+function nodeExists(id){
+  for(var i=0;i<TREE.length;i++){
+    var t=TREE[i];
+    if(t.id===id) return !t.members || t.members.length>1;
+    if(t.members) for(var j=0;j<t.members.length;j++) if(t.members[j].id===id) return true;
+  }
+  return false;
+}
+function applyCounts(){
+  GPUS.length=0; DISKS.length=0; NETS.length=0; MOUNTS.length=0;
+  GPU_POOL.slice(0,CFG.gpu).forEach(function(x){ GPUS.push(x); });
+  DISK_POOL.slice(0,CFG.disk).forEach(function(x){ DISKS.push(x); });
+  NET_POOL.slice(0,CFG.net).forEach(function(x){ NETS.push(x); });
+  var picked=MOUNT_POOL.slice(0,CFG.mount);
+  var real=picked.filter(function(x){ return x.fs!=="tmpfs" && x.fs!=="nfs4"; }).length;
+  var per=DISKS.length? Math.max(1,Math.ceil(real/DISKS.length)) : 1, ri=0;
+  picked.forEach(function(x){
+    var dev=null;
+    if(x.fs!=="tmpfs" && x.fs!=="nfs4" && DISKS.length){
+      dev=DISKS[Math.min(DISKS.length-1, Math.floor(ri/per))].dev; ri++;
+    }
+    MOUNTS.push({p:x.p, fs:x.fs, used:x.used, total:x.total, dev:dev});
+  });
+  ensureCores(CFG.cores); CORE_N=CFG.cores;
+  document.documentElement.style.setProperty("--win-h", CFG.winH+"px");
+  document.documentElement.style.setProperty("--mzone-h", CFG.zoneH+"px");
+  document.documentElement.style.setProperty("--mcell-w", CFG.cellW+"px");
+  if(typeof current!=="undefined" && !nodeExists(current)) current="cpu";
+}
+
+function psiFrom(v,knee,gain,fl){ var x=v>knee?(v-knee)*gain:0; return Math.min(100,x+fl); }
+function psiCpu(){ return psiFrom(R.cpu.last(),55,.55,.3); }
+function psiMem(){ return psiFrom(R.memUsed.last()/32*100,86,2.2,0); }
+function psiMemF(){ return psiFrom(R.memUsed.last()/32*100,94,1.4,0); }
+function psiIoOf(d){ return psiFrom(d.u.last(),45,.75,.2); }
+function psiIoMax(){ var m=0; DISKS.forEach(function(d){ m=Math.max(m,psiIoOf(d)); }); return m; }
+
+/* ============ 取色 ============ */
+function css(v,elm){ return getComputedStyle(elm||document.documentElement).getPropertyValue(v).trim(); }
+var C={};
+function reloadColors(){
+  ["cpu","gpu","mem","disk","net"].forEach(function(k){ C[k]=css("--c-"+k); });
+  C.ink=css("--ink"); C.ink3=css("--ink-3"); C.surface=css("--surface");
+  C.ok=css("--ok"); C.warn=css("--warn"); C.crit=css("--crit");
+  C.band=parseFloat(css("--band")); C.fill=parseFloat(css("--fill")); C.gridA=parseFloat(css("--gridA"));
+}
+reloadColors();
+function alpha(hex,a){
+  hex=(hex||"#888").replace("#","");
+  if(hex.length===3) hex=hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+  var n=parseInt(hex,16);
+  return "rgba("+((n>>16)&255)+","+((n>>8)&255)+","+(n&255)+","+a+")";
+}
+function pct(v,d){ return v.toFixed(d==null?1:d)+"%"; }
+function mbs(v){ return v<1?(v*1024).toFixed(0)+" KB/s": v<1024?v.toFixed(1)+" MB/s":(v/1024).toFixed(2)+" GB/s"; }
+function gb(v){ return v.toFixed(1)+" GB"; }
+function cap(v){ return v<1?(v*1024).toFixed(0)+" MB" : v>=1000?(v/1024).toFixed(2)+" TB" : v.toFixed(0)+" GB"; }
+
+/* ============ uPlot 封装 ============ */
+var plots=[];
+function mesh(u){
+  var ctx=u.ctx, b=u.bbox, dpr=window.devicePixelRatio||1;
+  var step=Math.max(18,Math.round(b.width/dpr/18))*dpr;
+  ctx.save(); ctx.strokeStyle=u.__grid; ctx.lineWidth=1; ctx.beginPath();
+  for(var x=b.left+step; x<b.left+b.width; x+=step){ var xx=Math.round(x)+.5; ctx.moveTo(xx,b.top); ctx.lineTo(xx,b.top+b.height); }
+  for(var y=b.top+step; y<b.top+b.height; y+=step){ var yy=Math.round(y)+.5; ctx.moveTo(b.left,yy); ctx.lineTo(b.left+b.width,yy); }
+  ctx.stroke(); ctx.restore();
+}
+function endMark(u,si,color){
+  var arr=u.data[si]; if(!arr) return;
+  var v=arr[arr.length-1]; if(v==null) return;
+  var b=u.bbox, dpr=window.devicePixelRatio||1, s=6*dpr;
+  var y=u.valToPos(v,"y",true), x=b.left+b.width;
+  u.ctx.save();
+  u.ctx.fillStyle=color; u.ctx.fillRect(x-s,y-s/2,s,s);
+  u.ctx.strokeStyle=C.surface; u.ctx.lineWidth=1.5*dpr; u.ctx.strokeRect(x-s,y-s/2,s,s);
+  u.ctx.restore();
+}
+function mkPlot(box, spec){
+  var ser=[{}];
+  spec.series.forEach(function(s){
+    ser.push({ stroke:s.stroke||"rgba(0,0,0,0)", width:s.width==null?2:s.width,
+               fill:s.fill||null, dash:s.dash||null, points:{show:false} });
+  });
+  var o={
+    width: box.clientWidth||300, height: spec.h,
+    padding:[0,0,0,0], legend:{show:false},
+    cursor: spec.cursor===false ? {show:false}
+          : {x:true,y:false,points:{show:false},drag:{setScale:false}},
+    scales:{ x:{time:false}, y:{range:function(){ return [0, spec.ymax()]; }} },
+    axes:[{show:false},{show:false}],
+    series: ser,
+    hooks:{
+      drawClear:[ function(u){ if(spec.mesh!==false) mesh(u); } ],
+      draw:[ function(u){ if(spec.endpoint) endMark(u,spec.endpoint[0],spec.endpoint[1]); } ],
+      setCursor: spec.cursor===false ? [] : [ function(u){ tipMove(u,spec,box); } ]
+    }
+  };
+  if(spec.bands) o.bands=spec.bands;
+  var u=new uPlot(o, spec.data(), box);
+  u.__grid = alpha(spec.hue, C.gridA);
+  var rec={u:u,spec:spec,box:box}; plots.push(rec);
+  return rec;
+}
+function tipMove(u,spec,box){
+  var tip=box._tip; if(!tip) return;
+  var i=u.cursor.idx;
+  if(i==null || u.cursor.left<0){ tip.style.opacity="0"; return; }
+  tip.innerHTML=spec.tip(i); tip.style.opacity="1";
+  var tw=tip.offsetWidth, w=u.over.clientWidth, lx=u.cursor.left+12;
+  if(lx+tw>w-4) lx=u.cursor.left-tw-12;
+  if(lx<4) lx=4;
+  tip.style.left=lx+"px"; tip.style.top="18px";
+}
+function killPlots(){ plots.forEach(function(p){ try{p.u.destroy();}catch(e){} }); plots=[]; minis=[]; }
+
+/* 逻辑处理器热力图：一张 canvas 画完整个 socket，实例数与核数无关 */
+var heats=[];
+function killHeats(){ heats=[]; }
+function heatGeom(rec,w){
+  if(!w||w<40) w=320;
+  var cols=8;
+  [8,16,32].forEach(function(c){ if(c<=rec.count && w/c>=22) cols=c; });
+  var cw=w/cols, rows=Math.ceil(rec.count/cols);
+  var ch=Math.max(9, Math.min(cw, 30));
+  return {cols:cols,rows:rows,cw:cw,ch:ch};
+}
+function drawHeat(rec){
+  var w=rec.box.clientWidth||300, g=heatGeom(rec,w), dpr=window.devicePixelRatio||1;
+  var h=Math.round(g.rows*g.ch);
+  if(rec.cv.width!==Math.round(w*dpr)||rec.cv.height!==Math.round(h*dpr)){
+    rec.cv.width=Math.round(w*dpr); rec.cv.height=Math.round(h*dpr); rec.cv.style.height=h+"px";
+  }
+  var ctx=rec.cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  var gap = g.cw>14?1.5:1;
+  for(var i=0;i<rec.count;i++){
+    var v=rec.get(i);
+    var x=(i%g.cols)*g.cw, y=Math.floor(i/g.cols)*g.ch;
+    ctx.fillStyle=alpha(rec.hue,.10+.90*Math.min(1,v/100));
+    ctx.fillRect(x,y,g.cw-gap,g.ch-gap);
+    if(rec.hover===i){
+      ctx.strokeStyle=C.ink; ctx.lineWidth=1.5;
+      ctx.strokeRect(x+.75,y+.75,g.cw-gap-1.5,g.ch-gap-1.5);
+    }
+  }
+}
+function mkHeat(box,count,hue,get,label,into){
+  var cv=document.createElement("canvas"); cv.style.width="100%"; cv.style.display="block";
+  box.appendChild(cv);
+  var tip=el("div","tip"); box.appendChild(tip);
+  var rec={box:box,cv:cv,tip:tip,count:count,hue:hue,hover:-1,get:get,label:label};
+  cv.addEventListener("mousemove",function(ev){
+    var r=cv.getBoundingClientRect(), g=heatGeom(rec,r.width);
+    var cx=Math.floor((ev.clientX-r.left)/g.cw), cy=Math.floor((ev.clientY-r.top)/g.ch);
+    var i=cy*g.cols+cx;
+    if(cx<0||cx>=g.cols||i<0||i>=rec.count){ rec.hover=-1; tip.style.opacity="0"; drawHeat(rec); return; }
+    rec.hover=i;
+    tip.innerHTML="<b>"+rec.label(i)+"</b><br>"+rec.get(i).toFixed(1)+"%";
+    tip.style.opacity="1";
+    var tw=tip.offsetWidth, lx=(cx+1)*g.cw+8;
+    if(lx+tw>r.width-4) lx=cx*g.cw-tw-8;
+    if(lx<4) lx=4;
+    tip.style.left=lx+"px"; tip.style.top=Math.max(0,cy*g.ch-4)+"px";
+    drawHeat(rec);
+  });
+  cv.addEventListener("mouseleave",function(){ rec.hover=-1; tip.style.opacity="0"; drawHeat(rec); });
+  (into||heats).push(rec); drawHeat(rec);
+}
+function heatLegend(hue){
+  var w=el("div","heatleg");
+  w.appendChild(el("span",null,"0%"));
+  var r=el("div","ramp");
+  r.style.background="linear-gradient(to right,"+alpha(hue,.10)+","+alpha(hue,.5)+","+alpha(hue,1)+")";
+  w.appendChild(r);
+  w.appendChild(el("span",null,"100%"));
+  w.appendChild(el("span","legnote","每格 = 一个逻辑处理器"));
+  return w;
+}
+function refreshPlots(){ plots.forEach(function(p){ p.u.setData(p.spec.data()); }); }
+function resizePlots(){
+  plots.forEach(function(p){ p.u.setSize({width:p.box.clientWidth||300, height:p.spec.h}); });
+  heats.forEach(drawHeat);
+}
+
+/* ============ 聚合层假数据（design.md §7.5） ============ */
+var RANGES=[
+  {k:"60s",label:"60 秒", layer:"live", span:"60 秒", band:false},
+  {k:"1h", label:"1 小时",layer:"live", span:"1 小时",band:true,pts:60},
+  {k:"24h",label:"24 小时",layer:"m_1m",span:"24 小时",band:true,pts:96},
+  {k:"7d", label:"7 天",  layer:"m_15m",span:"7 天",  band:true,pts:84},
+  {k:"30d",label:"30 天", layer:"m_1d", span:"30 天", band:true,pts:60}
+];
+function RNG(){ return RANGES.filter(function(x){return x.k===range;})[0]; }
+var bandCache={};
+function bandData(key,pts,base,amp,seed){
+  var ck=key+"|"+pts; if(bandCache[ck]) return bandCache[ck];
+  var r=mulberry32(seed), xs=[],mn=[],mx=[],av=[],md=[], v=base;
+  for(var i=0;i<pts;i++){
+    xs.push(i);
+    v += (base-v)*.12 + (r()-.5)*amp*.5; if(v<1)v=1;
+    var sp=amp*(.35+r()*.9), a=Math.max(.5,Math.min(100,v)), m=Math.max(.4,a-sp*(.10+r()*.42));
+    av.push(a); md.push(m);
+    mn.push(Math.max(0,m-sp*(.3+r()*.4)));
+    mx.push(Math.min(100,a+sp*(.9+r()*1.5)));
+  }
+  bandCache[ck]={xs:xs,min:mn,max:mx,avg:av,med:md}; return bandCache[ck];
+}
+var BANDCFG={cpu:[21,26,7],gpu0:[47,24,61],gpu1:[12,18,73],mem:[39,14,17],
+             nvme0n1:[9,30,23],nvme1n1:[34,28,89],sda:[3,16,37],eth0:[12,22,47],eth1:[4,10,107]};
+function curBand(id){ var R=RNG(), c=BANDCFG[id]||[20,20,3]; return bandData(id+range,R.pts||60,c[0],c[1],c[2]+(R.pts||60)); }
+/* band 规格：series 1=max 2=min 3=avg 4=med，band 填 [1,2] */
+function bandSpec(h,id,hue,tl,tr){
+  return {h:h,hue:hue,
+    ymax:function(){return 100;},
+    data:function(){ var d=curBand(id); return [d.xs,d.max,d.min,d.avg,d.med]; },
+    series:[{width:0},{width:0},{stroke:hue,width:2},{stroke:hue,width:1.5,dash:[4,3]}],
+    bands:[{series:[1,2],fill:alpha(hue,C.band)}],
+    tip:function(i){
+      var d=curBand(id), R=RNG();
+      var lbl=R.k==="1h"?(60-i)+" 分钟前":R.k==="24h"?((96-i)*15)+" 分钟前":R.k==="7d"?((84-i)*2)+" 小时前":((60-i)/2).toFixed(0)+" 天前";
+      return "<b>"+lbl+"</b><br>avg "+d.avg[i].toFixed(1)+"%<br>med "+d.med[i].toFixed(1)+"%<br>min–max "+d.min[i].toFixed(1)+"–"+d.max[i].toFixed(1)+"%";
+    }, _tl:tl, _tr:tr};
+}
+
+/* ============ 资源树 ============ */
+var TREE=[
+  {kind:"one",   id:"cpu", name:"CPU", hue:"cpu"},
+  {kind:"group", id:"gpu", name:"GPU", hue:"gpu", members:GPUS},
+  {kind:"one",   id:"mem", name:"内存", hue:"mem"},
+  {kind:"group", id:"disk",name:"磁盘", hue:"disk",members:DISKS},
+  {kind:"group", id:"net", name:"网络", hue:"net", members:NETS}
+];
+var expanded={}, current="cpu", range="60s", coreView=false, tableEl=null;
+
+function nodeById(id){
+  for(var i=0;i<TREE.length;i++){
+    var n=TREE[i];
+    if(n.id===id) return {node:n,member:null};
+    if(n.members) for(var j=0;j<n.members.length;j++) if(n.members[j].id===id) return {node:n,member:n.members[j]};
+  }
+  return {node:TREE[0],member:null};
+}
+function hueOf(id){ return nodeById(id).node.hue; }
+
+/* 摘要：速率求和，饱和度取最大 */
+function summaryOf(id){
+  if(id==="cpu") return pct(R.cpu.last(),0)+"   "+CORE_N+" 逻辑处理器";
+  if(id==="mem") return gb(R.memUsed.last())+"/32.0 GB ("+Math.round(R.memUsed.last()/32*100)+"%)";
+  if(id==="gpu"){ var mx=0,ms=0,mt=0; GPUS.forEach(function(g){ mx=Math.max(mx,g.u.last()); ms+=g.m.last(); mt+=g.vram; });
+    return "最忙 "+pct(mx,0)+"   显存 "+ms.toFixed(1)+"/"+mt+" GB"; }
+  if(id==="disk"){ var m2=0,s=0; DISKS.forEach(function(d){ m2=Math.max(m2,d.u.last()); s+=d.rd.last()+d.wr.last(); });
+    return "最忙 "+pct(m2,0)+"   合计 "+mbs(s); }
+  if(id==="net"){ var tx=0,rx=0; NETS.forEach(function(n){ tx+=n.tx.last(); rx+=n.rx.last(); });
+    return "合计 发 "+mbs(tx)+"  收 "+mbs(rx); }
+  var f=nodeById(id).member;
+  if(!f) return "";
+  if(f.u&&f.t) return pct(f.u.last(),0)+"   "+f.t.last().toFixed(0)+"°C";
+  if(f.u)      return pct(f.u.last(),0)+"   "+mbs(f.rd.last()+f.wr.last());
+  return "发 "+mbs(f.tx.last())+"  收 "+mbs(f.rx.last());
+}
+function psiOf(id){
+  if(id==="cpu") return psiCpu();
+  if(id==="mem") return psiMem();
+  if(id==="disk") return psiIoMax();
+  var f=nodeById(id).member;
+  if(f&&f.rd) return psiIoOf(f);
+  return 0;
+}
+function sparkOf(id){
+  if(id==="cpu") return R.cpu.a;
+  if(id==="mem") return R.memUsed.a.map(function(v){return v/32*100;});
+  if(id==="gpu"){ return GPUS[0].u.a.map(function(_,i){ var m=0; GPUS.forEach(function(g){m=Math.max(m,g.u.a[i]);}); return m; }); }
+  if(id==="disk"){ return DISKS[0].u.a.map(function(_,i){ var m=0; DISKS.forEach(function(d){m=Math.max(m,d.u.a[i]);}); return m; }); }
+  if(id==="net"){ var mx=1,i; for(i=0;i<N;i++){ var s=0; NETS.forEach(function(n){s+=n.tx.a[i]+n.rx.a[i];}); mx=Math.max(mx,s); }
+    return XS.map(function(_,i){ var s=0; NETS.forEach(function(n){s+=n.tx.a[i]+n.rx.a[i];}); return s/mx*100; }); }
+  var f=nodeById(id).member;
+  if(f.u) return f.u.a;
+  var m2=1,j; for(j=0;j<N;j++) m2=Math.max(m2,f.tx.a[j],f.rx.a[j]);
+  return f.tx.a.map(function(v){return v/m2*100;});
+}
+
+/* ============ 左栏 ============ */
+var rail=document.getElementById("rail");
+var railPlots=[];
+function buildRail(){
+  railPlots.forEach(function(p){ try{p.destroy();}catch(e){} }); railPlots=[];
+  railEls={}; railOrder=[];
+  while(rail.children.length>1) rail.removeChild(rail.lastChild);
+  TREE.forEach(function(t){
+    if(t.kind==="group" && t.members.length===0) return;          /* 探测不到就整类隐藏 */
+    if(t.kind==="group" && t.members.length===1){                  /* 只有一个成员就不是组 */
+      var only=t.members[0];
+      addRow(only.id, t.name, hueColor(t.hue), t.hue, 0, false, null);
+      return;
+    }
+    var isGroup = t.kind==="group";
+    addRow(t.id, t.name, hueColor(t.hue), t.hue, isGroup?t.members.length:0, false, t);
+    if(isGroup && expanded[t.id])
+      t.members.forEach(function(m){ addRow(m.id, m.name, hueColor(t.hue), t.hue, 0, true, null); });
+  });
+}
+function hueColor(h){ return C[h]; }
+function addRow(id,name,color,hueKey,count,child,groupNode){
+  var row=document.createElement("div");
+  row.className="res"+(child?" child":"");
+  row.setAttribute("aria-current", id===current?"true":"false");
+  row.style.setProperty("--hue","var(--c-"+hueKey+")");
+  var b=document.createElement("button");
+  b.className="res-main"; b.type="button";
+
+  var thumb=document.createElement("div"); thumb.className="thumb";
+  var sp=document.createElement("div"); sp.className="spark"; thumb.appendChild(sp);
+  var pr=document.createElement("div"); pr.className="rail-psi";
+  var pi=document.createElement("i"); pr.appendChild(pi); thumb.appendChild(pr);
+
+  var txt=document.createElement("div");
+  var nm=document.createElement("div"); nm.className="nm";
+  nm.appendChild(document.createTextNode(name));
+  if(count){ var cs=document.createElement("span"); cs.className="cnt"; cs.textContent=count+" 个"; nm.appendChild(cs); }
+  if(id==="eth0"||(id==="net"&&!expanded.net)){ var bd=document.createElement("span"); bd.className="badge"; bd.textContent="异常包 12/s"; nm.appendChild(bd); }
+  var vl=document.createElement("div"); vl.className="vl"; vl.textContent="—";
+  txt.appendChild(nm); txt.appendChild(vl);
+
+  b.appendChild(thumb); b.appendChild(txt);
+  b.addEventListener("click",function(){ current=id; range="60s"; buildRail(); buildDetail(); tick(false); });
+  row.appendChild(b);
+
+  if(count){
+    var tw=document.createElement("button"); tw.className="twist"; tw.type="button";
+    tw.textContent=expanded[id]?"−":"+";
+    tw.setAttribute("aria-label",(expanded[id]?"折叠":"展开")+name+"组");
+    tw.addEventListener("click",function(){ expanded[id]=!expanded[id]; buildRail(); tick(false); });
+    row.appendChild(tw);
+  } else row.appendChild(document.createElement("span"));
+
+  rail.appendChild(row);
+
+  var u=new uPlot({
+    width:child?56:72, height:34, padding:[1,0,1,0], legend:{show:false},
+    cursor:{show:false}, scales:{x:{time:false},y:{range:function(){return [0,100];}}},
+    axes:[{show:false},{show:false}],
+    series:[{},{stroke:color,width:1.5,fill:alpha(color,C.fill),points:{show:false}}]
+  },[XS,sparkOf(id)],sp);
+  railPlots.push(u);
+  railEls[id]={vl:vl,psi:pi,u:u}; railOrder.push(id);
+}
+var railEls={}, railOrder=[];
+
+/* ============ 右栏 ============ */
+var detail=document.getElementById("detail");
+function el(t,c,x){ var e=document.createElement(t); if(c)e.className=c; if(x!=null)e.textContent=x; return e; }
+function statsBlock(items){
+  var g=el("div","stats");
+  items.forEach(function(it){
+    var d=el("div","stat"), dt=el("dt",null,it[0]), dd=el("dd",it[2]?"sm":null);
+    dd.id="st_"+it[1]; dd.textContent="—"; d.appendChild(dt); d.appendChild(dd); g.appendChild(d);
+  });
+  return g;
+}
+function factsBlock(pairs){
+  var f=el("dl","facts");
+  pairs.forEach(function(p){
+    var dt=el("dt",null,p[0]), dd=el("dd",null,p[1]);
+    dd.title=p[1]; f.appendChild(dt); f.appendChild(dd);
+  });
+  return f;
+}
+function grids(stats,facts){
+  var g=el("div","grids"); g.appendChild(stats); g.appendChild(facts); return g;
+}
+function rangeBar(extra){
+  var row=el("div","chart-tools"), seg=el("div","seg");
+  RANGES.forEach(function(RR){
+    var b=el("button",null,RR.label); b.type="button";
+    b.setAttribute("aria-pressed", RR.k===range?"true":"false");
+    b.addEventListener("click",function(){ range=RR.k; buildDetail(); tick(false); });
+    seg.appendChild(b);
+  });
+  row.appendChild(seg);
+  if(extra) row.appendChild(extra);
+  var R2=RNG();
+  row.appendChild(el("div","note", R2.band?("自动选层 → "+R2.layer+"　区间带 = min–max，实线 = avg，虚线 = med")
+                                          :"自动选层 → live（内存环形缓冲，2s 采集）"));
+  return row;
+}
+var pending=[];
+function plotBox(spec){
+  var p=el("div","plot"); p.style.height=spec.h+"px";
+  p.appendChild(el("div","lb tl",spec._tl||""));
+  var tr=el("div","lb tr",spec._tr||""); p.appendChild(tr);
+  p.appendChild(el("div","lb bl",RNG().span));
+  p.appendChild(el("div","lb br","0"));
+  var tip=el("div","tip"); p.appendChild(tip);
+  p._tip=tip; p._trEl=tr;
+  pending.push({box:p,spec:spec});
+  return p;
+}
+var pendingHeat=[];
+function mountPending(){
+  pendingHeat.forEach(function(q){ mkHeat(q.box,q.count,q.hue,q.get,q.label); });
+  pendingHeat=[];
+  pending.forEach(function(q){
+    q.box.style.height="";
+    var rec=mkPlot(q.box,q.spec);
+    rec.trEl=q.box._trEl;
+  });
+  pending=[];
+}
+function legendOf(items){
+  var l=el("div","legend");
+  items.forEach(function(it){
+    var s=el("span"), i=el("i");
+    if(it[2]==="dash"){ i.className="dash"; i.style.borderTopColor=it[1]; } else i.style.background=it[1];
+    s.appendChild(i); s.appendChild(document.createTextNode(it[0])); l.appendChild(s);
+  });
+  return l;
+}
+function td(cls,html){ var e=document.createElement("td"); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; }
+function mkTable(cls,caption,heads){
+  var t=document.createElement("table"); t.className=cls;
+  if(caption){ var cp=document.createElement("caption"); cp.textContent=caption; t.appendChild(cp); }
+  var th=document.createElement("thead"), tr=document.createElement("tr");
+  heads.forEach(function(h){
+    var e=document.createElement("th");
+    if(h&&h.charAt(0)===">"){ e.className="r"; e.textContent=h.slice(1); } else e.textContent=h||"";
+    tr.appendChild(e);
+  });
+  th.appendChild(tr); t.appendChild(th);
+  var tb=document.createElement("tbody"); t.appendChild(tb);
+  return {t:t,tb:tb};
+}
+function barCell(p,hue){
+  var c=td();
+  var bar=el("div","bar"), i=el("i");
+  i.style.width=p.toFixed(1)+"%";
+  i.style.background = p>=80?C.crit : p>=70?C.warn : hue;
+  bar.appendChild(i); c.appendChild(bar); return c;
+}
+function devCell(name,sub){
+  var c=td();
+  var a=el("span","dev",name); c.appendChild(a);
+  c.appendChild(document.createElement("br"));
+  c.appendChild(el("span","sub",sub));
+  return c;
+}
+function tableView(label,get){
+  var d=el("details","tbl"); d.appendChild(el("summary",null,"以表格查看最近读数"));
+  var m=mkTable("","", ["时刻",label]);
+  d.appendChild(m.t); d._body=m.tb; d._get=get; return d;
+}
+function crumb(groupId,groupName,meName){
+  var c=el("div","crumb");
+  var b=el("button",null,groupName+"组"); b.type="button";
+  b.addEventListener("click",function(){ current=groupId; range="60s"; buildRail(); buildDetail(); tick(false); });
+  c.appendChild(b); c.appendChild(document.createTextNode("  ›  "+meName));
+  return c;
+}
+function tsec(){ return (N-1); }
+
+var DTOP=null, DBODY=null, pageUpd=[];
+function addTop(x){ DTOP.appendChild(x); return x; }
+function addBody(x){ DBODY.appendChild(x); return x; }
+function buildDetail(){
+  killPlots(); killHeats(); pending=[]; tableEl=null; detail.textContent="";
+  pageUpd=[];
+  DTOP=el("div","d-top"); DBODY=el("div","d-body");
+  detail.append(DTOP); detail.append(DBODY);
+  var r=nodeById(current), n=r.node, m=r.member, hue=hueColor(n.hue);
+  detail.style.setProperty("--hue","var(--c-"+n.hue+")");
+  document.getElementById("signature").style.setProperty("--hue","var(--c-"+n.hue+")");
+  var R2=RNG();
+
+  if(current==="cpu")       panelCpu(hue,R2);
+  else if(current==="mem")  panelMem(hue,R2);
+  else if(current==="gpu")  groupGpu(hue);
+  else if(current==="disk") groupDisk(hue);
+  else if(current==="net")  groupNet(hue);
+  else if(m&&m.vram)        panelGpu(m,hue,R2);
+  else if(m&&m.rd)          panelDisk(m,hue,R2);
+  else if(m)                panelNet(m,hue,R2);
+
+  mountPending();
+}
+
+/* ---- CPU ---- */
+function panelCpu(hue,R2){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,"CPU"));
+  head.appendChild(el("div","model","2 × AMD EPYC · "+CORE_N+" 逻辑处理器"));
+  addTop(head);
+  var tgl=el("div","seg");
+  var b1=el("button",null,"总体"), b2=el("button",null,"逻辑处理器"); b1.type=b2.type="button";
+  b1.setAttribute("aria-pressed",coreView?"false":"true");
+  b2.setAttribute("aria-pressed",coreView?"true":"false");
+  b1.addEventListener("click",function(){coreView=false;buildDetail();tick(false);});
+  b2.addEventListener("click",function(){coreView=true;buildDetail();tick(false);});
+  tgl.appendChild(b1); tgl.appendChild(b2);
+  addTop(rangeBar(tgl));
+
+  if(coreView && !R2.band){
+    var per=CORE_N/SOCKETS, small=CORE_N<=GRID_MAX;
+    for(var sk=0;sk<SOCKETS;sk++){
+      (function(sock){
+        var from=sock*per;
+        var w=el("div","sock");
+        w.appendChild(el("h4",null,"Socket "+sock+" · cpu"+from+"–cpu"+(from+per-1)));
+        if(small){
+          var g=el("div","cores");
+          g.style.gridTemplateColumns="repeat("+(per<=8?per:8)+",1fr)";
+          for(var i=from;i<from+per;i++){
+            (function(idx){
+              var cell=el("div","cell"); cell.appendChild(el("span","cl","cpu"+idx));
+              g.appendChild(cell);
+              pending.push({box:cell,spec:{h:54,hue:hue,cursor:false,ymax:function(){return 100;},
+                data:function(){ return [XS,CORES[idx].a]; },
+                series:[{stroke:hue,width:1.5,fill:alpha(hue,C.fill)}]}});
+            })(i);
+          }
+          w.appendChild(g);
+        }else{
+          var hm=el("div","heat"); w.appendChild(hm);
+          pendingHeat.push({box:hm,count:per,hue:hue,
+            get:function(i){ return CORES[from+i].last(); },
+            label:function(i){ return "cpu"+(from+i); }});
+        }
+        addBody(w);
+      })(sk);
+    }
+    addBody(small ? legendOf([["cpu.core.usage · 每核一图，按 socket 分块",hue]]) : heatLegend(hue));
+  }else{
+    if(R2.band){
+      addBody(plotBox(bandSpec(190,"cpu",hue,"% 利用率","100%")));
+      addBody(legendOf([["avg",hue],["med",hue,"dash"],["min–max 区间带",alpha(hue,C.band+.12)]]));
+    }else{
+      addBody(plotBox({h:190,hue:hue,
+        _tl:coreView?"% 利用率（逻辑处理器网格仅 60 秒档提供）":"% 利用率", _tr:"100%",
+        ymax:function(){return 100;},
+        data:function(){ return [XS,R.cpu.a,R.cpu.a.map(function(v){return v*.28;})]; },
+        series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)},{stroke:alpha(hue,.75),width:1,fill:alpha(hue,C.fill+.18)}],
+        endpoint:[1,hue],
+        tip:function(i){ return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+
+          sw(hue)+"总占用 "+R.cpu.a[i].toFixed(1)+"%<br>"+sw(alpha(hue,.6))+"内核 "+(R.cpu.a[i]*.28).toFixed(1)+"%"; }}));
+      addBody(legendOf([["cpu.usage",hue],["cpu.system（内核时间）",alpha(hue,.6)]]));
+    }
+  }
+  addBody(grids(
+    statsBlock([["利用率","cpu_u"],["内核","cpu_s"],["等待 IO","cpu_io"],["中断","cpu_irq"],["被偷走","cpu_st"],["CPU 停滞","cpu_psi"]]),
+    factsBlock([["型号","EPYC 7302P ×2"],["插槽 / 物理核","2 / "+(CORE_N/2)],["逻辑处理器",String(CORE_N)+"（SMT）"],
+      ["虚拟化","已启用"],["运行时间","61 天 04:22:17"],["负载 1 分钟","0.84"],["进程","412"],["运行队列","3"]])));
+  tableEl=tableView("cpu.usage (%)",function(){return R.cpu.a;}); addBody(tableEl);
+}
+function sw(c){ return '<span class="sw" style="background:'+c+'"></span>'; }
+
+/* ---- 内存 ---- */
+function panelMem(hue,R2){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,"内存"));
+  head.appendChild(el("div","model","32.0 GB · DDR4-3200 ECC"));
+  addTop(head);
+  addTop(rangeBar(null));
+  var box=el("div"), compo=el("div","compo");
+  var i1=el("i"); i1.id="cp_used"; i1.style.background=hue;
+  var i2=el("i"); i2.id="cp_cache"; i2.style.background=alpha(hue,.45);
+  var i3=el("i"); i3.id="cp_free"; i3.style.background="transparent";
+  compo.appendChild(i1); compo.appendChild(i2); compo.appendChild(i3);
+  box.appendChild(compo);
+  var cl=el("div","compo-l");
+  [["使用中",hue],["缓存",alpha(hue,.45)],["可用","color-mix(in oklab, var(--c-mem) var(--tint-track), var(--surface-2))"]].forEach(function(t){
+    var s=el("span"), ic=el("i"); ic.style.background=t[1]; s.appendChild(ic); s.appendChild(document.createTextNode(t[0])); cl.appendChild(s);
+  });
+  box.appendChild(cl); addBody(box);
+  if(R2.band){
+    addBody(plotBox(bandSpec(148,"mem",hue,"内存使用率","100%")));
+    addBody(legendOf([["avg",hue],["med",hue,"dash"],["min–max 区间带",alpha(hue,C.band+.12)]]));
+  }else{
+    addBody(plotBox({h:148,hue:hue,_tl:"内存使用量",_tr:"32.0 GB",
+      ymax:function(){return 32;}, data:function(){ return [XS,R.memUsed.a]; },
+      series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)}], endpoint:[1,hue],
+      tip:function(i){ return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(hue)+"使用中 "+R.memUsed.a[i].toFixed(2)+" GB"; }}));
+    addBody(legendOf([["mem.used",hue]]));
+  }
+  addBody(grids(
+    statsBlock([["使用中","m_used"],["可用","m_avail"],["缓存","m_cache"],["交换分区","m_swap",1],["内存停滞","m_psi"],["彻底停滞","m_psif"]]),
+    factsBlock([["总容量","32.0 GB"],["类型","DDR4-3200 ECC"],["插槽","2 / 4 已用"],
+      ["交换分区","8.0 GB"],["swappiness","10"],["透明大页","madvise"]])));
+  tableEl=tableView("mem.used (GB)",function(){return R.memUsed.a;}); addBody(tableEl);
+}
+
+/* ---- 组概览：通用表头 ---- */
+function goTo(id){ current=id; range="60s"; expanded[nodeById(id).node.id]=true; buildRail(); buildDetail(); tick(false); }
+/* 组概览的每一行就是入口：整行可点，也可用键盘 */
+function rowLink(tr,id,label){
+  tr.className="link"; tr.tabIndex=0; tr.setAttribute("role","button");
+  tr.setAttribute("aria-label","打开 "+label);
+  tr.addEventListener("click",function(){ goTo(id); });
+  tr.addEventListener("keydown",function(ev){
+    if(ev.key==="Enter"||ev.key===" "){ ev.preventDefault(); goTo(id); }
+  });
+  return tr;
+}
+var minis=[];
+function miniCell(id,hue,arr,maxFn){
+  var cell=el("td","thumbcell"), d=el("div","mini");
+  cell.appendChild(d);
+  var rail=el("div","minipsi"), bar=el("i"); rail.appendChild(bar); cell.appendChild(rail);
+  minis.push({id:id,bar:bar});
+  pending.push({box:d,spec:{h:50,hue:hue,cursor:false,ymax:maxFn,
+    data:function(){ return [XS,arr()]; },
+    series:[{stroke:hue,width:1.5,fill:alpha(hue,C.fill)}]}});
+  return cell;
+}
+/* 挂载点表：默认折叠成一行合计，点开才铺开各分区。
+   合计的读写按**去重后的后端设备**求和——三个挂载点同在一块盘上，
+   把它们各自的速率相加会把同一份 IO 数三遍。 */
+var mountsOpen=false;
+function mountTable(list,hue,caption,pfx){
+  var devs={}; list.forEach(function(m){ if(m.dev) devs[m.dev]=1; });
+  var devN=Object.keys(devs).length;
+  var used=0,total=0; list.forEach(function(m){ used+=m.used; total+=m.total; });
+  var all= total? used/total*100 : 0;
+
+  var M=mkTable("gtbl",caption,["挂载点","后端设备","使用量",">已用 / 容量",">读取",">写入"]);
+  var head=document.createElement("tr");
+  head.className="mtot link"; head.tabIndex=0; head.setAttribute("role","button");
+  head.setAttribute("aria-expanded", mountsOpen?"true":"false");
+  head.appendChild(td(null,"<span class='tw'>"+(mountsOpen?"▾":"▸")+"</span><span class='path'>全部挂载点</span>"));
+  head.appendChild(td(null,"<span class='sub'>"+list.length+" 个 · "+(devN||"无")+" 块设备</span>"));
+  head.appendChild(barCell(all,hue));
+  head.appendChild(td("r num", all.toFixed(0)+"<small>%</small> <span class='sub'>"+cap(used)+" / "+cap(total)+"</span>"));
+  var rc=td("r num","—"), wc=td("r num","—"); head.appendChild(rc); head.appendChild(wc);
+  function toggle(){ mountsOpen=!mountsOpen; buildDetail(); tick(false); }
+  head.addEventListener("click",toggle);
+  head.addEventListener("keydown",function(ev){ if(ev.key==="Enter"||ev.key===" "){ ev.preventDefault(); toggle(); } });
+  M.tb.appendChild(head);
+  pageUpd.push(function(){
+    var r=0,w=0;
+    Object.keys(devs).forEach(function(dv){
+      var d=DISKS.filter(function(x){return x.dev===dv;})[0];
+      if(d){ r+=d.rd.last(); w+=d.wr.last(); }
+    });
+    rc.innerHTML=devN? mbs(r) : "<span class='sub'>—</span>";
+    wc.innerHTML=devN? mbs(w) : "<span class='sub'>—</span>";
+  });
+
+  if(mountsOpen) list.forEach(function(m,i){
+    var q=m.used/m.total*100, tr=document.createElement("tr");
+    tr.appendChild(td(null,"<span class='path'>"+m.p+"</span>"));
+    tr.appendChild(td(null,(m.dev?"<span class='dev'>"+m.dev+"</span>":"<span class='sub'>无块设备</span>")+" <span class='sub'>· "+m.fs+"</span>"));
+    tr.appendChild(barCell(q,hue));
+    tr.appendChild(td("r num", q.toFixed(0)+"<small>%</small> <span class='sub'>"+cap(m.used)+" / "+cap(m.total)+"</span>"));
+    var a=td("r num","—"), b=td("r num","—"); tr.appendChild(a); tr.appendChild(b);
+    pageUpd.push(function(){
+      if(!m.dev){ a.innerHTML="<span class='sub'>—</span>"; b.innerHTML="<span class='sub'>—</span>"; return; }
+      var d=DISKS.filter(function(x){return x.dev===m.dev;})[0];
+      if(d){ a.innerHTML=mbs(d.rd.last()); b.innerHTML=mbs(d.wr.last()); }
+    });
+    M.tb.appendChild(m.dev? rowLink(tr,m.dev,m.p+"（"+m.dev+"）") : tr);
+  });
+  return M.t;
+}
+
+/* 组页的成员区：B 形态的格子，固定最大高度、内部滚动，点进详情页 */
+function memberCell(id,name,sub,hue,arrFn,ymaxFn,valFn,psiFn){
+  var b=document.createElement("button"); b.className="mcell"; b.type="button";
+  b.setAttribute("aria-label","打开 "+name);
+  var f=el("div","vfill"); b.appendChild(f);
+  b.appendChild(el("div","vname",name));
+  if(sub) b.appendChild(el("div","vtype",sub));
+  var v=el("div","vval","—"); b.appendChild(v);
+  var pr=el("div","mpsi"), pi=el("i"); pr.appendChild(pi); b.appendChild(pr);
+  b.addEventListener("click",function(){ goTo(id); });
+  pending.push({box:f,spec:{h:79,hue:hue,cursor:false,ymax:ymaxFn,
+    data:function(){ return [XS,arrFn()]; },
+    series:[{stroke:hue,width:1.5,fill:alpha(hue,C.fill)}]}});
+  pageUpd.push(function(){
+    v.innerHTML=valFn();
+    var q=psiFn?psiFn():0;
+    pi.style.width=Math.max(2,Math.min(100,q))+"%";
+    pi.style.background = q>=CFG.psiCrit?C.crit : q>=CFG.psiWarn?C.warn : C.ok;
+  });
+  return b;
+}
+function memberZone(label,cells){
+  var wrap=el("div");
+  wrap.appendChild(el("div","zlabel",label));
+  var z=el("div","mzone"), g=el("div","mgrid");
+  cells.forEach(function(c){ g.appendChild(c); });
+  z.appendChild(g); wrap.appendChild(z);
+  return wrap;
+}
+/* 组页的聚合图：饱和度取组内最大，速率取合计 —— 标签必须说清是哪种 */
+function aggPlot(h,label,hue,arrFn,ymaxFn,tipFn){
+  return plotBox({h:h,hue:hue,_tl:label,_tr:"100%",ymax:ymaxFn,
+    data:function(){ return [XS,arrFn()]; },
+    series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)}], endpoint:[1,hue], tip:tipFn});
+}
+function maxSeries(list,pick){
+  return XS.map(function(_,i){ var m=0; list.forEach(function(d){ m=Math.max(m,pick(d)[i]); }); return m; });
+}
+function sumSeries(list,pick){
+  return XS.map(function(_,i){ var t=0; list.forEach(function(d){ t+=pick(d)[i]; }); return t; });
+}
+function groupHead(name,sub){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,name+"　组概览"));
+  head.appendChild(el("div","model",sub)); addTop(head);
+}
+
+function groupGpu(hue){
+  groupHead("GPU","2 块 · AMD Radeon Pro W6800");
+  addTop(rangeBar(null));
+  addBody(aggPlot(150,"% 利用率（组内取最大）",hue,
+    function(){ return maxSeries(GPUS,function(g){return g.u.a;}); },
+    function(){ return 100; },
+    function(i){ var m=0,who=""; GPUS.forEach(function(g){ if(g.u.a[i]>m){m=g.u.a[i];who=g.dev;} });
+      return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>最忙 "+who+" "+m.toFixed(1)+"%"; }));
+  addBody(memberZone("显卡 · "+GPUS.length+" 块", GPUS.map(function(g){
+    return memberCell(g.id,g.dev,"W6800",hue,
+      function(){return g.u.a;}, function(){return 100;},
+      function(){ return g.u.last().toFixed(0)+"<small>%</small>　<small>"+g.m.last().toFixed(1)+"/"+g.vram+" GB</small>"; },
+      null);
+  })));
+  addBody(grids(
+    statsBlock([["最忙","gg_umax"],["显存合计","gg_msum",1],["最高温度","gg_tmax"],["卡数","gg_n"]]),
+    factsBlock([["型号","Radeon Pro W6800 ×2"],["驱动","amdgpu 6.7"],["显存合计","64 GB GDDR6"],
+      ["总线","PCIe 4.0 ×16 ×2"],["采集源","sysfs（零依赖）"],["按引擎拆分","⭕ 未采集"]])));
+}
+function groupDisk(hue){
+  groupHead("磁盘",DISKS.length+" 块 · "+MOUNTS.length+" 个挂载点");
+  addTop(rangeBar(null));
+  addBody(aggPlot(150,"% 活动时间（组内取最大）",hue,
+    function(){ return maxSeries(DISKS,function(d){return d.u.a;}); },
+    function(){ return 100; },
+    function(i){ var m=0,who=""; DISKS.forEach(function(d){ if(d.u.a[i]>m){m=d.u.a[i];who=d.dev;} });
+      return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>最忙 "+who+" "+m.toFixed(1)+"%"; }));
+  addBody(memberZone("块设备 · "+DISKS.length+" 块", DISKS.map(function(d){
+    return memberCell(d.id,d.dev,d.kind,hue,
+      function(){return d.u.a;}, function(){return 100;},
+      function(){ return d.u.last().toFixed(0)+"<small>%</small>　<small>"+mbs(d.rd.last()+d.wr.last())+"</small>"; },
+      function(){ return psiIoOf(d); });
+  })));
+
+  addBody(mountTable(MOUNTS,hue,"全部挂载点","gall"));
+
+  addBody(grids(
+    statsBlock([["最忙","gd_umax"],["合计读取","gd_rsum",1],["合计写入","gd_wsum",1],
+                ["最慢响应","gd_await"],["合计 IOPS","gd_iops"],["IO 停滞","gd_psi"]]),
+    factsBlock([["设备数",String(DISKS.length)],["总容量","6.4 TB"],["挂载点",String(MOUNTS.length)],
+      ["接口","PCIe 4.0 ×2 · SATA ×1"],["SMART","全部正常"],["调度器","none / mq-deadline"]])));
+}
+function groupNet(hue){
+  groupHead("网络",NETS.length+" 个接口 · Intel X710-DA2");
+  addTop(rangeBar(null));
+  var agg=aggPlot(150,"吞吐合计 net.rx_bytes + tx_bytes",hue,
+    function(){ return sumSeries(NETS,function(x){return x.tx.a;}).map(function(v,i){
+      return v + sumSeries(NETS,function(x){return x.rx.a;})[i]; }); },
+    function(){ var m=1,i,j; for(i=0;i<N;i++){ var t=0; NETS.forEach(function(x){t+=x.tx.a[i]+x.rx.a[i];}); m=Math.max(m,t); } return m*1.15; },
+    function(i){ var t=0; NETS.forEach(function(x){t+=x.tx.a[i]+x.rx.a[i];});
+      return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>合计 "+mbs(t); });
+  addBody(agg);
+  pageUpd.push(function(){
+    var m=1,i; for(i=0;i<N;i++){ var t=0; NETS.forEach(function(x){t+=x.tx.a[i]+x.rx.a[i];}); m=Math.max(m,t); }
+    if(agg._trEl) agg._trEl.textContent=mbs(m*1.15);
+  });
+  addBody(memberZone("接口 · "+NETS.length+" 个", NETS.map(function(x){
+    return memberCell(x.id,x.dev,x.kind,hue,
+      function(){return x.tx.a;},
+      function(){ var m=1,i; for(i=0;i<N;i++) m=Math.max(m,x.tx.a[i],x.rx.a[i]); return m*1.15; },
+      function(){ return mbs(x.tx.last()+x.rx.last())+(x.err?"　<small style='color:"+C.crit+"'>异常 "+x.err+"</small>":""); },
+      null);
+  })));
+  addBody(grids(
+    statsBlock([["合计发送","gn_tsum",1],["合计接收","gn_rsum",1],["异常包","gn_err"]]),
+    factsBlock([["接口数",String(NETS.length)],["适配器","Intel X710-DA2"],["链路","10 Gb/s ×2"],
+      ["聚合","未做 bond"],["MTU","9000"],["链路利用率","⭕ 需 speed_mbps"]])));
+}
+
+/* ---- 成员详情 ---- */
+function panelGpu(g,hue,R2){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,g.name));
+  head.appendChild(el("div","model",g.model+" · "+g.drv+" · "+g.vram+" GB"));
+  addTop(head);
+  addTop(crumb("gpu","GPU",g.dev));
+  addTop(rangeBar(null));
+  if(R2.band){
+    addBody(plotBox(bandSpec(150,g.id,hue,"% 利用率","100%")));
+    addBody(legendOf([["avg",hue],["med",hue,"dash"],["min–max 区间带",alpha(hue,C.band+.12)]]));
+  }else{
+    addBody(plotBox({h:150,hue:hue,_tl:"% 利用率",_tr:"100%",ymax:function(){return 100;},
+      data:function(){return [XS,g.u.a];}, series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)}], endpoint:[1,hue],
+      tip:function(i){return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(hue)+"利用率 "+g.u.a[i].toFixed(1)+"%";}}));
+    addBody(plotBox({h:110,hue:hue,_tl:"显存 gpu.mem_used",_tr:g.vram+".0 GB",ymax:function(){return g.vram;},
+      data:function(){return [XS,g.m.a];}, series:[{stroke:alpha(hue,.85),width:2,fill:alpha(hue,C.fill)}], endpoint:[1,hue],
+      tip:function(i){return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(alpha(hue,.85))+"显存 "+g.m.a[i].toFixed(2)+" GB";}}));
+    addBody(legendOf([["gpu.usage",hue],["gpu.mem_used",alpha(hue,.6)]]));
+  }
+  addBody(grids(
+    statsBlock([["利用率","g_u"],["显存","g_m",1],["显存占比","g_mp"],["温度","g_t"],["功耗","g_p",1],["核心频率","g_f",1]]),
+    factsBlock([["设备",g.dev+" / renderD128"],["驱动",g.drv],["显存",g.vram+" GB GDDR6"],
+      ["总线","PCIe 4.0 ×16"],["采集源","sysfs（零依赖）"],["按引擎拆分","⭕ 未采集"]])));
+  tableEl=tableView("gpu.usage (%)",function(){return g.u.a;}); addBody(tableEl);
+}
+
+function panelDisk(d,hue,R2){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,d.name));
+  head.appendChild(el("div","model",d.model+" · "+d.bus+" · "+d.cap));
+  addTop(head);
+  addTop(crumb("disk","磁盘",d.dev));
+  addTop(rangeBar(null));
+  if(R2.band){
+    addBody(plotBox(bandSpec(118,d.id,hue,"% 活动时间 disk.util","100%")));
+    addBody(legendOf([["avg",hue],["med",hue,"dash"],["min–max 区间带",alpha(hue,C.band+.12)]]));
+  }else{
+    addBody(plotBox({h:118,hue:hue,_tl:"% 活动时间 disk.util",_tr:"100%",ymax:function(){return 100;},
+      data:function(){return [XS,d.u.a];}, series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)}], endpoint:[1,hue],
+      tip:function(i){return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(hue)+"活动时间 "+d.u.a[i].toFixed(1)+"%";}}));
+    addBody(plotBox({h:118,hue:hue,_tl:"传输速率 disk.read_bytes / write_bytes",_tr:"—",
+      ymax:function(){ var m=1,i; for(i=0;i<N;i++) m=Math.max(m,d.rd.a[i],d.wr.a[i]); return m*1.15; },
+      data:function(){return [XS,d.rd.a,d.wr.a];},
+      series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)},{stroke:alpha(hue,.6),width:1.5,fill:alpha(hue,C.fill*.7)}],
+      endpoint:[1,hue], live:"disk",
+      tip:function(i){return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(hue)+"读取 "+mbs(d.rd.a[i])+"<br>"+sw(alpha(hue,.6))+"写入 "+mbs(d.wr.a[i]);}}));
+    addBody(legendOf([["读取",hue],["写入",alpha(hue,.6)]]));
+  }
+  var mine=MOUNTS.filter(function(m){return m.dev===d.dev;});
+  if(mine.length) addBody(mountTable(mine,hue,"这块盘上的挂载点","gone"));
+
+  addBody(grids(
+    statsBlock([["活动时间","dk_u"],["平均响应","dk_aw"],["读取","dk_r",1],["写入","dk_w",1],["IOPS","dk_io"],["IO 停滞","dk_psi"]]),
+    factsBlock([["设备",d.dev],["接口",d.bus],["容量",d.cap],
+      ["挂载点",String(mine.length)],["SMART","正常"],["调度器","none"]])));
+  tableEl=tableView("disk.util (%)",function(){return d.u.a;}); addBody(tableEl);
+}
+
+function panelNet(nn,hue,R2){
+  var head=el("div","d-head"); head.appendChild(el("h3",null,nn.name));
+  head.appendChild(el("div","model",nn.model+" · "+nn.link));
+  addTop(head);
+  addTop(crumb("net","网络",nn.dev));
+  addTop(rangeBar(null));
+  if(R2.band){
+    addBody(plotBox(bandSpec(190,nn.id,hue,"吞吐（占链路带宽）","100%")));
+    addBody(legendOf([["avg",hue],["med",hue,"dash"],["min–max 区间带",alpha(hue,C.band+.12)]]));
+  }else{
+    addBody(plotBox({h:190,hue:hue,_tl:"吞吐 net.rx_bytes / tx_bytes",_tr:"—",
+      ymax:function(){ var m=1,i; for(i=0;i<N;i++) m=Math.max(m,nn.tx.a[i],nn.rx.a[i]); return m*1.15; },
+      data:function(){return [XS,nn.tx.a,nn.rx.a];},
+      series:[{stroke:hue,width:2,fill:alpha(hue,C.fill)},{stroke:alpha(hue,.6),width:1.5,fill:alpha(hue,C.fill*.7)}],
+      endpoint:[1,hue], live:"net",
+      tip:function(i){return "<b>"+(tsec()-i===0?"现在":(tsec()-i)+" 秒前")+"</b><br>"+sw(hue)+"发送 "+mbs(nn.tx.a[i])+"<br>"+sw(alpha(hue,.6))+"接收 "+mbs(nn.rx.a[i]);}}));
+    addBody(legendOf([["发送 tx",hue],["接收 rx",alpha(hue,.6)]]));
+  }
+  addBody(grids(
+    statsBlock([["发送","n_tx",1],["接收","n_rx",1],["异常包","n_err"]]),
+    factsBlock([["接口",nn.dev],["适配器",nn.model],["链路",nn.link],
+      ["IPv4",nn.ip4],["IPv6","fd00::7:31/64"],["MTU",String(nn.mtu)]])));
+  tableEl=tableView("net.tx_bytes (MB/s)",function(){return nn.tx.a;}); addBody(tableEl);
+}
+
+/* ============ 每帧更新 ============ */
+function setStat(id,v){ var e=document.getElementById("st_"+id); if(e) e.innerHTML=v; }
+function setTd(id,v){ var e=document.getElementById(id); if(e) e.innerHTML=v; }
+function un(s){ return '<small>'+s+'</small>'; }
+function lvl(v,a,b){ return v>=b?C.crit:v>=a?C.warn:C.ink; }
+
+function tick(advance){
+  if(advance){
+    for(var k in R) R[k].push();
+    for(var ci2=0;ci2<CORE_N;ci2++) CORES[ci2].push();
+    GPUS.forEach(function(g){g.u.push();g.m.push();g.t.push();});
+    DISKS.forEach(function(d){d.u.push();d.rd.push();d.wr.push();});
+    NETS.forEach(function(n){n.rx.push();n.tx.push();});
+  }
+  /* 左栏：按实际渲染出来的行更新 */
+  railOrder.forEach(upRail);
+  /* 主图 */
+  refreshPlots();
+  heats.forEach(drawHeat);
+  minis.forEach(function(mn){
+    var v=psiOf(mn.id);
+    mn.bar.style.width=Math.max(2,Math.min(100,v))+"%";
+    mn.bar.style.background = v>=CFG.psiCrit?C.crit : v>=CFG.psiWarn?C.warn : C.ok;
+  });
+  plots.forEach(function(p){
+    if(p.spec.live && p.trEl){
+      var m=1,i,arr=p.u.data;
+      for(i=0;i<N;i++) m=Math.max(m,arr[1][i],arr[2][i]);
+      p.trEl.textContent=mbs(m*1.15);
+    }
+  });
+  updNumbers();
+}
+function upRail(id){
+  var e=railEls[id]; if(!e) return;
+  e.vl.textContent=summaryOf(id);
+  var v=psiOf(id);
+  e.psi.style.width=Math.max(2,Math.min(100,v))+"%";
+  e.psi.style.background = v>=CFG.psiCrit?C.crit : v>=CFG.psiWarn?C.warn : C.ok;
+  e.u.setData([XS,sparkOf(id)]);
+}
+function updNumbers(){
+  var r=nodeById(current), m=r.member;
+  if(current==="cpu"){
+    var cu=R.cpu.last();
+    setStat("cpu_u",cu.toFixed(0)+un("%")); setStat("cpu_s",(cu*.28).toFixed(1)+un("%"));
+    setStat("cpu_io",R.iowait.last().toFixed(1)+un("%")); setStat("cpu_irq",R.irq.last().toFixed(1)+un("%"));
+    setStat("cpu_st","0.0"+un("%"));
+    var pc=psiCpu(); setStat("cpu_psi",'<span style="color:'+lvl(pc,CFG.psiWarn,CFG.psiCrit)+'">'+pc.toFixed(1)+"</span>"+un("%"));
+  }
+  if(current==="mem"){
+    var mu=R.memUsed.last(), mc=R.memCache.last();
+    setStat("m_used",mu.toFixed(1)+un("GB")); setStat("m_avail",(32-mu).toFixed(1)+un("GB"));
+    setStat("m_cache",mc.toFixed(1)+un("GB")); setStat("m_swap","0.4 / 8.0"+un("GB"));
+    var pm=psiMem(); setStat("m_psi",'<span style="color:'+lvl(pm,CFG.psiWarn,CFG.psiCrit)+'">'+pm.toFixed(1)+"</span>"+un("%"));
+    setStat("m_psif",psiMemF().toFixed(1)+un("%"));
+    var e1=document.getElementById("cp_used"),e2=document.getElementById("cp_cache"),e3=document.getElementById("cp_free");
+    if(e1){ e1.style.width=(mu/32*100)+"%"; e2.style.width=(mc/32*100)+"%"; e3.style.width=Math.max(0,100-(mu+mc)/32*100)+"%"; }
+  }
+  if(current==="gpu"){
+    var umax=0,msum=0,tmax=0;
+    GPUS.forEach(function(g){ umax=Math.max(umax,g.u.last()); msum+=g.m.last(); tmax=Math.max(tmax,g.t.last()); });
+    setStat("gg_umax",umax.toFixed(0)+un("%"));
+    setStat("gg_msum",msum.toFixed(1)+" / 64"+un("GB"));
+    setStat("gg_tmax",'<span style="color:'+lvl(tmax,75,85)+'">'+tmax.toFixed(0)+"</span>"+un("°C"));
+    setStat("gg_n",String(GPUS.length)+un("块"));
+  }
+  if(current==="disk"){
+    var umx=0,rs=0,ws=0,aw=0,io=0,pmax=0;
+    DISKS.forEach(function(d){
+      var uu=d.u.last();
+      umx=Math.max(umx,uu); rs+=d.rd.last(); ws+=d.wr.last();
+      aw=Math.max(aw,0.18+uu*.031);
+      io+=Math.round((d.rd.last()+d.wr.last())*11+uu*3);
+      pmax=Math.max(pmax,psiIoOf(d));
+    });
+    setStat("gd_umax",umx.toFixed(0)+un("%"));
+    setStat("gd_rsum",mbs(rs)); setStat("gd_wsum",mbs(ws));
+    setStat("gd_await",aw.toFixed(2)+un("ms"));
+    setStat("gd_iops",String(io));
+    setStat("gd_psi",'<span style="color:'+lvl(pmax,CFG.psiWarn,CFG.psiCrit)+'">'+pmax.toFixed(1)+"</span>"+un("%"));
+  }
+  if(current==="net"){
+    var ts=0,rs2=0,er=0;
+    NETS.forEach(function(nn){ ts+=nn.tx.last(); rs2+=nn.rx.last(); er+=nn.err; });
+    setStat("gn_tsum",mbs(ts)); setStat("gn_rsum",mbs(rs2));
+    setStat("gn_err", er? '<span style="color:'+C.crit+'">'+er+"</span>"+un("包/s") : "0"+un("包/s"));
+  }
+  if(m&&m.vram){
+    setStat("g_u",m.u.last().toFixed(0)+un("%"));
+    setStat("g_m",m.m.last().toFixed(1)+" / "+m.vram+".0"+un("GB"));
+    setStat("g_mp",(m.m.last()/m.vram*100).toFixed(0)+un("%"));
+    setStat("g_t",'<span style="color:'+lvl(m.t.last(),75,85)+'">'+m.t.last().toFixed(0)+"</span>"+un("°C"));
+    setStat("g_p",'<span style="color:var(--ink-3)">⭕ 未采集</span>');
+    setStat("g_f",'<span style="color:var(--ink-3)">⭕ 未采集</span>');
+  }
+  if(m&&m.rd){
+    var du=m.u.last();
+    setStat("dk_u",du.toFixed(0)+un("%")); setStat("dk_aw",(0.18+du*.031).toFixed(2)+un("ms"));
+    setStat("dk_r",mbs(m.rd.last())); setStat("dk_w",mbs(m.wr.last()));
+    setStat("dk_io",String(Math.round((m.rd.last()+m.wr.last())*11+du*3)));
+    var pi2=psiIoOf(m); setStat("dk_psi",'<span style="color:'+lvl(pi2,CFG.psiWarn,CFG.psiCrit)+'">'+pi2.toFixed(1)+"</span>"+un("%"));
+  }
+  if(m&&m.tx&&!m.rd){
+    setStat("n_tx",mbs(m.tx.last())); setStat("n_rx",mbs(m.rx.last()));
+    setStat("n_err", m.err? '<span style="color:'+C.crit+'">'+m.err+"</span>"+un("包/s") : "0"+un("包/s"));
+  }
+  pageUpd.forEach(function(f){ f(); });
+  if(tableEl && tableEl.open){
+    var rows=tableEl._get(); tableEl._body.textContent="";
+    for(var k2=rows.length-1;k2>=rows.length-12;k2--){
+      var tr=document.createElement("tr");
+      tr.appendChild(td(null,(rows.length-1-k2)===0?"现在":(rows.length-1-k2)+" 秒前"));
+      tr.appendChild(td(null,rows[k2].toFixed(2)));
+      tableEl._body.appendChild(tr);
+    }
+  }
+}
+
+/* ================= 样稿参数面板（浮在窗口外，不属于产品界面） ================= */
+var HUE_KEYS=[["cpu","CPU"],["gpu","GPU"],["mem","内存"],["disk","磁盘"],["net","网络"]];
+function rebuildAll(){ applyCounts(); buildRail(); buildDetail(); tick(false); }
+function pSection(box,title){ box.appendChild(el("h4",null,title)); }
+function pSlider(box,label,key,min,max,step,fmt,onDone){
+  var row=el("div","pfield");
+  row.appendChild(el("label",null,label));
+  var out=document.createElement("output"); out.textContent=fmt(CFG[key]); row.appendChild(out);
+  var r=document.createElement("input");
+  r.type="range"; r.min=min; r.max=max; r.step=step; r.value=CFG[key];
+  r.setAttribute("aria-label",label);
+  r.addEventListener("input",function(){ CFG[key]=+r.value; out.textContent=fmt(CFG[key]); onDone(); });
+  row.appendChild(r); box.appendChild(row);
+}
+function pSeg(box,label,key,opts,onDone){
+  var row=el("div","pfield"); row.appendChild(el("label",null,label));
+  row.appendChild(document.createElement("output")); box.appendChild(row);
+  var seg=el("div","pseg");
+  opts.forEach(function(v){
+    var b=el("button",null,String(v)); b.type="button";
+    b.setAttribute("aria-pressed", CFG[key]===v?"true":"false");
+    b.addEventListener("click",function(){
+      CFG[key]=v;
+      [].forEach.call(seg.children,function(c){ c.setAttribute("aria-pressed", c===b?"true":"false"); });
+      onDone();
+    });
+    seg.appendChild(b);
+  });
+  box.appendChild(seg);
+}
+function syncColorInputs(){
+  HUE_KEYS.forEach(function(h){
+    var i=document.getElementById("pc_"+h[0]);
+    if(i) i.value=css("--c-"+h[0]);
+  });
+}
+function buildParams(){
+  var box=document.getElementById("ppanel"); if(!box) return;
+  box.textContent="";
+  var t=el("div","ptitle"); t.appendChild(document.createTextNode("样稿参数"));
+  var x=el("button",null,"×"); x.type="button"; x.setAttribute("aria-label","关闭");
+  x.addEventListener("click",function(){ togglePanel(false); });
+  t.appendChild(x); box.appendChild(t);
+
+  pSection(box,"资源数量");
+  pSlider(box,"GPU","gpu",0,8,1,function(v){return v+" 块";},rebuildAll);
+  pSlider(box,"磁盘","disk",1,24,1,function(v){return v+" 块";},rebuildAll);
+  pSlider(box,"网卡","net",1,8,1,function(v){return v+" 个";},rebuildAll);
+  pSlider(box,"挂载点","mount",1,12,1,function(v){return v+" 个";},rebuildAll);
+
+  pSection(box,"CPU 逻辑处理器");
+  pSeg(box,"核数","cores",[16,32,64,128,256],rebuildAll);
+
+  pSection(box,"配色");
+  var cg=el("div","pcolors");
+  HUE_KEYS.forEach(function(h){
+    var w=el("label","pcolor");
+    var i=document.createElement("input"); i.type="color"; i.id="pc_"+h[0]; i.value=css("--c-"+h[0]);
+    i.addEventListener("input",function(){
+      document.documentElement.style.setProperty("--c-"+h[0], i.value);
+      reloadColors(); buildRail(); buildDetail(); tick(false);
+    });
+    w.appendChild(i); w.appendChild(document.createTextNode(h[1])); cg.appendChild(w);
+  });
+  box.appendChild(cg);
+  var rst=el("button","preset","恢复默认配色"); rst.type="button";
+  rst.addEventListener("click",function(){
+    HUE_KEYS.forEach(function(h){ document.documentElement.style.removeProperty("--c-"+h[0]); });
+    reloadColors(); syncColorInputs(); buildRail(); buildDetail(); tick(false);
+  });
+  box.appendChild(rst);
+
+  pSection(box,"布局");
+  pSlider(box,"窗口高度","winH",480,960,20,function(v){return v+"px";},rebuildAll);
+  pSlider(box,"成员区高度上限","zoneH",120,480,12,function(v){return v+"px";},rebuildAll);
+  pSlider(box,"成员格最小宽","cellW",96,240,4,function(v){return v+"px";},rebuildAll);
+
+  pSection(box,"PSI 阈值");
+  pSlider(box,"警告","psiWarn",2,50,1,function(v){return v+"%";},function(){ tick(false); });
+  pSlider(box,"严重","psiCrit",10,95,1,function(v){return v+"%";},function(){ tick(false); });
+}
+function togglePanel(open){
+  var box=document.getElementById("ppanel"), btn=document.getElementById("pbtn");
+  if(!box||!btn) return;
+  box.hidden=!open; btn.setAttribute("aria-expanded", open?"true":"false");
+  if(open) buildParams();
+}
+
+/* ============ 启动 ============ */
+applyCounts(); buildRail(); buildDetail(); tick(false);
+(function(){
+  var btn=document.getElementById("pbtn");
+  if(btn){
+    btn.addEventListener("click",function(){ togglePanel(btn.getAttribute("aria-expanded")!=="true"); });
+    document.addEventListener("keydown",function(ev){ if(ev.key==="Escape") togglePanel(false); });
+  }
+})();
+
+(function(){
+  var seg=document.getElementById("themeseg"), btns=seg.querySelectorAll("button");
+  seg.addEventListener("click",function(ev){
+    var b=ev.target.closest("button"); if(!b) return;
+    var t=b.getAttribute("data-t");
+    if(t==="system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme=t;
+    for(var i=0;i<btns.length;i++) btns[i].setAttribute("aria-pressed", btns[i]===b?"true":"false");
+    reloadColors(); buildRail(); buildDetail(); tick(false); syncColorInputs();
+  });
+})();
+try{ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",function(){ reloadColors(); buildRail(); buildDetail(); tick(false); }); }catch(e){}
+
+var rt;
+window.addEventListener("resize",function(){ clearTimeout(rt); rt=setTimeout(function(){
+  resizePlots();
+},120); });
+document.addEventListener("toggle",function(e){ if(e.target===tableEl) updNumbers(); },true);
+
+
+if(!reduce){
+  var secs=0;
+  setInterval(function(){
+    secs++;
+    document.getElementById("clock").textContent="采集间隔 2s · 已运行 "+secs+"s · uPlot 实例 "+(plots.length+railPlots.length);
+    tick(true);
+  }, TICK);
+}else{
+  document.getElementById("clock").textContent="采集间隔 2s · 动画已暂停";
+}
+})();
+</script>
+
+</body>
+</html>

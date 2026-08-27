@@ -2,13 +2,15 @@
 //!
 //! failed units 与 SMART 分别由 service provider 与后续的 SMART 模块补充，
 //! 本模块产出的 [`HealthReport::skipped`] 里会如实标出「未检查」。
-
-use std::fs;
-use std::path::Path;
+//!
+//! # 本模块不做 I/O
+//!
+//! 判定规则（阈值、严重级别、版本比较）与平台无关，全部放在这里，靠
+//! [`HealthInputs`] 接收采集好的证据；**取证据的那部分按平台分在
+//! `linux/health.rs` 与 `macos/health.rs`**。这样两个平台共用同一套判定，
+//! 而判定逻辑可以完全用固定输入做单测。
 
 use strixmaid_types::system::{FilesystemInfo, HealthItem, HealthReport, HealthSeverity};
-
-use super::util::read_trimmed;
 
 /// 文件系统使用率 / inode 使用率的告警阈值（百分比）。
 pub const USAGE_WARNING_PERCENT: f64 = 90.0;
@@ -32,17 +34,6 @@ pub enum RebootReason {
     },
 }
 
-/// 从本机采集证据并判定是否需要重启。
-pub fn detect_reboot_required() -> Option<RebootReason> {
-    let marker = ["/run/reboot-required", "/var/run/reboot-required"]
-        .iter()
-        .any(|p| Path::new(p).exists());
-    let packages = read_trimmed("/run/reboot-required.pkgs");
-    let running = read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default();
-    let installed = boot_kernel_versions();
-    reboot_reason(marker, packages, &running, &installed)
-}
-
 /// 纯函数：根据证据判定重启需求。
 pub fn reboot_reason(
     marker: bool,
@@ -58,32 +49,6 @@ pub fn reboot_reason(
         running: running.to_owned(),
         installed: newest,
     })
-}
-
-/// 扫描 `/boot/vmlinuz-*`，返回版本串列表（去掉 `vmlinuz-` 前缀）。
-///
-/// 跳过 `vmlinuz-linux`（Arch，不带版本）与 `0-rescue-*`（RHEL 救援内核）。
-pub fn boot_kernel_versions() -> Vec<String> {
-    let Ok(entries) = fs::read_dir("/boot") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_str()?;
-            let version = name.strip_prefix("vmlinuz-")?;
-            is_kernel_version(version).then(|| version.to_owned())
-        })
-        .collect()
-}
-
-/// 看起来像内核版本串（至少以数字开头且含 `.`，不是 rescue）。
-fn is_kernel_version(v: &str) -> bool {
-    v.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        && v.contains('.')
-        && !v.contains("rescue")
-        && !v.ends_with(".old")
 }
 
 /// 在同一「口味」（`-generic` / `-lowlatency` / 无后缀）的候选内核里找比运行中更新的最高版本。
@@ -154,15 +119,21 @@ fn version_key(v: &str) -> Vec<Chunk> {
     out
 }
 
-/// 一次健康评估所需的全部输入。全部由调用方采集，本函数不做 I/O，便于测试。
+/// 一次健康评估所需的全部输入。全部由调用方采集，本模块不做 I/O，便于测试。
 #[derive(Debug, Clone, Default)]
 pub struct HealthInputs {
     pub ts: i64,
     pub filesystems: Vec<FilesystemInfo>,
-    /// `/proc/loadavg` 的 1 分钟负载。
+    /// 1 分钟负载均值。
     pub load1: Option<f64>,
     pub logical_cores: u32,
     pub reboot: Option<RebootReason>,
+    /// 本轮**没有检查**的项，原样进 [`HealthReport::skipped`]。
+    ///
+    /// 由平台侧填写而不是写死在这里：Linux 跳过的是 `systemd`（failed units 归
+    /// service provider）与 `smart`；macOS 上没有 systemd 这个概念，报它只会误导
+    /// 前端把「未检查」显示成一项待补的能力。
+    pub skipped: Vec<String>,
 }
 
 /// 生成健康报告。条目按严重级别降序。
@@ -244,9 +215,7 @@ pub fn build_report(inputs: &HealthInputs) -> HealthReport {
         ts: inputs.ts,
         status,
         items,
-        // 未检查：failed units 由 service provider 提供（能力名 systemd），
-        // SMART 需要 root + 直读设备，P0 不做。
-        skipped: vec!["systemd".into(), "smart".into()],
+        skipped: inputs.skipped.clone(),
     }
 }
 
@@ -293,15 +262,6 @@ fn human_bytes(n: u64) -> String {
     } else {
         format!("{v:.1} {}", UNITS[i])
     }
-}
-
-/// `/proc/loadavg` 的 1 分钟负载。
-pub fn read_load1() -> Option<f64> {
-    read_trimmed("/proc/loadavg")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
 }
 
 #[cfg(test)]
@@ -374,14 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn 内核文件名过滤() {
-        assert!(is_kernel_version("6.8.0-71-generic"));
-        assert!(!is_kernel_version("linux"));
-        assert!(!is_kernel_version("0-rescue-0f38c197b7d54696a5601541413a560e"));
-        assert!(!is_kernel_version("6.8.0-71-generic.old"));
-    }
-
-    #[test]
     fn 报告条目与严重级别() {
         let inputs = HealthInputs {
             ts: 1,
@@ -393,10 +345,11 @@ mod tests {
             load1: Some(10.0),
             logical_cores: 4,
             reboot: Some(RebootReason::Marker { packages: None }),
+            skipped: vec!["systemd".into(), "smart".into()],
         };
         let r = build_report(&inputs);
         assert_eq!(r.status, HealthSeverity::Critical);
-        assert_eq!(r.skipped, vec!["systemd", "smart"]);
+        assert_eq!(r.skipped, vec!["systemd", "smart"], "未检查项原样透传");
         let ids: Vec<(&str, Option<&str>, HealthSeverity)> = r
             .items
             .iter()
@@ -421,10 +374,12 @@ mod tests {
             load1: Some(1.0),
             logical_cores: 4,
             reboot: None,
+            skipped: Vec::new(),
         };
         let r = build_report(&inputs);
         assert_eq!(r.status, HealthSeverity::Ok);
         assert!(r.items.is_empty());
+        assert!(r.skipped.is_empty());
     }
 
     #[test]
@@ -436,11 +391,5 @@ mod tests {
         let r = build_report(&inputs);
         assert_eq!(r.items[0].id, "fs.read_only");
         assert_eq!(r.status, HealthSeverity::Critical);
-    }
-
-    #[test]
-    fn 本机采集不_panic() {
-        let _ = detect_reboot_required();
-        let _ = read_load1();
     }
 }

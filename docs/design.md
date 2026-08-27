@@ -28,6 +28,11 @@
 
 `worker` 不是独立二进制，而是主二进制的子命令（`strixmaid worker`）。helper 只负责「PAM 认证 → setuid → exec strixmaid worker」，因此可以做到极小。
 
+> **交付目标只有 Linux。** 工程同时能在 macOS 上编译、运行、联调，那是**开发平台**支持：
+> 每个 provider 补了一套 macOS 原生实现（launchd / 统一日志 / libproc / mach），
+> 覆盖差异与平台 API 的坑逐条记在 [`macos-dev-platform.md`](./macos-dev-platform.md)。
+> Linux 实现的内容未因此改动一个字节。
+
 ### 2.2 进程拓扑
 
 ```
@@ -175,6 +180,11 @@ GET /api/v1/capabilities
 ---
 
 ## 7. 指标：采集、聚合、存储
+
+> **本节有一份修订提案，尚未实施**：[`roadmap/08-metrics-and-panel.md`](./roadmap/08-metrics-and-panel.md)。
+> 提案把 7.1 的采集项从 58 种裁到 34 种（含新增的 GPU 四条），并按任务管理器的密度重做面板。
+> 7.2 的分层聚合、7.3 的 median 选型、7.5 的 band 展示形式**不受影响**。
+> 提案落地前，本节仍是基线。
 
 ### 7.1 采集项（P0）
 
@@ -456,7 +466,9 @@ worker 的 socketpair 一端由 helper 经 `SCM_RIGHTS` 传回主进程；此后
 
 ### 帧格式
 
-**长度前缀（u32 大端）+ JSON。** 不用 bincode：IPC 消息量极小（每会话几十条），性能无关紧要，而 JSON 用 `socat` 就能调试、且 helper 少一个依赖。fd 传递走 `SCM_RIGHTS` 带外通道，不在帧里。
+**长度前缀（u32 大端）+ fd 计数（u8）+ JSON。** 不用 bincode：IPC 消息量极小（每会话几十条），性能无关紧要，而 JSON 用 `socat` 就能调试、且 helper 少一个依赖。
+
+fd 本身走 `SCM_RIGHTS` 带外通道、不在帧里，但**帧头要记这一帧附带几个 fd**（`roadmap/03-terminal.md` §4.1）。原因是 `SOCK_STREAM` 上的一条硬性质：用普通 `read()` 读过附着了 fd 的那些字节，**内核会把 fd 直接丢掉**——不报错、无痕迹。因此可能收到 fd 的那一侧必须每一帧都走 `recvmsg`，而它需要提前知道该不该去控制缓冲里取。收到的个数与帧头不符即为协议错误。
 
 ```rust
 // 主进程 → helper
@@ -622,3 +634,4 @@ Phase 0 期间固化的几条实现约定：
 ---
 
 > 现状与目标的差距分析见 [`gap-analysis.md`](./gap-analysis.md)，后续工作方案见 [`roadmap/`](./roadmap/README.md)。
+> macOS 开发平台的适配说明见 [`macos-dev-platform.md`](./macos-dev-platform.md)。

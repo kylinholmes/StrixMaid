@@ -16,7 +16,7 @@ use strixmaid_types::ApiError;
 use strixmaid_types::metrics::MetricSnapshot;
 use strixmaid_types::ws::WsChannel;
 
-use crate::ws::hub::{ChannelEvent, ChannelSource, ChannelStream, broadcast_stream};
+use crate::ws::hub::{ChannelEvent, ChannelSource, ChannelStream, SubscribeContext, broadcast_stream};
 
 /// 订阅参数。
 #[derive(Debug, Default, Deserialize)]
@@ -61,7 +61,13 @@ impl ChannelSource for MetricsLive {
         WsChannel::MetricsLive.as_str()
     }
 
-    fn subscribe(&self, params: Option<Value>) -> Result<ChannelStream, ApiError> {
+    /// 忽略 `ctx`：全局指标（CPU、内存、磁盘、网络）与谁在看无关，
+    /// 采集也留在主进程（`design.md` §2.2），没有按用户区分的余地。
+    fn subscribe(
+        &self,
+        params: Option<Value>,
+        _ctx: &SubscribeContext,
+    ) -> Result<ChannelStream, ApiError> {
         let params: Params = match params {
             None | Some(Value::Null) => Params::default(),
             Some(v) => serde_json::from_value(v).map_err(|e| {

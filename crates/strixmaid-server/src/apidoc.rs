@@ -37,11 +37,13 @@ use utoipa::openapi::OpenApi;
 #[cfg(any(debug_assertions, feature = "apidoc"))]
 mod enabled {
     use axum::Router;
-    use axum::http::{HeaderMap, StatusCode, header};
-    use axum::response::{Html, IntoResponse, Response};
+    use axum::http::{HeaderMap, header};
+    use axum::response::{Html, Response};
     use axum::routing::get;
     use utoipa::openapi::OpenApi;
     use utoipa_scalar::Scalar;
+
+    use crate::assets::gzipped;
 
 
     /// Scalar 的 standalone 打包产物，**gzip 压缩后的字节**。
@@ -117,52 +119,10 @@ mod enabled {
 
     /// 供 `/api/docs` 使用的 Scalar 运行时。版本钉死，故可长期强缓存。
     ///
-    /// 响应体是仓库里那份 `.gz` 的原始字节，不在服务端解压。
+    /// 响应体是仓库里那份 `.gz` 的原始字节，不在服务端解压——细节与
+    /// `Accept-Encoding` 的处理见 [`crate::assets`]。
     async fn scalar_js(headers: HeaderMap) -> Response {
-        if !accepts_gzip(&headers) {
-            // 这里只能发 gzip：解压需要额外依赖，而本端点唯一的调用方是执行
-            // `/api/docs` 的浏览器，浏览器一定接受 gzip。与其静默发一份对方声明
-            // 不接受的编码，不如给一句能看懂的话。
-            return (
-                StatusCode::NOT_ACCEPTABLE,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "本端点只提供 gzip 编码的响应；请发送 `Accept-Encoding: gzip`（curl 用 --compressed）。\n",
-            )
-                .into_response();
-        }
-
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-                (header::CONTENT_ENCODING, "gzip"),
-                // 自己补 Vary：`CompressionLayer` 只在它真的压缩了的时候才追加这一项，
-                // 而这里它会跳过。少了它，共享缓存可能把 gzip 体交给声明 identity 的客户端。
-                (header::VARY, "accept-encoding"),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
-            SCALAR_JS_GZ,
-        )
-            .into_response()
-    }
-
-    /// 客户端是否接受 gzip。
-    ///
-    /// RFC 9110 §12.5.3：**没有** `Accept-Encoding` 时任何编码都算可接受；
-    /// 字段值为**空**则表示不想要任何编码。所以只有显式给出、且既不含 `gzip`
-    /// 也不含 `*` 的请求才判为不接受（空值自然落进这一档）。
-    /// 不解析 `q=0` 这种精细写法——真发 `gzip;q=0` 的客户端不存在。
-    fn accepts_gzip(headers: &HeaderMap) -> bool {
-        let Some(value) = headers.get(header::ACCEPT_ENCODING) else {
-            return true;
-        };
-        let Ok(value) = value.to_str() else {
-            return true;
-        };
-        value
-            .split(',')
-            .map(|part| part.split(';').next().unwrap_or_default().trim())
-            .any(|coding| coding.eq_ignore_ascii_case("gzip") || coding == "*")
+        gzipped(&headers, "text/javascript; charset=utf-8", SCALAR_JS_GZ, true)
     }
 }
 

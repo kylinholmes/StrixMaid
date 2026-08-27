@@ -6,7 +6,7 @@
 //! // 1. 建状态（serve() 里，Store 打开之后）
 //! let sessions = strixmaid_core::session::SessionManager::with_process_helper(store.clone(), &config).await?;
 //! let _sweeper = sessions.spawn_sweeper(std::time::Duration::from_secs(5));
-//! let auth_state = crate::auth::AuthState::new(sessions);
+//! let auth_state = crate::auth::AuthState::new(sessions, config.trusted_proxies.clone());
 //!
 //! // 2. auth 路由自带状态，直接 merge 进 /api/v1
 //! OpenApiRouter::new().merge(crate::auth::routes::router(auth_state.clone()))
@@ -24,6 +24,8 @@
 // 接线之前本模块（含 routes/auth.rs）没有被 app.rs 引用，会触发 dead_code；
 // app.rs 接上 `routes::router` / `protect` / `SecurityAddon` 之后删掉下面这行。
 
+pub mod audit;
+pub mod exec;
 pub mod extract;
 pub mod middleware;
 
@@ -46,20 +48,33 @@ pub const SECURITY_SCHEME: &str = "bearer";
 pub struct AuthState {
     /// 会话管理器（core）。
     pub sessions: SessionManager,
+    /// 可信反向代理的直连地址（`config.trusted_proxies`，默认空）。
+    ///
+    /// 只有直连地址在这个列表里时才采信 `X-Forwarded-For`（见 [`audit::remote_addr`]）。
+    /// 放在 `AuthState` 而不是每次从 `Config` 里现取：审计写入点在
+    /// [`exec`] 与认证路由里，它们手上只有 `AuthState`，为了一个字符串列表
+    /// 再把 `Config` 传一遍会让每个处理器都多背一个参数。
+    pub trusted_proxies: Vec<String>,
 }
 
 impl std::fmt::Debug for AuthState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthState")
             .field("sessions", &self.sessions)
+            .field("trusted_proxies", &self.trusted_proxies)
             .finish()
     }
 }
 
 impl AuthState {
     /// 包成 `Arc`，路由与中间件共用同一份。
-    pub fn new(sessions: SessionManager) -> Arc<Self> {
-        Arc::new(AuthState { sessions })
+    ///
+    /// `trusted_proxies` 取自 `Config::trusted_proxies`。
+    pub fn new(sessions: SessionManager, trusted_proxies: Vec<String>) -> Arc<Self> {
+        Arc::new(AuthState {
+            sessions,
+            trusted_proxies,
+        })
     }
 }
 

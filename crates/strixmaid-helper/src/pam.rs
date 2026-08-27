@@ -85,26 +85,82 @@ unsafe extern "C" {
     fn pam_getenvlist(pamh: *mut PamHandleRaw) -> *mut *mut c_char;
 }
 
-// ---- 返回码（`_pam_types.h`）----
-pub const PAM_SUCCESS: c_int = 0;
-pub const PAM_BUF_ERR: c_int = 5;
-pub const PAM_NEW_AUTHTOK_REQD: c_int = 12;
-pub const PAM_CONV_ERR: c_int = 19;
+// ===========================================================================
+// 常量
+// ===========================================================================
+//
+// **两种 PAM 实现的数值并不通用。** 应用侧的函数签名二十年没变，但常量值不是：
+// Linux-PAM（`_pam_types.h`）与 OpenPAM（macOS / *BSD 的
+// `<security/pam_constants.h>`）各编各的号。抄错一个不会编译失败，
+// 只会在运行时做错事——`PAM_ESTABLISH_CRED` 在 Linux-PAM 是 2，
+// 而 2 在 OpenPAM 里是 `PAM_DELETE_CRED`：认证成功后不但没建立凭据，
+// 反而把凭据删了，且 `pam_setcred` 照样返回 0。
+//
+// 因此下面按平台分两套，每一项都注明出处。**新增常量时必须两边都加。**
 
-// ---- item 类型 ----
-const PAM_USER: c_int = 2;
-const PAM_RHOST: c_int = 4;
+/// Linux-PAM 的常量（`_pam_types.h`）。
+#[cfg(not(target_os = "macos"))]
+mod consts {
+    use std::ffi::c_int;
 
-// ---- 消息风格 ----
-const PAM_PROMPT_ECHO_OFF: c_int = 1;
-const PAM_PROMPT_ECHO_ON: c_int = 2;
-const PAM_ERROR_MSG: c_int = 3;
-// PAM_TEXT_INFO(4) 与任何未知风格都映射为 Info，见 `style_of`。
+    // ---- 返回码 ----
+    pub const PAM_SUCCESS: c_int = 0;
+    pub const PAM_BUF_ERR: c_int = 5;
+    pub const PAM_NEW_AUTHTOK_REQD: c_int = 12;
+    pub const PAM_CONV_ERR: c_int = 19;
 
-// ---- 标志 ----
-const PAM_ESTABLISH_CRED: c_int = 0x2;
-const PAM_DELETE_CRED: c_int = 0x4;
-const PAM_CHANGE_EXPIRED_AUTHTOK: c_int = 0x20;
+    // ---- item 类型 ----
+    pub const PAM_USER: c_int = 2;
+    pub const PAM_RHOST: c_int = 4;
+
+    // ---- 消息风格 ----
+    pub const PAM_PROMPT_ECHO_OFF: c_int = 1;
+    pub const PAM_PROMPT_ECHO_ON: c_int = 2;
+    pub const PAM_ERROR_MSG: c_int = 3;
+
+    // ---- 标志 ----
+    pub const PAM_ESTABLISH_CRED: c_int = 0x2;
+    pub const PAM_DELETE_CRED: c_int = 0x4;
+    pub const PAM_CHANGE_EXPIRED_AUTHTOK: c_int = 0x20;
+}
+
+/// OpenPAM 的常量（macOS SDK 的 `<security/pam_constants.h>`）。
+///
+/// 与 Linux-PAM 相同的：`PAM_SUCCESS`、`PAM_BUF_ERR`、四种消息风格、
+/// `PAM_USER` / `PAM_RHOST` 这些 item 类型。
+/// **不同的**：`PAM_CONV_ERR`(19→6)、`PAM_NEW_AUTHTOK_REQD`(12→10)、
+/// 以及三个标志位（0x2→0x1、0x4→0x2、0x20→0x4）。
+#[cfg(target_os = "macos")]
+mod consts {
+    use std::ffi::c_int;
+
+    // ---- 返回码 ----
+    pub const PAM_SUCCESS: c_int = 0;
+    pub const PAM_BUF_ERR: c_int = 5;
+    pub const PAM_NEW_AUTHTOK_REQD: c_int = 10;
+    pub const PAM_CONV_ERR: c_int = 6;
+
+    // ---- item 类型 ----
+    pub const PAM_USER: c_int = 2;
+    pub const PAM_RHOST: c_int = 4;
+
+    // ---- 消息风格 ----
+    pub const PAM_PROMPT_ECHO_OFF: c_int = 1;
+    pub const PAM_PROMPT_ECHO_ON: c_int = 2;
+    pub const PAM_ERROR_MSG: c_int = 3;
+
+    // ---- 标志 ----
+    pub const PAM_ESTABLISH_CRED: c_int = 0x1;
+    pub const PAM_DELETE_CRED: c_int = 0x2;
+    pub const PAM_CHANGE_EXPIRED_AUTHTOK: c_int = 0x4;
+}
+
+pub use consts::{PAM_BUF_ERR, PAM_CONV_ERR, PAM_NEW_AUTHTOK_REQD, PAM_SUCCESS};
+use consts::{
+    PAM_CHANGE_EXPIRED_AUTHTOK, PAM_DELETE_CRED, PAM_ERROR_MSG, PAM_ESTABLISH_CRED,
+    PAM_PROMPT_ECHO_OFF, PAM_PROMPT_ECHO_ON, PAM_RHOST, PAM_USER,
+};
+// PAM_TEXT_INFO(4，两边一致) 与任何未知风格都映射为 Info，见 `style_of`。
 
 // ===========================================================================
 // 错误

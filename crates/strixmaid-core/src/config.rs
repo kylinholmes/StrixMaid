@@ -57,6 +57,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// 「哪一层留多久」那张表则归 [`crate::store`]（见 [`crate::store::TierSpec`]）。
 /// 本模块两者都不重复定义，只 import。
 pub use strixmaid_types::metrics::{MetricLayer, RetentionPreset};
+use strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS;
 
 // ===========================================================================
 // 常量
@@ -96,6 +97,19 @@ pub const METRICS_RING_MIN_SECS: u64 = 60;
 /// 内存环形缓冲时长上限（秒）：1 天。再长应该查落盘数据，而不是撑大常驻内存。
 pub const METRICS_RING_MAX_SECS: u64 = 24 * 3600;
 /// 会话空闲超时下限（秒）。
+/// 审计保留天数的默认值。
+pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 90;
+
+/// 未附着的终端闲置多久即回收，默认 30 分钟。
+pub const DEFAULT_TERMINAL_IDLE_TIMEOUT_SECS: u64 = 1800;
+
+/// 单个会话最多同时开几个终端，默认 8。
+pub const DEFAULT_TERMINAL_MAX_PER_SESSION: usize = 8;
+/// 审计保留天数下限。低于一周的保留期基本等于没有审计。
+pub const AUDIT_RETENTION_MIN_DAYS: u32 = 7;
+/// 审计保留天数上限（约 10 年）。
+pub const AUDIT_RETENTION_MAX_DAYS: u32 = 3650;
+
 pub const SESSION_IDLE_MIN_SECS: u64 = 60;
 /// 会话空闲超时上限（秒）：7 天。
 pub const SESSION_IDLE_MAX_SECS: u64 = 7 * 24 * 3600;
@@ -347,6 +361,14 @@ pub struct SessionConfig {
     /// 没有管理操作，admin worker 回收、`elevated` 降回 false，需要重新提权。
     /// 默认 300（5 分钟），与 sudo 的 `timestamp_timeout` 一致。
     pub elevated_idle_timeout_secs: u64,
+    /// 允许启用管理访问（提权）的系统组。
+    ///
+    /// 用户属于其中任一组才能提权；root 无条件可以。默认
+    /// [`DEFAULT_ELEVATE_GROUPS`]，覆盖 Debian 的 `sudo`、RHEL/Arch 的 `wheel`、
+    /// macOS 与老 Ubuntu 的 `admin`。
+    ///
+    /// **配成空列表表示禁止任何人提权**，这是合法配置，不是「不限制」。
+    pub elevate_groups: Vec<String>,
 }
 
 impl Default for SessionConfig {
@@ -354,6 +376,10 @@ impl Default for SessionConfig {
         SessionConfig {
             idle_timeout_secs: 900,
             elevated_idle_timeout_secs: 300,
+            elevate_groups: DEFAULT_ELEVATE_GROUPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
         }
     }
 }
@@ -367,6 +393,64 @@ impl SessionConfig {
     /// 提权状态空闲超时。
     pub const fn elevated_idle_timeout(&self) -> Duration {
         Duration::from_secs(self.elevated_idle_timeout_secs)
+    }
+}
+
+/// 审计配置（`roadmap/02-audit.md` §4.4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// 审计记录保留天数，超过即被后台任务清理。默认 90，允许 7–3650。
+    ///
+    /// 下限 7 天不是随便定的：审计的用途之一是事后追查，而「事后」往往是几天后
+    /// 才有人发现异常。保留期短于一周基本等于没有。
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        AuditConfig {
+            retention_days: DEFAULT_AUDIT_RETENTION_DAYS,
+        }
+    }
+}
+
+impl AuditConfig {
+    /// 保留期对应的秒数。
+    pub const fn retention_secs(&self) -> i64 {
+        self.retention_days as i64 * 86_400
+    }
+}
+
+/// 终端配置（`roadmap/03-terminal.md` §4.3）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalConfig {
+    /// 无 WS 附着、且没有输出，持续这么久即关闭该终端。默认 1800 秒。
+    ///
+    /// 终端不像 HTTP 请求那样自己会结束：一个开着 root shell 的终端只要没人管，
+    /// 就会一直活着。空闲回收是唯一会收拾它的机制，所以它必须存在。
+    pub idle_timeout_secs: u64,
+    /// 单会话终端数上限，超出时 `POST /terminals` 返回 `409 conflict`。默认 8。
+    ///
+    /// 每个终端都是一个真实的 shell 进程加一个 PTY。没有上限时，
+    /// 一个跑飞的前端能把机器的 pty 耗光——那会连累 SSH 登录。
+    pub max_per_session: usize,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig {
+            idle_timeout_secs: DEFAULT_TERMINAL_IDLE_TIMEOUT_SECS,
+            max_per_session: DEFAULT_TERMINAL_MAX_PER_SESSION,
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// 空闲上限的 `Duration` 形式。
+    pub const fn idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.idle_timeout_secs)
     }
 }
 
@@ -390,12 +474,26 @@ pub struct Config {
     pub helper_path: PathBuf,
     /// PAM 服务名，对应 `/etc/pam.d/<名字>`。默认 `strixmaid`。
     pub pam_service: String,
+    /// 受信任的反向代理地址。
+    ///
+    /// **只有直连地址在这个列表里时，才采信 `X-Forwarded-For`**（`roadmap/02-audit.md` §4.2）。
+    /// 默认空 = 谁都不信、一律用直连地址。这个默认值是有意的：审计记录里的来源地址
+    /// 若能被任意客户端用一个请求头伪造，那条记录就失去了意义。
+    ///
+    /// 取值是**精确的 IP 字面量**（`127.0.0.1`、`::1`）。暂不支持 CIDR——
+    /// 反代通常就固定那么一两个地址，为此引入一个网段解析依赖不划算。
+    /// 写成 CIDR 会在启动时报错而不是被静默忽略，见 `validate`。
+    pub trusted_proxies: Vec<String>,
     /// 日志配置。
     pub log: LogConfig,
     /// 指标配置。
     pub metrics: MetricsConfig,
     /// 会话配置。
     pub session: SessionConfig,
+    /// 审计配置。
+    pub audit: AuditConfig,
+    /// 终端。
+    pub terminal: TerminalConfig,
 }
 
 impl Default for Config {
@@ -405,10 +503,13 @@ impl Default for Config {
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
             run_dir: PathBuf::from(DEFAULT_RUN_DIR),
             helper_path: PathBuf::from(DEFAULT_HELPER_PATH),
+            trusted_proxies: Vec::new(),
             pam_service: DEFAULT_PAM_SERVICE.to_string(),
             log: LogConfig::default(),
             metrics: MetricsConfig::default(),
             session: SessionConfig::default(),
+            audit: AuditConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -421,10 +522,13 @@ impl Config {
         "data_dir",
         "run_dir",
         "helper_path",
+        "trusted_proxies",
         "pam_service",
         "log",
         "metrics",
         "session",
+        "audit",
+        "terminal",
     ];
 
     // ---------------------------------------------------------------- 加载
@@ -613,6 +717,45 @@ impl Config {
             "提权状态空闲超时",
             &mut errors,
         );
+        // 组名不能是空串或首尾带空白。这类值最常见的来源是把 elevate_groups 当成
+        // 逗号分隔的字符串写（`"sudo, wheel"`），那样只会得到一个永远匹配不上的
+        // 「组名」，而提权会静默地对所有人关闭——必须在启动时就报出来。
+        check_range(
+            "audit.retention_days",
+            u64::from(self.audit.retention_days),
+            u64::from(AUDIT_RETENTION_MIN_DAYS),
+            u64::from(AUDIT_RETENTION_MAX_DAYS),
+            "审计保留期（天）",
+            &mut errors,
+        );
+
+        // 只支持精确 IP。写成 CIDR 要当场报错而不是静默不匹配——后者会让
+        // 部署者以为 X-Forwarded-For 已被采信，而审计里记的其实一直是反代的地址。
+        for (i, proxy) in self.trusted_proxies.iter().enumerate() {
+            if proxy.parse::<std::net::IpAddr>().is_err() {
+                let hint = if proxy.contains('/') {
+                    "看起来是 CIDR 网段，暂不支持；请逐个写出反代的 IP"
+                } else {
+                    "必须是精确的 IP 字面量，如 127.0.0.1 或 ::1"
+                };
+                errors.push(FieldError::new(
+                    format!("trusted_proxies[{i}]"),
+                    format!("{proxy:?}"),
+                    hint,
+                ));
+            }
+        }
+
+        for (i, g) in self.session.elevate_groups.iter().enumerate() {
+            if g.trim().is_empty() || g.trim() != g {
+                errors.push(FieldError::new(
+                    format!("session.elevate_groups[{i}]"),
+                    format!("{g:?}"),
+                    "组名不能为空或首尾带空白；本项是 TOML 数组，\
+                     形如 [\"sudo\", \"wheel\"]，不是逗号分隔的字符串",
+                ));
+            }
+        }
 
         if errors.is_empty() {
             Ok(())
@@ -753,6 +896,16 @@ data_dir = "/var/lib/strixmaid"
 # 通常由 systemd unit 的 RuntimeDirectory=strixmaid 自动创建。
 run_dir = "/run/strixmaid"
 
+# 受信任的反向代理地址。只有直连地址在这个列表里时，才采信 X-Forwarded-For。
+# 默认空 = 谁都不信、一律用直连地址。
+#
+# 这个默认值是有意的：审计记录里的来源地址若能被任意客户端用一个请求头伪造，
+# 那条记录就失去了意义。放在 nginx / Caddy 之后时，把反代的地址填进来。
+#
+# 取值是【精确的 IP 字面量】，如 ["127.0.0.1", "::1"]。暂不支持 CIDR 网段，
+# 写成网段会在启动时报错（而不是静默地永不匹配）。
+trusted_proxies = []
+
 # strixmaid-helper 二进制路径。
 # 不含 `/` 时按 PATH 查找；需要固定位置就写绝对路径，例如 "/usr/libexec/strixmaid-helper"。
 helper_path = "strixmaid-helper"
@@ -804,6 +957,21 @@ idle_timeout_secs = 900
 # 权限降回普通用户，再做写操作需要重新提权。
 # 允许 30 – 86400（30 秒 – 1 天）。
 elevated_idle_timeout_secs = 300
+
+# 允许启用管理访问（提权）的系统组。用户属于其中任一组才能提权；root 无条件可以。
+# 默认覆盖 Debian 系的 sudo、RHEL / Arch 系的 wheel、macOS 与老 Ubuntu 的 admin。
+#
+# 这不是自建 RBAC，而是把「谁能成为 root」交给系统的组策略，
+# 与 sudo 的默认配置、与 Cockpit 的管理访问模型一致。
+#
+# 【配成空列表 [] 表示禁止任何人提权】——这是合法配置，不是「不限制」。
+elevate_groups = ["sudo", "wheel", "admin"]
+
+[audit]
+# 审计记录保留天数。超过即被每小时一次的后台任务清理。
+# 允许 7 – 3650。下限是一周：审计要用于事后追查，而「事后」往往是几天之后
+# 才有人发现异常，保留期短于一周基本等于没有。
+retention_days = 90
 "#;
 
 // ===========================================================================
@@ -1313,5 +1481,53 @@ mod tests {
         assert_eq!(e.env_var(), "STRIXMAID_METRICS__INTERVAL_SECS");
         let e = FieldError::new("listen", "x", "y");
         assert_eq!(e.env_var(), "STRIXMAID_LISTEN");
+    }
+}
+
+#[cfg(test)]
+mod elevate_groups_tests {
+    use super::*;
+
+    #[test]
+    fn 默认值覆盖三大发行版惯例() {
+        let c = Config::default();
+        assert_eq!(c.session.elevate_groups, ["sudo", "wheel", "admin"]);
+        c.validate().expect("默认配置必须合法");
+    }
+
+    #[test]
+    fn 示例配置里的值与默认值一致() {
+        // 示例文件是给人抄的；它与默认值不符时，照抄的人会得到意料之外的行为。
+        let from_example: Config = toml::from_str(Config::example_toml()).expect("示例可解析");
+        assert_eq!(
+            from_example.session.elevate_groups,
+            Config::default().session.elevate_groups
+        );
+    }
+
+    #[test]
+    fn 空列表合法_表示禁止任何人提权() {
+        let c: Config = toml::from_str("[session]\nelevate_groups = []\n").unwrap();
+        assert!(c.session.elevate_groups.is_empty());
+        c.validate().expect("空列表是合法配置，不该报错");
+    }
+
+    #[test]
+    fn 把数组写成逗号分隔的字符串会被拦下() {
+        // `elevate_groups = ["sudo, wheel"]` 这种写法只会得到一个永远匹配不上的
+        // 「组名」，提权就对所有人静默关闭了。必须在启动时报错。
+        let c: Config = toml::from_str("[session]\nelevate_groups = [\" sudo\"]\n").unwrap();
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("session.elevate_groups[0]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn 空组名被拦下() {
+        let c: Config = toml::from_str("[session]\nelevate_groups = [\"sudo\", \"\"]\n").unwrap();
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("elevate_groups[1]"), "{err}");
     }
 }

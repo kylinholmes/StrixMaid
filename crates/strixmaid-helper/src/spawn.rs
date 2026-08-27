@@ -52,11 +52,21 @@ pub fn spawn_worker(exe: &Path, spec: &WorkerSpec) -> Result<(Pid, OwnedFd), Str
 
     // ---- 准入检查：在 fork 之前就把不可能成功的情况拒掉 ----
     if spec.as_root && !am_root {
-        return Err("helper 不是 root，无法创建 admin worker".into());
+        // 说清「为什么」和「怎么办」。helper 的 uid 完全继承自拉起它的主进程
+        // （design.md §2.2 的进程拓扑），所以这里不是 root 只有一个原因：
+        // 主进程本身不是 root。光说「helper 不是 root」会让人去查 helper 的权限位，
+        // 那是找错了地方。
+        return Err(format!(
+            "helper 以 uid {} 运行，不是 root，无法创建 admin worker。\
+             helper 的身份继承自拉起它的 strixmaid 主进程，因此这说明**主进程不是以 root 运行**；\
+             提权需要主进程为 root（design.md §2.2）。",
+            geteuid().as_raw()
+        ));
     }
     if !spec.as_root && !am_root && spec.uid != getuid() {
         return Err(format!(
-            "helper 不是 root，只能以自己（uid {}）的身份拉起 worker，无法切换到 uid {}",
+            "helper 以 uid {} 运行，不是 root，只能以自己的身份拉起 worker，无法切换到 uid {}。\
+             helper 的身份继承自 strixmaid 主进程；要为其他用户建会话，主进程需以 root 运行。",
             getuid(),
             spec.uid
         ));
@@ -109,13 +119,31 @@ pub fn spawn_worker(exe: &Path, spec: &WorkerSpec) -> Result<(Pid, OwnedFd), Str
         .collect();
 
     // ---- socketpair：两端都 CLOEXEC，子进程里 dup2 到 fd 3 的那份自然不带 CLOEXEC ----
-    let (main_side, worker_side) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )
-    .map_err(|e| format!("socketpair 失败: {e}"))?;
+    //
+    // Linux 用 SOCK_CLOEXEC 原子地带上标志；macOS 没有它，只能创建后补 fcntl。
+    // helper 是单线程进程，且这段代码与下面的 fork 之间不会有别的线程 exec，
+    // 因此那个理论上的竞态窗口在这里不成立。
+    #[cfg(target_os = "linux")]
+    let sock_flags = SockFlag::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let sock_flags = SockFlag::empty();
+
+    let (main_side, worker_side) =
+        socketpair(AddressFamily::Unix, SockType::Stream, None, sock_flags)
+            .map_err(|e| format!("socketpair 失败: {e}"))?;
+
+    #[cfg(not(target_os = "linux"))]
+    for fd in [main_side.as_raw_fd(), worker_side.as_raw_fd()] {
+        // SAFETY: 只读改 fd 的标志位，无内存副作用。
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        // SAFETY: 同上。
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(format!(
+                "设置 CLOEXEC 失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
 
     let switch_identity = !spec.as_root && am_root;
     let uid = spec.uid;
@@ -139,7 +167,13 @@ pub fn spawn_worker(exe: &Path, spec: &WorkerSpec) -> Result<(Pid, OwnedFd), Str
                 }
                 // 3. 切换身份：initgroups → setgid → setuid，顺序不能错。
                 if switch_identity {
-                    if libc::initgroups(c_user.as_ptr(), gid.as_raw()) != 0 {
+                    // initgroups 的第二个参数类型两平台不同：Linux 是 gid_t（u32），
+                    // macOS 沿用了更老的 BSD 原型，是 c_int（i32）。
+                    #[cfg(target_os = "linux")]
+                    let base_gid = gid.as_raw();
+                    #[cfg(not(target_os = "linux"))]
+                    let base_gid = gid.as_raw() as libc::c_int;
+                    if libc::initgroups(c_user.as_ptr(), base_gid) != 0 {
                         libc::_exit(EXIT_IDENTITY_DENIED);
                     }
                     if libc::setgid(gid.as_raw()) != 0 {
@@ -208,6 +242,40 @@ mod tests {
             dir = dir.parent()?;
         }
         None
+    }
+
+    /// 非 root 下请求 admin worker 必须被拒，且错误信息要**指出该去哪儿改**。
+    ///
+    /// helper 的 uid 完全继承自主进程，所以「helper 不是 root」的唯一成因是
+    /// 「主进程不是 root」。只说前者会把人引去检查 helper 的权限位——那是死路。
+    #[test]
+    fn 非_root_请求_admin_worker_被拒且信息可操作() {
+        if geteuid().is_root() {
+            eprintln!("跳过：本次以 root 运行，测不到这条分支");
+            return;
+        }
+        let me = nix::unistd::User::from_uid(getuid()).unwrap().unwrap();
+        let spec = WorkerSpec {
+            username: me.name.clone(),
+            uid: me.uid,
+            gid: me.gid,
+            home: me.dir.clone(),
+            shell: me.shell.clone(),
+            as_root: true,
+            extra_env: vec![],
+        };
+        // 路径随便给：准入检查在 fork 之前，根本走不到 exec
+        let err = spawn_worker(Path::new("/nonexistent"), &spec).unwrap_err();
+        assert!(err.contains("不是 root"), "{err}");
+        assert!(
+            err.contains("主进程"),
+            "错误信息必须点明是主进程的身份问题，而不是 helper 自己的权限位：{err}"
+        );
+        assert!(
+            err.contains(&getuid().as_raw().to_string()),
+            "应报出 helper 实际的 uid，便于确认：{err}"
+        );
+        eprintln!("提权被拒时的信息：{err}");
     }
 
     #[test]

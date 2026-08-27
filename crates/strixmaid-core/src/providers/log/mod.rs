@@ -1,8 +1,13 @@
 //! LogProvider：日志查询 / 单条详情 / boot 列表 / follow 流。
 //!
-//! 唯一的实现是 [`journalctl::Journalctl`]——`journalctl -o json` 子进程
-//! （`docs/design.md` §4：libsystemd FFI 会毁掉静态构建）。非 journald 系统
-//! （`/var/log/*.log`）**不实现**，只留 [`FileLogs`] 空壳证明 trait 容得下它。
+//! 按平台各有一个实现，都是子进程：
+//!
+//! - Linux：[`journalctl::Journalctl`]，`journalctl -o json`
+//!   （`docs/design.md` §4：libsystemd FFI 会毁掉静态构建）；
+//! - macOS：[`oslog::OsLog`]，`log show --style ndjson` 与 `log stream`。
+//!
+//! 非 journald 的 Linux 系统（`/var/log/*.log`）**不实现**，
+//! 只留 [`FileLogs`] 空壳证明 trait 容得下它。
 //!
 //! # 输出量控制
 //!
@@ -14,8 +19,13 @@
 //! `journalctl -f` 是常驻子进程。同一过滤条件的订阅共享一个子进程；最后一个订阅者
 //! [`LogFollow`] drop 时子进程被 kill。
 
+#[cfg(target_os = "linux")]
 pub mod journalctl;
+#[cfg(target_os = "linux")]
 pub mod parse;
+
+#[cfg(target_os = "macos")]
+pub mod oslog;
 
 use std::sync::Arc;
 
@@ -97,6 +107,7 @@ pub fn normalize_limit(limit: Option<u32>) -> ApiResult<usize> {
 }
 
 /// 选择 log provider：`journalctl` 可用则用之，否则 `None`（capabilities 的 `journal` 为 `false`）。
+#[cfg(target_os = "linux")]
 pub async fn pick_log_provider() -> Option<Arc<dyn LogProvider>> {
     let j = journalctl::Journalctl::new();
     match j.probe().await {
@@ -111,14 +122,34 @@ pub async fn pick_log_provider() -> Option<Arc<dyn LogProvider>> {
     }
 }
 
+/// 选择 log provider：macOS 上是 `log(1)` 统一日志。
+#[cfg(target_os = "macos")]
+pub async fn pick_log_provider() -> Option<Arc<dyn LogProvider>> {
+    let l = oslog::OsLog::new();
+    match l.probe().await {
+        Probe::Unavailable { reason } => {
+            tracing::warn!(reason, "log show 不可用，日志能力关闭");
+            None
+        }
+        probe => {
+            tracing::info!(?probe, "log provider: oslog");
+            Some(Arc::new(l))
+        }
+    }
+}
+
 /// 非 journald 系统的纯文件日志（`/var/log/*.log`）——**空壳，未实现**。
+///
+/// 只在 Linux 上编译：macOS 的日志全在统一日志里，没有这条降级路径。
 ///
 /// 留在这里是为了证明 [`LogProvider`] 的接口容得下它：游标可以是 `file:offset`，
 /// follow 可以是 inotify。P0 不做（`docs/design.md` §1：除 systemd 外默认什么都没有，
 /// 但 journald 本身是 systemd 的一部分）。
+#[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub struct FileLogs;
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl Provider for FileLogs {
     fn id(&self) -> &'static str {
@@ -130,6 +161,7 @@ impl Provider for FileLogs {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl LogProvider for FileLogs {
     async fn query(&self, _q: &LogQuery) -> ApiResult<LogPage> {
@@ -165,6 +197,7 @@ mod tests {
         assert!(normalize_limit(Some(1001)).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn file_logs_probe_is_unavailable_not_panic() {
         assert!(!FileLogs.probe().await.is_available());

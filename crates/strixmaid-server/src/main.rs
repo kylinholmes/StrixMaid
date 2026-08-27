@@ -10,6 +10,7 @@
 
 mod apidoc;
 mod app;
+mod assets;
 mod auth;
 mod cli;
 #[cfg(any(debug_assertions, feature = "apidoc"))]
@@ -95,6 +96,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     use strixmaid_core::providers::service::pick_service_provider;
     use strixmaid_core::providers::system::HostProvider;
     use strixmaid_core::session::SessionManager;
+    use strixmaid_core::terminal::TerminalRegistry;
     use strixmaid_core::store::Store;
 
     let listen = config.listen_addr().context("监听地址不合法")?;
@@ -118,12 +120,42 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .context("初始化会话管理失败")?;
     let sweeper = sessions.spawn_sweeper(std::time::Duration::from_secs(5));
-    let auth = auth::AuthState::new(sessions.clone());
+    let auth = auth::AuthState::new(sessions.clone(), config.trusted_proxies.clone());
+
+    // ---- 终端注册表（roadmap/03 §4.3）----
+    //
+    // 装进 SessionManager：登出与空闲超时都要连带关掉该会话的终端，否则会留下
+    // 一个没有主人的登录 shell。装在这里而不是构造时传入，是因为两者互不依赖。
+    let terminals = TerminalRegistry::new(config.terminal.clone());
+    sessions.set_terminal_registry(terminals.clone());
+    // 空闲终端回收。周期取 30 秒：空闲上限默认 30 分钟，这个粒度足够，
+    // 又不至于让一个开着 root shell 的终端在超时后还多活很久。
+    let terminal_sweeper = {
+        let reg = terminals.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                ticker.tick().await;
+                let n = reg.sweep_idle().await;
+                if n > 0 {
+                    tracing::info!(count = n, "回收空闲终端");
+                }
+            }
+        })
+    };
+
+    // ---- 审计保留期清理（roadmap/02 §4.4）----
+    let audit_pruner =
+        routes::audit::spawn_prune_task(store.clone(), config.audit.retention_secs());
 
     // ---- 指标引擎（常驻采集，与登录无关，§2.2）----
     let engine = MetricsEngine::start(&config.metrics, Some(store.clone()));
 
     // ---- provider 选择与能力探测 ----
+    //
+    // 请求**不再**经过这里的 provider（`roadmap/01` §4.3：一律走 worker）。
+    // 主进程仍然构造它们，只为三件与登录用户无关的事：启动期的 system 层能力探测、
+    // `services.changed` 的事件源、以及后续 `system.health` 频道的定时检查。
     let svc = pick_service_provider().await;
     let log = pick_log_provider().await;
     let mut registry = CapabilityRegistry::from_config(&config);
@@ -148,20 +180,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if let Some(p) = &svc {
         hub.register(Arc::new(ws::channels::ServicesChanged::new(Arc::clone(p))));
     }
-    if let Some(p) = &log {
-        hub.register(Arc::new(ws::channels::LogsFollow::new(Arc::clone(p))));
-    }
+    // logs.follow 按会话取 worker，不用主进程的 log provider——**日志的可见范围
+    // 必须随用户**（roadmap/01 §4.4）。这里刻意不加 `if let Some(log)`：
+    // 频道可不可用取决于**那个用户的 worker** 里有没有日志后端，
+    // 主进程自己的探测结果对它没有决定权。
+    hub.register(Arc::new(ws::channels::LogsFollow::new(auth.clone())));
 
     // ---- 路由 ----
     let states = routes::ApiStates {
         app: AppState::new(),
         auth: auth.clone(),
-        system: Arc::new(routes::system::SystemState::new()),
-        processes: Arc::new(routes::processes::ProcessState::new()),
-        capabilities: Arc::new(routes::capabilities::CapabilityState::new(report.system)),
-        services: Arc::new(routes::services::ServicesState::new(svc)),
-        logs: Arc::new(routes::logs::LogsState::new(log)),
+        capabilities: Arc::new(routes::capabilities::CapabilityState::new(
+            report.system,
+            config.session.elevate_groups.clone(),
+            auth.clone(),
+        )),
         metrics: Arc::new(routes::metrics::MetricsState::new(engine.clone())),
+        audit: Arc::new(routes::audit::AuditState::new(store.clone())),
+        terminals: routes::terminals::TerminalState::new(
+            terminals.clone(),
+            auth.clone(),
+            store.clone(),
+        ),
     };
     let router = app::build(states, hub, auth);
 
@@ -183,6 +223,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // ---- 收尾：落盘未满分钟、关 worker/helper、关库 ----
     engine.stop().await;
     sweeper.abort();
+    terminal_sweeper.abort();
+    audit_pruner.abort();
     sessions.shutdown().await;
     store.close().await;
     tracing::info!("已优雅退出");
@@ -206,7 +248,10 @@ async fn run_worker(global: &GlobalArgs, args: WorkerArgs) -> anyhow::Result<()>
         .init();
 
     let fd = args.ipc_fd.unwrap_or(strixmaid_types::ipc::IPC_FD);
-    let dispatcher = std::sync::Arc::new(strixmaid_core::worker::Dispatcher::new());
+    // provider 在 worker 内构造：它们因此天然是登录用户的身份
+    // （roadmap/01 §4.2）。
+    let dispatcher =
+        std::sync::Arc::new(strixmaid_core::worker::providers::default_dispatcher().await);
     strixmaid_core::worker::run_from_fd(fd, dispatcher)
         .await
         .context("worker 异常退出")

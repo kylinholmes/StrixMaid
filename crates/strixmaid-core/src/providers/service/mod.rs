@@ -1,14 +1,20 @@
-//! ServiceProvider：systemd unit 的列表 / 详情 / unit 文件 / 依赖 / 操作 / 变更事件。
+//! ServiceProvider：服务单元的列表 / 详情 / 单元文件 / 依赖 / 操作 / 变更事件。
 //!
-//! 两条实现路径（`docs/design.md` §4）：
+//! Linux 上的两条实现路径（`docs/design.md` §4）：
 //!
 //! - [`bus::SystemdBus`]：主路径，`zbus` 直连 `org.freedesktop.systemd1`。有属性信号与 job 事件，
 //!   `services.changed` 频道靠它驱动；cgroup 用量直读 `/sys/fs/cgroup`。
 //! - [`cli::SystemctlCli`]：降级路径，`systemctl ... --output=json` 子进程（需 systemd ≥ 246）。
 //!   没有事件流，`subscribe()` 返回一个永远安静的 receiver。
 //!
-//! 两条路径必须产出**同一套** DTO（`strixmaid_types::service`），因此过滤、枚举解析、
-//! unit 名校验这些与来源无关的逻辑全部放在本文件，两个实现只负责「取原始数据」。
+//! macOS 上是第三条：
+//!
+//! - [`launchd::Launchctl`]：`launchctl` 子进程。macOS 的服务管理器是 launchd，
+//!   概念能对上一半（有 unit 名、有 enable/disable、有运行状态），
+//!   对不上的一半（`Type=` / 依赖图 / cgroup 用量）如实报缺失。
+//!
+//! 三条路径必须产出**同一套** DTO（`strixmaid_types::service`），因此过滤、枚举解析、
+//! unit 名校验这些与来源无关的逻辑全部放在本文件，各实现只负责「取原始数据」。
 //!
 //! # 作用域与 uid
 //!
@@ -17,9 +23,15 @@
 //! user manager」，构造时可用 `with_user_uid` 指定 uid——跨用户由 worker 机制解决：worker 以登录
 //! 用户身份运行，在它里面构造的 provider 天然就是那个用户的。
 
+#[cfg(target_os = "linux")]
 pub mod bus;
+#[cfg(target_os = "linux")]
 pub mod cgroup;
+#[cfg(target_os = "linux")]
 pub mod cli;
+
+#[cfg(target_os = "macos")]
+pub mod launchd;
 
 use std::sync::Arc;
 
@@ -135,8 +147,11 @@ pub trait ServiceProvider: Provider {
     async fn subscribe(&self) -> broadcast::Receiver<ServiceEvent>;
 }
 
-/// 选择 service provider：先试 bus，失败降级 CLI，都不行返回 `None`
-/// （此时 capabilities 的 `systemd` 为 `false`，服务页整体隐藏）。
+/// 选择 service provider。
+///
+/// Linux：先试 bus，失败降级 CLI，都不行返回 `None`（此时 capabilities 的 `systemd`
+/// 为 `false`，服务页整体隐藏）。macOS：`launchctl`。
+#[cfg(target_os = "linux")]
 pub async fn pick_service_provider() -> Option<Arc<dyn ServiceProvider>> {
     match bus::SystemdBus::connect().await {
         Ok(b) => match b.probe().await {
@@ -161,6 +176,22 @@ pub async fn pick_service_provider() -> Option<Arc<dyn ServiceProvider>> {
         probe => {
             tracing::info!(?probe, "service provider: systemctl (降级)");
             Some(Arc::new(cli))
+        }
+    }
+}
+
+/// 选择 service provider：macOS 上只有 `launchctl` 一条路径。
+#[cfg(target_os = "macos")]
+pub async fn pick_service_provider() -> Option<Arc<dyn ServiceProvider>> {
+    let l = launchd::Launchctl::new();
+    match l.probe().await {
+        super::Probe::Unavailable { reason } => {
+            tracing::warn!(reason, "launchctl 不可用，服务能力关闭");
+            None
+        }
+        probe => {
+            tracing::info!(?probe, "service provider: launchctl");
+            Some(Arc::new(l))
         }
     }
 }
@@ -359,6 +390,8 @@ pub fn apply_list_query(mut units: Vec<UnitSummary>, q: &UnitListQuery) -> Vec<U
 }
 
 /// 把一个 `Future` 套上 [`CALL_TIMEOUT`]，超时映射为 `ErrorCode::Timeout`。
+/// 仅 Linux 实现（bus / cli）使用：launchd 侧的取数方式完全不同。
+#[cfg(target_os = "linux")]
 pub(crate) async fn with_timeout<T>(
     what: &str,
     fut: impl std::future::Future<Output = ApiResult<T>>,
@@ -373,6 +406,8 @@ pub(crate) async fn with_timeout<T>(
 }
 
 /// 读 unit 文件原文。非 UTF-8 内容做有损转换而不是报错——unit 文件里偶尔有 Latin-1 注释。
+/// 仅 Linux 实现（bus / cli）使用：launchd 侧的取数方式完全不同。
+#[cfg(target_os = "linux")]
 pub(crate) async fn read_unit_fragment(
     path: &str,
 ) -> ApiResult<strixmaid_types::service::UnitFileFragment> {
@@ -393,11 +428,15 @@ pub(crate) async fn read_unit_fragment(
 }
 
 /// 微秒 epoch（systemd 的 `*Timestamp` 属性）→ unix 秒；0 表示「从未发生」→ `None`。
+/// 仅 Linux 实现（bus / cli）使用：launchd 侧的取数方式完全不同。
+#[cfg(target_os = "linux")]
 pub(crate) fn usec_to_ts(usec: u64) -> Option<i64> {
     (usec != 0).then_some((usec / 1_000_000) as i64)
 }
 
 /// systemd 用 `u64::MAX` 表示「未设置 / 不适用」（`MemoryMax=infinity`、`MemoryCurrent=[not set]`）。
+/// 仅 Linux 实现（bus / cli）使用：launchd 侧的取数方式完全不同。
+#[cfg(target_os = "linux")]
 pub(crate) fn opt_u64(v: u64) -> Option<u64> {
     (v != u64::MAX).then_some(v)
 }
@@ -551,6 +590,8 @@ mod tests {
         assert_eq!(json[0]["name"], "run-u1.service");
     }
 
+    /// systemd 专属的两个换算，随其使用方一起只在 Linux 上编译。
+    #[cfg(target_os = "linux")]
     #[test]
     fn helpers() {
         assert_eq!(usec_to_ts(0), None);

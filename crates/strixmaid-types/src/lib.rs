@@ -38,6 +38,7 @@ pub mod ipc;
 pub mod log;
 pub mod metrics;
 pub mod process;
+pub mod rpc;
 pub mod service;
 pub mod system;
 pub mod terminal;

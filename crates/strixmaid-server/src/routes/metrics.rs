@@ -55,8 +55,10 @@ where
     path = "/metrics/series",
     tag = "metrics",
     params(SeriesListQuery),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "序列列表，按 metric、labels 排序", body = Vec<SeriesMeta>),
+        (status = 401, description = "未认证", body = ApiError),
         (status = 500, description = "读取 series 表失败", body = ApiError),
     ),
 )]
@@ -82,9 +84,11 @@ pub async fn series(
     path = "/metrics/query",
     tag = "metrics",
     params(MetricQuery),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "查询结果", body = MetricQueryResp),
         (status = 400, description = "参数不合法：to < from、series 为空或格式错误", body = ApiError),
+        (status = 401, description = "未认证", body = ApiError),
         (status = 500, description = "数据库查询失败", body = ApiError),
     ),
 )]
@@ -103,8 +107,10 @@ pub async fn query(
     get,
     path = "/metrics/current",
     tag = "metrics",
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "最新一轮快照", body = MetricSnapshot),
+        (status = 401, description = "未认证", body = ApiError),
     ),
 )]
 pub async fn current(State(state): State<Arc<MetricsState>>) -> Json<MetricSnapshot> {

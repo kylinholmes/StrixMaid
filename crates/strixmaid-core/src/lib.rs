@@ -9,12 +9,15 @@
 //! - [`session`]：浏览器会话与 node_session、worker 生命周期、提权状态
 //! - [`worker`]：`strixmaid worker` 模式——以登录用户身份运行、经 socketpair 接受 RPC
 //! - [`capability`]：两层能力探测（system / user）
+//! - [`platform`]：平台原语——某平台上多个模块共用的底层系统调用封装（目前只有 macOS 需要）
 //! - [`config`]：四层优先级配置
 
 pub mod capability;
 pub mod config;
 pub mod metrics;
+pub mod platform;
 pub mod providers;
 pub mod session;
 pub mod store;
+pub mod terminal;
 pub mod worker;

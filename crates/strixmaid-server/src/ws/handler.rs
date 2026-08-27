@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Extension, State};
 use axum::response::Response;
 use axum::routing::get;
 use futures::{SinkExt, StreamExt, future};
+use strixmaid_core::session::Session;
 
-use super::hub::{Frame, Hub};
+use super::hub::{Frame, Hub, SubscribeContext};
 
 /// `/ws` 路由，状态已注入；对外层 Router 的状态类型 `S` 泛型。
 ///
@@ -23,20 +24,33 @@ where
 }
 
 /// 升级为 WebSocket。
-async fn upgrade(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Response {
+///
+/// `Extension<Session>` 由 `auth::middleware::require_auth` 在**升级之前**放进
+/// extensions（未认证的请求根本走不到这里），因此这里拿到的一定是一个有效会话。
+/// 把它带进 [`SubscribeContext`] 是本端点存在身份概念的唯一途径——升级之后就没有
+/// 请求了，`logs.follow` 要挑哪个 worker 全靠这一份会话。
+///
+/// 会话在连接建立时取一次快照，之后不再刷新：提权状态变化不影响已建立的订阅，
+/// 而 `logs.follow` 用的始终是 user worker，快照过期不会造成越权。
+async fn upgrade(
+    State(hub): State<Arc<Hub>>,
+    Extension(session): Extension<Session>,
+    ws: WebSocketUpgrade,
+) -> Response {
     // 鉴权已由 `auth::middleware::require_auth` 在升级前完成（token 走子协议）。
     // 这里必须把 `bearer` 子协议回给浏览器，否则握手被客户端中止。
+    let ctx = SubscribeContext { session };
     ws.protocols([crate::auth::extract::WS_BEARER_PROTOCOL])
-        .on_upgrade(move |socket| serve_socket(hub, socket))
+        .on_upgrade(move |socket| serve_socket(hub, socket, ctx))
 }
 
 /// 把 `WebSocket` 拆成进流 / 出汇交给 hub。
-async fn serve_socket(hub: Arc<Hub>, socket: WebSocket) {
+async fn serve_socket(hub: Arc<Hub>, socket: WebSocket, ctx: SubscribeContext) {
     let (sink, stream) = socket.split();
     let inbound = stream.map(|r| r.map(frame_from_message));
     let outbound = sink
         .with(|text: String| future::ready(Ok::<Message, axum::Error>(Message::Text(text.into()))));
-    hub.serve(inbound, outbound).await;
+    hub.serve(inbound, outbound, ctx).await;
 }
 
 /// WebSocket 消息 → 协议无关的 [`Frame`]。axum 已自动应答 ping。

@@ -225,7 +225,13 @@ fn subscribe(&self, params: Option<Value>, ctx: &SubscribeContext) -> Result<Cha
 ## 7. 验收标准
 
 - `grep -rn 'HostProvider\|ProcProvider\|pick_service_provider\|pick_log_provider' crates/strixmaid-server/src/routes/` 为 0 处；
-- 所有写端点在未提权会话下返回 403 `elevation_required`；
+- 所有写端点在未提权会话下**被挡住且提示提权可解**。注意错误码分两种，
+  这是 §4.1 决定的，不是实现走样：
+  - 纯管理操作（`host.set_hostname` / `set_timezone` / `power`）→ 403 `elevation_required`；
+  - 走「先以用户身份试」规则的（`proc.signal` / `proc.renice` / `service.action`）
+    → 403 `permission_denied` + `can_retry_elevated = true`，因为拒绝来自内核 / polkit
+    而不是「没有 admin worker」。
+  （本条原文写的是「一律 `elevation_required`」，与 §4.1 冲突，已按 §4.1 更正。）
 - 不在 `elevate_groups` 的用户提权返回 403，helper 内无对应 fork（6.4、6.5）；
 - 6.3 全部通过；
 - 质量门通过。
@@ -235,3 +241,96 @@ fn subscribe(&self, params: Option<Value>, ctx: &SubscribeContext) -> Result<Cha
 1. `proc.signal` 的「先 user 后 admin」重试规则（4.1）是本方案新增的，`design.md` 未定义。若不接受，改为一律走 admin worker，代价是用户杀自己的进程也要提权。
 2. `services.changed` 保留在主进程意味着事件流不受用户身份限制。unit 状态本就对所有本地用户可见（`systemctl list-units` 无需权限），因此判断为可接受；若要求严格一致，改为 `WorkerHandle::subscribe("service.changed")`。
 3. worker 内 `ProcProvider` 的首次 CPU% 为 0 的问题（无基线）会在每个新会话出现一次。可在 worker 启动时预采一次基线。
+
+
+---
+
+## 9. 完成状态（2026-08-28）
+
+§4.1–§4.8 全部实现，`cargo test --workspace` 299 通过（连续 3 轮），clippy 零 warning，
+`scripts/acceptance.sh` 的静态检查全过。
+
+### 实现时对本文档的补充与更正
+
+按实施约定第 8 条逐条记录。**协调者据此更新 `design.md` 的部分已在下面标出。**
+
+#### 更正
+
+1. **§7 的验收标准与 §4.1 自相矛盾**（已在 §7 就地更正）。写端点的 403 有两种错误码，
+   取决于它走的是「必须 admin worker」还是「先以用户身份试」。
+2. **§4.4 说 `ToWorker` / `FromWorker` 有手写 `Debug`** —— 没有，两者都是 derive；
+   只有含明文密码的 `ToHelper` 是手写脱敏的。新增变体不含凭据，继续 derive。
+3. **§4.4 说 `register_stream` 的 `f` 返回 `BoxStream<Value>`** —— 实际签名放宽成
+   **async 且可失败**。`LogProvider::follow` 本身是 async 且返回 `ApiResult`
+   （它要起 `journalctl -f` 子进程），不放宽就得在闭包里 block。
+
+#### 新增的设计决定
+
+4. **背压有 10 秒时限。** §4.4 说「主进程消费慢时不影响其它 RPC」——这在 **CPU 层面**
+   成立（每订阅 / 每调用一个 task），但主进程与 worker 之间**只有一条 socket**：
+   读循环若被慢订阅者无限期堵住，该 worker 的所有 RPC 响应都读不出来。
+   因此超过 `SUBSCRIBER_STALL_LIMIT`（10s）即判定订阅者已死，摘登记并发 `Unsubscribe`。
+5. **订阅的取消不用 `abort`。** abort 可能落在 `write_msg` 写了一半的位置，
+   半截帧会毁掉整条连接的协议。改用 `oneshot` + `select!{biased}`，
+   只在「等下一项」这个安全点响应取消，写帧永远原子。
+6. **`subscribe()` 不等订阅确认。** 返回 `Ok` 只表示 `Subscribe` 帧已发出；
+   频道不存在 / provider 不可用表现为「流立刻结束」。后果：无 journald 的机器上
+   `logs.follow` 的客户端看到的是「频道已结束」而不是 `capability_unavailable`。
+   要同步拿到失败原因就得给协议加一帧订阅确认，为一个几乎只在配置错误时发生的
+   分支不值得。
+7. **`Unsubscribe` 之后 worker 不再发 `End`**；`Unsubscribe` 对未知 id 是无操作、可重复发送。
+8. **订阅 id 与调用 id 共用序号空间**（一条连接上一个 id 只对应一件事）。
+9. **订阅参数 `null` 等同缺省**，客户端不必为订阅全部日志而专门送一个 `{}`。
+10. **WS 的 `Session` 在升级时取快照**，连接期间不刷新。`logs.follow` 始终用 user worker，
+    快照过期不会造成越权；将来若有频道要看 `elevated`，需要重新考虑。
+11. **`service.action` 对两种 scope 都用升级重试**，而不是「`scope=system` 就要 admin」。
+    后者等于在服务端重新实现一份权限矩阵，正是 `design.md` §5.1 禁止的自建 RBAC——
+    某个发行版的 polkit 规则、某个 unit 自己的策略、`wheel` 组的默认配置，
+    都可能已经允许登录用户直接操作。让 polkit 去判断。
+12. **`log.entry` 的 404 同时覆盖「不存在」与「该用户看不到」。** 刻意不区分：
+    区分就会泄露条目的存在性。
+13. **`/capabilities` 不加 `security(("bearer" = []))`。** 它有意允许未认证访问
+    （`design.md` §6：登录页要靠它判断 helper 可不可用），标上安全方案会让
+    代码生成器以为必须带 token。其余受保护端点已全部补上 `security` 与 401。
+14. **user 层实测结果按「会话 + 提权状态」缓存 60 秒。** §4.6 只说「按会话缓存」，
+    但提权会改变结果（admin worker 起来后 `can_manage_units` 从「测不出」变成真），
+    共用一条缓存会让刚提完权的用户在 60 秒内看到旧能力。
+15. **实测失败不算错误**：`/capabilities` 沿用推导值并记 warn。能力探测本身失败
+    而让这个端点 500，是最不该发生的事——前端正是靠它决定显示什么。
+
+### 本机实测（2026-08-28，macOS，非 root，登录用户 uid 501）
+
+`scripts/acceptance.sh` 带真实 token 跑完：
+
+| 项 | 结果 |
+|---|---|
+| routes/ 下无 provider 的代码引用 | ✓ |
+| 五个路由模块经 `exec::call` 执行 | ✓ |
+| RPC 方法名全部引用常量，无字面量 | ✓ |
+| `PUT /system/hostname` 未提权 | ✓ 403 `elevation_required` |
+| `PUT /system/timezone` 未提权 | ✓ 403 `elevation_required` |
+| `/capabilities` 报告 `user.uid` | ✓ 501 |
+| **进程列表里 worker 的 uid** | ✓ **501，等于登录用户** |
+
+最后一条是本次改造的核心证据：请求确实在**以登录用户身份运行的 worker** 里执行，
+而不是在主进程里。§2 的缺口到此可以判定为闭合。
+
+实测顺带发现并修掉一个缺陷：`launchd` 的 `action_error` 把「找不到该服务」
+归进了 `internal`（500）。那是**调用方给错了名字**，应当是 404——
+详情路径的 `not_found_or_denied` 一直是对的，操作路径漏了这一档。已补，并加用例。
+
+`service.action` 的门禁**默认不自动测**：它走升级重试规则，请求会真的到达
+launchctl / systemctl，用户若有权限那个服务就真被重启了。验收脚本把这一条
+放在 `STRIX_ALLOW_MUTATING=1` 之后，默认报「未测」并说明原因——
+验收脚本不该在别人机器上改变系统状态。
+
+### 尚未验证
+
+以下需要真实密码或 root 环境，属 `07-verification.md` 的范围：
+
+- **§6.3 的集成验证**（登录后确认请求确实在 worker 内执行、日志可见范围随用户、
+  未提权写操作 403）。`scripts/acceptance.sh` 已把这些编码成可执行断言，
+  给它 `STRIX_TOKEN` 即可跑。
+- **§6.6**：`kill -9` worker 后下一次请求返回 401 且 `sessions` 表中该行已删除。
+- **§4.7 的性能数字**（进程列表经 IPC 的额外开销）未实测。
+- **root 环境下的全部路径**（§6.7）。

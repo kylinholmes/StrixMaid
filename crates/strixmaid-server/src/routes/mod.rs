@@ -9,6 +9,7 @@
 //! - **受保护**：其余全部，缺少或无效 token 一律 401。
 //!   auth 模块内的 `elevate/*`、`logout`、`session` 通过 `CurrentSession` 提取器自行强制。
 
+pub mod audit;
 pub mod auth;
 pub mod capabilities;
 pub mod health;
@@ -17,6 +18,7 @@ pub mod metrics;
 pub mod processes;
 pub mod services;
 pub mod system;
+pub mod terminals;
 
 use std::sync::Arc;
 
@@ -42,6 +44,7 @@ use crate::state::AppState;
     tags(
         (name = "auth", description = "认证与提权（PAM challenge-response）"),
         (name = "capabilities", description = "两层能力探测：system / user"),
+        (name = "audit", description = "审计日志查询（需管理访问）"),
         (name = "system", description = "主机信息、健康状态与时间"),
         (name = "services", description = "systemd unit 列表、详情与操作"),
         (name = "logs", description = "journald 日志查询与 boot 列表"),
@@ -52,15 +55,18 @@ use crate::state::AppState;
 pub struct ApiDoc;
 
 /// 各路由模块自带的状态。全部在 `main::serve` 里构造一次，这里只做拼装。
+///
+/// `system` / `processes` / `services` / `logs` 四个模块**不再有自己的状态**：
+/// 它们原先的状态唯一的作用是持有 provider，而请求现在一律经 worker 执行
+/// （`roadmap/01-worker-execution.md` §4.3），需要的只是 [`AuthState`]
+/// ——从中按会话取 worker。
 pub struct ApiStates {
     pub app: AppState,
     pub auth: Arc<AuthState>,
-    pub system: Arc<system::SystemState>,
-    pub processes: Arc<processes::ProcessState>,
     pub capabilities: Arc<capabilities::CapabilityState>,
-    pub services: Arc<services::ServicesState>,
-    pub logs: Arc<logs::LogsState>,
+    pub audit: Arc<audit::AuditState>,
     pub metrics: Arc<metrics::MetricsState>,
+    pub terminals: terminals::TerminalState,
 }
 
 /// `/api/v1` 下的全部路由。各子 router 自带状态，因此返回无状态的 `OpenApiRouter<()>`。
@@ -73,11 +79,13 @@ pub fn api_v1(s: ApiStates) -> OpenApiRouter<()> {
     let soft = protect_optional(capabilities::router(s.capabilities), s.auth.clone());
 
     let protected = OpenApiRouter::new()
-        .merge(system::router(s.system))
-        .merge(processes::router(s.processes))
-        .merge(services::router(s.services))
-        .merge(logs::router(s.logs))
-        .merge(metrics::router(s.metrics));
+        .merge(system::router(s.auth.clone()))
+        .merge(processes::router(s.auth.clone()))
+        .merge(services::router(s.auth.clone()))
+        .merge(logs::router(s.auth.clone()))
+        .merge(metrics::router(s.metrics))
+        .merge(audit::router(s.audit))
+        .merge(terminals::router(s.terminals));
     let protected = protect_openapi(protected, s.auth);
 
     public.merge(soft).merge(protected)

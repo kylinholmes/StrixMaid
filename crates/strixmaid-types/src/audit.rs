@@ -70,10 +70,13 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AuditQuery {
-    /// 起始时刻（含），unix 秒。
+    /// 起始时刻（**含**），unix 秒。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
-    /// 结束时刻（含），unix 秒。
+    /// 结束时刻（**不含**），unix 秒。
+    ///
+    /// 区间是左闭右开 `[since, until)`，与指标查询（`design.md` §7.2）一致。
+    /// 闭区间会把恰好落在 `until` 那一秒的记录带进来，按整点分页时相邻两页会重叠。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
     /// 按发起者用户名精确过滤。

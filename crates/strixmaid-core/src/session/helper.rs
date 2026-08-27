@@ -121,13 +121,27 @@ impl HelperLauncher for ProcessHelperLauncher {
         Box::pin(async move {
             // 两端都 CLOEXEC：主进程之后 spawn 的任何子进程都不会意外继承它们；
             // 子进程里 dup2 到 fd 3 的那份自然不带 CLOEXEC。
+            //
+            // Linux 用 SOCK_CLOEXEC 一步到位；macOS 没有这个标志，
+            // 只能创建后补 fcntl，代价与固有的竞态窗口见 `framing::set_cloexec`。
+            #[cfg(target_os = "linux")]
+            let sock_flags = SockFlag::SOCK_CLOEXEC;
+            #[cfg(not(target_os = "linux"))]
+            let sock_flags = SockFlag::empty();
+
             let (ours, theirs) = socketpair(
                 AddressFamily::Unix,
                 SockType::Stream,
                 None,
-                SockFlag::SOCK_CLOEXEC,
+                sock_flags,
             )
             .map_err(|e| SessionError::HelperUnavailable(format!("socketpair 失败: {e}")))?;
+
+            #[cfg(not(target_os = "linux"))]
+            for fd in [ours.as_raw_fd(), theirs.as_raw_fd()] {
+                super::framing::set_cloexec(fd)
+                    .map_err(|e| SessionError::HelperUnavailable(format!("设置 CLOEXEC 失败: {e}")))?;
+            }
 
             let theirs_raw = theirs.as_raw_fd();
             let mut cmd = Command::new(&self.path);

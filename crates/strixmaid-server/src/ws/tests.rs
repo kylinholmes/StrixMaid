@@ -20,7 +20,37 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use super::channels::MetricsLive;
-use super::hub::{ChannelEvent, ChannelSource, ChannelStream, Frame, Hub, broadcast_stream};
+use super::hub::{
+    ChannelEvent, ChannelSource, ChannelStream, Frame, Hub, SubscribeContext, broadcast_stream,
+};
+
+/// 一份假会话。`metrics.live` 与这里的假频道都不看 ctx，但 `Hub::serve` 需要一个
+/// ——真实连接里它来自 `require_auth` 放进 extensions 的 `Extension<Session>`。
+fn fake_session() -> strixmaid_core::session::Session {
+    strixmaid_core::session::Session {
+        token_hash: "test-token-hash".into(),
+        node: "local".into(),
+        user: strixmaid_types::auth::AuthUser {
+            uid: 1000,
+            gid: 1000,
+            username: "tester".into(),
+            groups: vec!["tester".into()],
+        },
+        elevated: false,
+        elevated_ts: None,
+        authed_ts: 0,
+        created_ts: 0,
+        last_active_ts: 0,
+        meta: strixmaid_core::session::ClientMeta::default(),
+        session_opened: false,
+    }
+}
+
+fn fake_ctx() -> SubscribeContext {
+    SubscribeContext {
+        session: fake_session(),
+    }
+}
 
 // ============================ 夹具 ============================
 
@@ -34,7 +64,11 @@ impl ChannelSource for FakeSource {
         "fake.events"
     }
 
-    fn subscribe(&self, params: Option<Value>) -> Result<ChannelStream, ApiError> {
+    fn subscribe(
+        &self,
+        params: Option<Value>,
+        _ctx: &SubscribeContext,
+    ) -> Result<ChannelStream, ApiError> {
         if params
             .as_ref()
             .and_then(|p| p.get("reject"))
@@ -55,7 +89,11 @@ impl ChannelSource for EndingSource {
         "ending"
     }
 
-    fn subscribe(&self, _params: Option<Value>) -> Result<ChannelStream, ApiError> {
+    fn subscribe(
+        &self,
+        _params: Option<Value>,
+        _ctx: &SubscribeContext,
+    ) -> Result<ChannelStream, ApiError> {
         Ok(stream::iter([ChannelEvent::Data(json!(1))]).boxed())
     }
 }
@@ -73,7 +111,7 @@ struct Conn {
 fn connect(hub: &Arc<Hub>) -> Conn {
     let (tx, rx_in) = mpsc::unbounded();
     let (tx_out, rx) = mpsc::unbounded();
-    let task = tokio::spawn(Arc::clone(hub).serve(rx_in, tx_out));
+    let task = tokio::spawn(Arc::clone(hub).serve(rx_in, tx_out, fake_ctx()));
     Conn {
         tx: Some(tx),
         rx,
@@ -294,7 +332,7 @@ async fn 慢客户端_lag_时发_err_并继续() {
 
     let (in_tx, in_rx) = mpsc::unbounded::<Result<Frame, Infallible>>();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(0);
-    let _task = tokio::spawn(Arc::clone(&hub).serve(in_rx, out_tx));
+    let _task = tokio::spawn(Arc::clone(&hub).serve(in_rx, out_tx, fake_ctx()));
 
     let sub = env(WsMsgType::Sub, Some("fake.events"), Some(1), None);
     in_tx
@@ -537,7 +575,10 @@ async fn 真实_websocket_端到端() {
     let engine = fast_engine();
     let hub = Arc::new(Hub::new());
     hub.register(Arc::new(MetricsLive::new(engine.clone())));
-    let app: axum::Router = super::router(Arc::clone(&hub));
+    // 真实路由里 `Extension<Session>` 由 `require_auth` 注入；这个用例只验证 axum
+    // 适配层，用一个 Extension 层顶上，免得把整套认证拖进来。
+    let app: axum::Router =
+        super::router(Arc::clone(&hub)).layer(axum::Extension(fake_session()));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -26,6 +26,7 @@ use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{self, BoxStream, SelectAll, StreamExt};
 use futures::{Sink, SinkExt, Stream};
 use serde_json::Value;
+use strixmaid_core::session::Session;
 use strixmaid_types::ws::{WS_PROTOCOL_VERSION, WsEnvelope, WsMsgType};
 use strixmaid_types::{ApiError, ErrorCode};
 use tokio::sync::broadcast;
@@ -47,14 +48,38 @@ pub enum ChannelEvent {
 /// 一个订阅的事件流。流结束表示频道源不再推送（hub 发 `err` 并移除订阅）。
 pub type ChannelStream = BoxStream<'static, ChannelEvent>;
 
+/// 订阅发生的上下文：**是谁在订阅**。
+///
+/// `roadmap/01-worker-execution.md` §4.4 引入它，是因为频道之间对身份的要求
+/// 并不一致：
+///
+/// - `logs.follow` 的可见范围必须随用户——journald ACL 裁决的是执行
+///   `journalctl -f` 的那个进程的 uid，所以它必须走该会话的 user worker；
+/// - `metrics.live` 是全局指标，与谁在看无关，忽略本上下文；
+/// - `services.changed` 推的是 unit 状态，本就对所有本地用户可见
+///   （`systemctl list-units` 不需要任何权限），因此保留在主进程。
+///
+/// 换言之：**频道自己决定要不要看这个上下文**，hub 只负责把它送到。
+#[derive(Debug, Clone)]
+pub struct SubscribeContext {
+    /// 发起订阅的会话。`upgrade` 从 `require_auth` 放进 extensions 的
+    /// `Extension<Session>` 里取，一条 WS 连接的整个生命周期内不变。
+    pub session: Session,
+}
+
 /// 频道源。每个频道一个实现，注册进 [`Hub`]。
 pub trait ChannelSource: Send + Sync + 'static {
     /// 频道名，即 envelope 的 `ch`；已知取值见 `strixmaid_types::ws::WsChannel`。
     fn name(&self) -> &'static str;
 
     /// 建立一个订阅。`params` 是 `sub` 帧的 `d`；参数不合法时返回错误，
-    /// hub 会带上原 `id` 回一条 `err`。
-    fn subscribe(&self, params: Option<Value>) -> Result<ChannelStream, ApiError>;
+    /// hub 会带上原 `id` 回一条 `err`。`ctx` 是发起订阅的会话，见
+    /// [`SubscribeContext`]。
+    fn subscribe(
+        &self,
+        params: Option<Value>,
+        ctx: &SubscribeContext,
+    ) -> Result<ChannelStream, ApiError>;
 
     /// 处理该频道上的一次 `req`。默认不支持。
     fn request(&self, params: Option<Value>) -> BoxFuture<'static, Result<Value, ApiError>> {
@@ -171,8 +196,13 @@ impl Hub {
     /// 跑一条连接直到对端关闭、协议错误或发送失败。
     ///
     /// `inbound` 出错（`Err`）视为连接断开；`outbound` 是序列化好的 JSON 文本。
-    pub async fn serve<I, O, E>(self: Arc<Self>, mut inbound: I, mut outbound: O)
-    where
+    /// `ctx` 携带这条连接背后的会话，转交给每次 `sub`（见 [`SubscribeContext`]）。
+    pub async fn serve<I, O, E>(
+        self: Arc<Self>,
+        mut inbound: I,
+        mut outbound: O,
+        ctx: SubscribeContext,
+    ) where
         I: Stream<Item = Result<Frame, E>> + Unpin + Send,
         O: Sink<String> + Unpin + Send,
         O::Error: Display,
@@ -198,7 +228,9 @@ impl Hub {
                             None,
                             &ApiError::invalid_request("控制面只接受文本帧"),
                         )),
-                        Some(Ok(Frame::Text(text))) => self.handle_text(conn_id, &text, &mut subs).await,
+                        Some(Ok(Frame::Text(text))) => {
+                            self.handle_text(conn_id, &text, &mut subs, &ctx).await
+                        }
                     };
                     for env in outcome.replies {
                         if !self.send(&mut outbound, env).await {
@@ -247,7 +279,13 @@ impl Hub {
     }
 
     /// 处理一帧文本。
-    async fn handle_text(&self, conn_id: u64, text: &str, subs: &mut Subscriptions) -> Outcome {
+    async fn handle_text(
+        &self,
+        conn_id: u64,
+        text: &str,
+        subs: &mut Subscriptions,
+        ctx: &SubscribeContext,
+    ) -> Outcome {
         let env: WsEnvelope = match serde_json::from_str(text) {
             Ok(e) => e,
             Err(e) => {
@@ -289,7 +327,7 @@ impl Hub {
                         &self.unknown_channel(&ch),
                     ));
                 };
-                match source.subscribe(env.d) {
+                match source.subscribe(env.d, ctx) {
                     Ok(stream) => {
                         subs.attach(ch.clone(), stream);
                         tracing::debug!(conn_id, channel = %ch, "订阅");

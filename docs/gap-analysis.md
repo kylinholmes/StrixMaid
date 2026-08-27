@@ -21,7 +21,13 @@
 
 本机（Ubuntu 24.04，普通用户，无 root）实测通过的路径：PAM 错误密码经 HTTP → helper → `pam_authenticate`；polkit 对 `ssh.service` restart 返回 403；journalctl 翻页不重不漏；`systemd-run --user` 触发 `services.changed`。
 
-## 2. 结构性缺口：授权模型未闭环
+## 2. 结构性缺口：授权模型未闭环 —— 已闭合（2026-08-28）
+
+> `roadmap/01-worker-execution.md` 已实现，本节描述的是**改造前**的状态，保留作为背景。
+> 现状：全部请求经 `auth::exec::call` 派给该会话的 worker，读走 user worker、
+> 写走 admin worker（未提权返回 403）；`logs.follow` 经 worker 订阅，可见范围随用户；
+> 服务端不再含任何授权判断代码。详见 `roadmap/01` §9「完成状态」。
+
 
 `design.md` §5 的核心是「以登录用户身份执行操作，由 PAM / polkit / journald ACL / 文件权限裁决」。当前实现只做到了前半段：
 
@@ -33,26 +39,40 @@
 
 该缺口同时阻塞终端（PTY 必须在 worker 内 fork）、`scope=user` 的跨用户支持（须在目标用户的 worker 内连 session bus）、以及日志可见性的正确性。方案见 `roadmap/01-worker-execution.md`。
 
-### 2.1 提权缺少授权检查
+### 2.1 提权缺少授权检查 —— 已修复（2026-08-28）
 
-`SessionManager::elevate_start`（`crates/strixmaid-core/src/session/mod.rs`）不检查用户是否有资格提权；helper 的 `SpawnWorker { as_root: true }` 只判断 helper 自身是否为 root（`crates/strixmaid-helper/src/spawn.rs` 第 54 行）。capability 层的 `can_elevate` 只是展示字段，未被强制。
+原状：`elevate_start` 不检查资格，helper 的 `SpawnWorker { as_root: true }` 只判断
+helper 自身是否为 root，`can_elevate` 只是展示字段。后果是 root 部署下任何能通过
+PAM 登录的用户重输密码即可获得 root worker。
 
-后果：root 部署下，任何能通过 PAM 登录的用户重新输入自己的密码即可获得 root worker。这与 §2 的缺口性质相同——认证正确、授权缺失——但危害更直接。修正方案见 `roadmap/01-worker-execution.md` §4.8。
+已按 `roadmap/01-worker-execution.md` §4.8 实现：
+
+- 新增配置 `session.elevate_groups`，默认 `["sudo", "wheel", "admin"]`（覆盖
+  Debian / RHEL·Arch / macOS 三种惯例）。**空列表表示禁止任何人提权**，是合法配置。
+- **权威判断在 helper 内**：`SpawnWorker { as_root: true }` 时用 `AuthOk` 阶段
+  由 NSS 查出的组判断，不满足直接返回 `Error`、**不 fork**。允许列表经 `AuthStart`
+  下发，helper 不读配置文件（它是 setuid 组件，少一条读文件路径就少一处风险）。
+- `elevate_start` 提前拒绝：不 spawn 第二个 helper、不进入 PAM 对话，403 并说明所需的组。
+- `can_elevate` 改用同一份配置与**同一个函数**（`strixmaid_types::auth::may_elevate`），
+  杜绝「前端显示按钮、helper 拒绝」的不一致；有专门用例穷举组合比对两者。
+
+注意：这只闭合了「谁能成为 root」。§2 那个更大的缺口——请求仍在主进程内执行、
+根本没经过 worker——**依然存在**，仍需 `roadmap/01` 的主体部分。
 
 ## 3. P0 范围内尚未完成的项
 
 | # | 项 | 现状 | 方案文件 |
 |---|---|---|---|
-| 1 | 请求经 worker 执行：读走 user worker，写走 admin worker，未提权返回 403 | 见 §2 | `01-worker-execution.md` |
-| 2 | 审计日志 | `Store::audit_write` / `audit_query` 已实现；服务端零处写入；`GET /audit` 端点不存在（`/debug` 页已在调用，返回 404） | `02-audit.md` |
+| ~~1~~ | ~~请求经 worker 执行~~ | **已完成**（2026-08-28），见 §2 与 `01` §9 | `01-worker-execution.md` |
+| ~~2~~ | ~~审计日志~~ | **已完成**（2026-08-28）：写入点设在 `exec` 的调用出口与认证路由，`GET /audit` 需管理访问，保留期每小时清理，`/debug` 有审计面板 | `02-audit.md` §8 |
 | 3 | 终端 | 未开始。types 已有 `CreateTerminalReq` / `TerminalInfo` / `ResizeReq` | `03-terminal.md` |
 | 4 | 文件管理壳：`GET /files`、`GET /files/content` | types 已有 `DirListing` / `FileContent`；无 provider、无路由 | `04-files-and-ws-channels.md` |
 | 5 | WS 频道 `system.health`、`processes.live` | hub 与注册接口就绪，源未实现 | `04-files-and-ws-channels.md` |
 | 6 | `strixmaid-agent`：推送、断连补发、Server 端汇聚 | `crates/strixmaid-agent/src/main.rs` 为 3 行占位 | `05-agent.md` |
 | 7 | 打包：musl 静态构建、`strixmaid.service`、pam.d 安装、`ui` feature | musl target 已安装但无构建配置；pam.d 模板已有（`strixmaid-helper/pam.d/`）但无安装步骤；`ui` feature 未实现，前端始终嵌入 | `06-packaging.md` |
-| 1a | 提权授权检查：仅允许 `sudo` / `wheel` / `admin` 组成员提权，在 helper 内强制 | 见 §2.1，无任何检查 | `01-worker-execution.md` §4.8 |
-| 8 | `scope=user` 跨用户 | `SystemdBus::with_user_uid` 已留接口；依赖 #1 | `01-worker-execution.md` |
-| 9 | capability `user` 层的实测探测 | 当前按组名推导（`derive_user_caps`）；§6 要求试读 journal 等实测 | `01-worker-execution.md` |
+| ~~1a~~ | ~~提权授权检查~~ | **已完成**（2026-08-28）：`session.elevate_groups` 配置项，helper 内权威判断 + `elevate_start` 提前拒绝 + `can_elevate` 同源，见 §2.1 | `01-worker-execution.md` §4.8 |
+| ~~8~~ | ~~`scope=user` 跨用户~~ | **随 #1 一并解决**：worker 以登录用户身份运行，`scope=user` 连的就是它自己的 session bus，不需要额外机制 | `01-worker-execution.md` §4.2 |
+| ~~9~~ | ~~capability `user` 层的实测探测~~ | **已完成**：`caps.probe_user` 在 user worker 内实测，结果覆盖推导值，按「会话+提权状态」缓存 60 秒 | `01-worker-execution.md` §4.6 |
 
 ## 4. 已实现但未经验证的部分
 
@@ -99,8 +119,22 @@
 
 01 决定安全模型，且是 03 / 04 / 08 / 09 的前置，应最先做。02 很小，紧随 01。03 是剩余工作中最大的独立块。06 与 07 应并行准备：没有可安装的产物就无法在 root 环境做 07。
 
-## 7. 未决事项
+## 7. 开发平台
+
+工程现在同时能在 macOS 上编译、测试、运行（三个二进制齐全，测试全绿，clippy 零 warning，
+四个 provider 全部探测可用）。这**不改变本文的任何结论**——授权模型缺口、P0 未完成项、
+未验证项在两个平台上完全相同。详见 [`macos-dev-platform.md`](./macos-dev-platform.md)。
+
+顺带修掉的一个历史问题：`.gitignore` 里 Cargo 模板自带的裸 `debug` 规则在任意层级生效，
+把 `crates/strixmaid-server/src/debug/`（§12.1 的调试页）整个吞掉了，导致该目录**从未进入
+版本库**，而 `main.rs` 仍声明 `mod debug;`——**仓库此前在任何平台的 debug 构建都编译不过**。
+规则已改为锚定的 `/target/` 与 `/debug/`，调试页已按 §12.1 重写（九个面板、vendored uPlot、
+每面板独立容错）。API 的可复现验证另有 `scripts/api-smoke.sh`，对照 openapi.json 逐端点跑。
+
+## 8. 未决事项
 
 1. **root 测试环境。** §4.1 列出的路径必须在有 root 的 VM 或支持 systemd 的容器（`podman run --systemd=always`）中验证。没有该环境，认证与提权链路无法离开「代码看起来正确」的状态。
 2. **`/debug` 页在浏览器中的实际表现。** 首次打开后如有问题，优先怀疑 §4.2。
-3. **commit。** 当前全部代码未提交。建议 01 开始前先提交一次。
+3. **`/debug` 调试页的认证后面板未在真实浏览器里验证过**。页面已按 §12.1 重写并在
+   headless 浏览器里确认「加载、uPlot 就位、九个面板各自独立容错、未认证数据正确渲染」，
+   但登录后的指标 band 图与各数据表格需要真实密码，只能由开发者本人打开浏览器确认。

@@ -12,8 +12,23 @@
 //! # 帧格式
 //!
 //! **u32 大端长度前缀 + JSON**。长度只计 JSON 部分，不含前缀本身；上限
-//! [`MAX_FRAME_LEN`]，超过即拒绝（不读取 payload 直接报错）。fd 传递走
-//! `SCM_RIGHTS` 带外通道，不在帧里。
+//! [`MAX_FRAME_LEN`]，超过即拒绝（不读取 payload 直接报错）。
+//!
+//! # 帧头为什么有 `fd_count`
+//!
+//! 帧头是 **`u32 长度（大端） + u8 fd 个数`**（[`FRAME_HEADER_LEN`] = 5）。
+//! fd 本身仍走 `SCM_RIGHTS` 带外通道，帧里只记**这一帧附带了几个**。
+//!
+//! 记这个数不是为了好看，是因为 `SOCK_STREAM` 上的带外数据有个致命性质：
+//! **用普通 `read()` 读过附着了 fd 的那些字节，内核会把 fd 直接丢掉**，
+//! 不报错、无痕迹。也就是说只要有一帧可能带 fd，读端就必须对**每一帧**
+//! 都用 `recvmsg` 加控制缓冲。有了 `fd_count`，读端还能核对
+//! 「说好带 1 个、实际收到 0 个」并当协议错误报出来，而不是拿着一个
+//! 半残的终端去调试。
+//!
+//! 这是**不兼容变更**（`roadmap/03-terminal.md` §8.1）。helper、worker 与主进程
+//! 同版本发布，不存在跨版本兼容需求；将来 Agent 与 Server 之间若复用本帧格式，
+//! 需要单独版本化。
 //!
 //! 本模块只提供**同步**（`std::io`）的读写与纯编解码；tokio 版本在
 //! `strixmaid-core::session::framing` 里复用这里的 [`encode`] / [`decode`]——
@@ -55,8 +70,15 @@ pub const IPC_FD: i32 = 3;
 /// 不会导致无界分配。
 pub const MAX_FRAME_LEN: usize = 1 << 20;
 
-/// 长度前缀的字节数。
-pub const FRAME_HEADER_LEN: usize = 4;
+/// 帧头字节数：`u32 长度` + `u8 fd 个数`。
+pub const FRAME_HEADER_LEN: usize = 5;
+
+/// 一帧最多附带的 fd 个数。
+///
+/// 目前只有终端用到，且每次恰好 1 个（`roadmap/03-terminal.md` §4.5）。
+/// 留 4 是给将来可能的多 fd 场景，同时给读端一个明确的上限——
+/// 对端声称要传 200 个 fd 时应当当协议错误拒掉，而不是照着分配控制缓冲。
+pub const MAX_FRAME_FDS: usize = 4;
 
 /// worker 内置 RPC 方法名：探活。
 pub const METHOD_PING: &str = "ping";
@@ -78,6 +100,12 @@ pub enum IpcError {
     TooLarge {
         /// 对端声明的长度。
         len: u64,
+    },
+    /// 帧头声明的 fd 个数超过 [`MAX_FRAME_FDS`]。
+    #[error("IPC 帧声称附带 {count} 个 fd（上限 {MAX_FRAME_FDS}）")]
+    TooManyFds {
+        /// 对端声明的个数。
+        count: u8,
     },
     /// JSON 编解码失败。
     #[error("IPC JSON 错误: {0}")]
@@ -162,6 +190,13 @@ pub enum ToHelper {
         /// 为 `None` 时 helper 取自身所在目录下的 `strixmaid`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_exe: Option<String>,
+        /// 允许提权的组（`session.elevate_groups`）。
+        ///
+        /// 由主进程在认证一开始就下发，helper **不读配置文件**——它是 setuid 组件，
+        /// 少一条读文件的路径就少一处可被做手脚的地方（`roadmap/01` §4.8）。
+        /// helper 在 `SpawnWorker { as_root: true }` 时用它做权威判断。
+        #[serde(default)]
+        elevate_groups: Vec<String>,
         /// 设置为 `PAM_RHOST` 的来源地址，供 PAM 模块记日志 / 限速。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rhost: Option<String>,
@@ -197,12 +232,15 @@ impl fmt::Debug for ToHelper {
                 username,
                 worker_exe,
                 rhost,
+                elevate_groups,
             } => f
                 .debug_struct("AuthStart")
                 .field("service", service)
                 .field("username", username)
                 .field("worker_exe", worker_exe)
                 .field("rhost", rhost)
+                // 组名不是敏感信息，而排查「为什么提权被拒」时最先要看的就是它
+                .field("elevate_groups", elevate_groups)
                 .finish(),
             ToHelper::AuthRespond { responses } => f
                 .debug_struct("AuthRespond")
@@ -288,6 +326,29 @@ pub enum ToWorker {
         #[serde(default)]
         params: serde_json::Value,
     },
+    /// 建立一个订阅（`roadmap/01-worker-execution.md` §4.4）。
+    ///
+    /// worker 为它起一个**独立的任务**，把流的每一项以同 `id` 的
+    /// [`FromWorker::Event`] 送回；流结束或建立失败时发一帧 [`FromWorker::End`]。
+    /// `id` 与 [`ToWorker::Call::id`] 共用同一个序号空间——同一条连接上
+    /// 一个 `id` 只对应一件事，主进程的等待表因此不必区分两种键。
+    Subscribe {
+        /// 主进程分配的订阅序号。
+        id: u64,
+        /// 频道名，如 [`crate::rpc::LOG_FOLLOW`]。
+        channel: String,
+        /// 参数，按频道各自约定。
+        #[serde(default)]
+        params: serde_json::Value,
+    },
+    /// 取消一个订阅。worker 结束对应的任务，**不再**为它发 `End`——
+    /// 主进程发出本消息时就已经把订阅从等待表里摘掉了，再回一帧只会是噪音。
+    ///
+    /// 对未知或已结束的 `id` 是无操作，重复发送安全。
+    Unsubscribe {
+        /// 对应 [`ToWorker::Subscribe::id`]。
+        id: u64,
+    },
     /// 请求 worker 退出。worker 处理完在途调用后关闭 socket。
     Shutdown,
 }
@@ -318,6 +379,25 @@ pub enum FromWorker {
         id: u64,
         /// 错误——与 HTTP 层同一形状，主进程可以原样透传给浏览器。
         error: ApiError,
+    },
+    /// 订阅流的一项。
+    Event {
+        /// 对应 [`ToWorker::Subscribe::id`]。
+        id: u64,
+        /// 一帧数据，形状由频道约定。
+        data: serde_json::Value,
+    },
+    /// 订阅结束。此后该 `id` 不会再有任何帧。
+    ///
+    /// `error` 为 `None` 表示流自然走完（follow 的子进程退出、采集器停止等）；
+    /// 为 `Some` 表示订阅**建立失败**或中途出错（频道不存在、provider 不可用、
+    /// polkit 拒绝……），错误与 HTTP 层同一形状，可原样上报。
+    End {
+        /// 对应 [`ToWorker::Subscribe::id`]。
+        id: u64,
+        /// 结束原因；正常结束为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ApiError>,
     },
 }
 
@@ -357,15 +437,31 @@ pub struct WhoAmI {
 ///
 /// 返回值放在 [`Zeroizing`] 里：帧可能含明文密码，调用方写完后 drop 即擦除。
 pub fn encode<T: Serialize + ?Sized>(msg: &T) -> IpcResult<Zeroizing<Vec<u8>>> {
+    encode_with_fds(msg, 0)
+}
+
+/// 同 [`encode`]，并在帧头声明这一帧附带 `fd_count` 个 fd。
+///
+/// fd 本身由调用方经 `SCM_RIGHTS` 与本帧**一起**发出（见
+/// `strixmaid-core::session::framing`）。这里只负责把个数写进帧头，
+/// 让读端知道要不要去控制缓冲里取。
+pub fn encode_with_fds<T: Serialize + ?Sized>(
+    msg: &T,
+    fd_count: u8,
+) -> IpcResult<Zeroizing<Vec<u8>>> {
+    if fd_count as usize > MAX_FRAME_FDS {
+        return Err(IpcError::TooManyFds { count: fd_count });
+    }
     // 先把 JSON 写进一个 Zeroizing 缓冲，再拼前缀，全程不出现未受保护的中间副本。
     let mut frame = Zeroizing::new(Vec::with_capacity(128));
-    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame.extend_from_slice(&[0, 0, 0, 0, 0]);
     serde_json::to_writer(&mut *frame, msg)?;
     let len = frame.len() - FRAME_HEADER_LEN;
     if len > MAX_FRAME_LEN {
         return Err(IpcError::TooLarge { len: len as u64 });
     }
-    frame[..FRAME_HEADER_LEN].copy_from_slice(&(len as u32).to_be_bytes());
+    frame[..4].copy_from_slice(&(len as u32).to_be_bytes());
+    frame[4] = fd_count;
     Ok(frame)
 }
 
@@ -374,13 +470,17 @@ pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> IpcResult<T> {
     Ok(serde_json::from_slice(payload)?)
 }
 
-/// 解析长度前缀并校验上限。
-pub fn parse_header(header: [u8; FRAME_HEADER_LEN]) -> IpcResult<usize> {
-    let len = u32::from_be_bytes(header) as usize;
+/// 解析帧头，返回 `(payload 长度, fd 个数)` 并校验两个上限。
+pub fn parse_header(header: [u8; FRAME_HEADER_LEN]) -> IpcResult<(usize, u8)> {
+    let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
     if len > MAX_FRAME_LEN {
         return Err(IpcError::TooLarge { len: len as u64 });
     }
-    Ok(len)
+    let fd_count = header[4];
+    if fd_count as usize > MAX_FRAME_FDS {
+        return Err(IpcError::TooManyFds { count: fd_count });
+    }
+    Ok((len, fd_count))
 }
 
 /// 同步读取一帧的 JSON 部分。
@@ -393,7 +493,14 @@ pub fn read_frame<R: Read + ?Sized>(r: &mut R) -> IpcResult<Option<Zeroizing<Vec
     if !read_exact_or_eof(r, &mut header)? {
         return Ok(None);
     }
-    let len = parse_header(header)?;
+    // 同步读端（helper）不接收 fd：它只**发送** worker 的 fd 给主进程。
+    // 真收到带 fd 的帧说明协议用错了，宁可报错也不要把 fd 静默丢掉。
+    let (len, fd_count) = parse_header(header)?;
+    if fd_count > 0 {
+        return Err(IpcError::Protocol(format!(
+            "同步读端收到声称附带 {fd_count} 个 fd 的帧，但它不具备接收能力"
+        )));
+    }
     let mut payload = Zeroizing::new(vec![0u8; len]);
     r.read_exact(&mut payload)?;
     Ok(Some(payload))
@@ -462,9 +569,10 @@ mod tests {
             }],
         };
         let frame = encode(&msg).unwrap();
-        // 前缀 = JSON 长度
-        let len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
-        assert_eq!(len, frame.len() - 4);
+        // 帧头 = JSON 长度 + fd 个数
+        let (len, fds) = parse_header(frame[..FRAME_HEADER_LEN].try_into().unwrap()).unwrap();
+        assert_eq!(len, frame.len() - FRAME_HEADER_LEN);
+        assert_eq!(fds, 0, "普通消息不带 fd");
 
         let mut cur = Cursor::new(frame.to_vec());
         let back: FromHelper = read_msg(&mut cur).unwrap().unwrap();
@@ -497,7 +605,8 @@ mod tests {
 
     #[test]
     fn 零长度帧被帧层接受但_json_层拒绝() {
-        let mut cur = Cursor::new(vec![0, 0, 0, 0]);
+        // 帧头 5 字节：长度 0、fd 个数 0
+        let mut cur = Cursor::new(vec![0, 0, 0, 0, 0]);
         let payload = read_frame(&mut cur).unwrap().unwrap();
         assert!(payload.is_empty());
         assert!(decode::<FromHelper>(&payload).is_err());
@@ -505,24 +614,65 @@ mod tests {
 
     #[test]
     fn 超长帧在读_payload_前被拒绝() {
-        let too_big = (MAX_FRAME_LEN as u32 + 1).to_be_bytes();
-        // 故意只给前缀不给 payload：若实现试图读 payload 会得到 UnexpectedEof 而不是 TooLarge。
-        let mut cur = Cursor::new(too_big.to_vec());
+        let mut too_big = (MAX_FRAME_LEN as u32 + 1).to_be_bytes().to_vec();
+        too_big.push(0); // fd_count
+        // 故意只给帧头不给 payload：若实现试图读 payload 会得到 UnexpectedEof 而不是 TooLarge。
+        let mut cur = Cursor::new(too_big);
         match read_frame(&mut cur) {
             Err(IpcError::TooLarge { len }) => assert_eq!(len, MAX_FRAME_LEN as u64 + 1),
             other => panic!("应为 TooLarge，实际 {other:?}"),
         }
         // 恰好等于上限则允许
+        let mut at_limit = (MAX_FRAME_LEN as u32).to_be_bytes().to_vec();
+        at_limit.push(0);
         assert_eq!(
-            parse_header((MAX_FRAME_LEN as u32).to_be_bytes()).unwrap(),
-            MAX_FRAME_LEN
+            parse_header(at_limit.try_into().unwrap()).unwrap(),
+            (MAX_FRAME_LEN, 0)
         );
     }
 
     #[test]
+    fn 帧头记录_fd_个数() {
+        let frame = encode_with_fds(&FromWorker::Hello { pid: 1, uid: 0, gid: 0 }, 1).unwrap();
+        let header: [u8; FRAME_HEADER_LEN] = frame[..FRAME_HEADER_LEN].try_into().unwrap();
+        let (len, fds) = parse_header(header).unwrap();
+        assert_eq!(fds, 1);
+        assert_eq!(len, frame.len() - FRAME_HEADER_LEN);
+        // 不带 fd 的普通 encode 记 0
+        let plain = encode(&FromWorker::Hello { pid: 1, uid: 0, gid: 0 }).unwrap();
+        assert_eq!(plain[4], 0);
+        // 内容一致，只差帧头那一个字节
+        assert_eq!(&plain[FRAME_HEADER_LEN..], &frame[FRAME_HEADER_LEN..]);
+    }
+
+    #[test]
+    fn fd_个数越界被拒() {
+        let err = encode_with_fds(&FromWorker::Hello { pid: 1, uid: 0, gid: 0 }, 99).unwrap_err();
+        assert!(matches!(err, IpcError::TooManyFds { count: 99 }), "{err:?}");
+
+        let mut header = [0u8; FRAME_HEADER_LEN];
+        header[4] = 99;
+        assert!(matches!(
+            parse_header(header),
+            Err(IpcError::TooManyFds { count: 99 })
+        ));
+    }
+
+    /// 同步读端（helper）不具备接收 fd 的能力，收到这种帧要报错而不是把 fd 丢掉。
+    #[test]
+    fn 同步读端拒绝带_fd_的帧() {
+        let frame = encode_with_fds(&FromWorker::Hello { pid: 1, uid: 0, gid: 0 }, 1).unwrap();
+        let mut cur = Cursor::new(frame.to_vec());
+        match read_frame(&mut cur) {
+            Err(IpcError::Protocol(msg)) => assert!(msg.contains("fd"), "{msg}"),
+            other => panic!("应为 Protocol，实际 {other:?}"),
+        }
+    }
+
+    #[test]
     fn 半帧断开报_unexpected_eof() {
-        // 声明 10 字节只给 3 字节
-        let mut cur = Cursor::new(vec![0, 0, 0, 10, b'{', b'}', b' ']);
+        // 声明 10 字节只给 3 字节（帧头 5 字节：长度 4 + fd 个数 1）
+        let mut cur = Cursor::new(vec![0, 0, 0, 10, 0, b'{', b'}', b' ']);
         match read_frame(&mut cur) {
             Err(IpcError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
             other => panic!("应为 UnexpectedEof，实际 {other:?}"),
@@ -549,9 +699,9 @@ mod tests {
 
         // 线格式必须带明文（helper 要拿去给 PAM），但只走 Zeroizing 缓冲
         let frame = encode(&msg).unwrap();
-        let json = std::str::from_utf8(&frame[4..]).unwrap();
+        let json = std::str::from_utf8(&frame[FRAME_HEADER_LEN..]).unwrap();
         assert!(json.contains("hunter2"));
-        let back: ToHelper = decode(&frame[4..]).unwrap();
+        let back: ToHelper = decode(&frame[FRAME_HEADER_LEN..]).unwrap();
         match back {
             ToHelper::AuthRespond { responses } => {
                 assert_eq!(responses.len(), 1);
@@ -565,17 +715,54 @@ mod tests {
     #[test]
     fn 线格式使用_type_判别字段() {
         let frame = encode(&ToHelper::CloseSession).unwrap();
-        assert_eq!(&frame[4..], br#"{"type":"close_session"}"#);
+        assert_eq!(&frame[FRAME_HEADER_LEN..], br#"{"type":"close_session"}"#);
         let frame = encode(&FromHelper::SessionClosed).unwrap();
-        assert_eq!(&frame[4..], br#"{"type":"session_closed"}"#);
+        assert_eq!(&frame[FRAME_HEADER_LEN..], br#"{"type":"session_closed"}"#);
         let frame = encode(&ToHelper::SpawnWorker {
             open_session: true,
             as_root: false,
         })
         .unwrap();
         assert_eq!(
-            &frame[4..],
+            &frame[FRAME_HEADER_LEN..],
             br#"{"type":"spawn_worker","open_session":true,"as_root":false}"#
+        );
+    }
+
+    #[test]
+    fn 订阅消息往返且_end_省略_error() {
+        let sub = ToWorker::Subscribe {
+            id: 3,
+            channel: crate::rpc::LOG_FOLLOW.into(),
+            params: serde_json::json!({ "unit": "nginx.service" }),
+        };
+        let frame = encode(&sub).unwrap();
+        assert_eq!(decode::<ToWorker>(&frame[FRAME_HEADER_LEN..]).unwrap(), sub);
+
+        let frame = encode(&ToWorker::Unsubscribe { id: 3 }).unwrap();
+        assert_eq!(&frame[FRAME_HEADER_LEN..], br#"{"type":"unsubscribe","id":3}"#);
+
+        let ev = FromWorker::Event {
+            id: 3,
+            data: serde_json::json!([{ "message": "hi" }]),
+        };
+        assert_eq!(decode::<FromWorker>(&encode(&ev).unwrap()[FRAME_HEADER_LEN..]).unwrap(), ev);
+
+        // 正常结束不带 error 字段，省得每帧都拖一个 null
+        let frame = encode(&FromWorker::End { id: 3, error: None }).unwrap();
+        assert_eq!(&frame[FRAME_HEADER_LEN..], br#"{"type":"end","id":3}"#);
+        assert_eq!(
+            decode::<FromWorker>(&frame[FRAME_HEADER_LEN..]).unwrap(),
+            FromWorker::End { id: 3, error: None }
+        );
+
+        let failed = FromWorker::End {
+            id: 3,
+            error: Some(ApiError::not_found("没有这个频道")),
+        };
+        assert_eq!(
+            decode::<FromWorker>(&encode(&failed).unwrap()[FRAME_HEADER_LEN..]).unwrap(),
+            failed
         );
     }
 
@@ -586,7 +773,7 @@ mod tests {
             error: ApiError::not_found("没有这个方法"),
         };
         let frame = encode(&err).unwrap();
-        let back: FromWorker = decode(&frame[4..]).unwrap();
+        let back: FromWorker = decode(&frame[FRAME_HEADER_LEN..]).unwrap();
         assert_eq!(back, err);
 
         let who = WhoAmI {

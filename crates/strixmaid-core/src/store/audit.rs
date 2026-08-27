@@ -165,6 +165,13 @@ pub struct AuditFilter {
     pub username: Option<String>,
     /// 精确匹配动作。
     pub action: Option<String>,
+    /// 前缀匹配动作，如 `service.` 命中全部服务操作。
+    ///
+    /// 这是 API 层 `AuditQuery::action` 的语义（见其文档）。与 [`AuditFilter::action`]
+    /// 并存而不是替换它：调用方多数时候要的是「这一个动作」，把精确匹配退化成前缀匹配
+    /// 会让 `auth.login` 顺带命中将来可能出现的 `auth.login_retry` 这类动作。
+    /// 两者同时给出时按 AND 生效。
+    pub action_prefix: Option<String>,
     /// 只看某种结果。
     pub result: Option<AuditOutcome>,
     /// `ts >= since`。
@@ -253,6 +260,14 @@ impl Store {
         }
         if let Some(v) = &filter.action {
             conds.push("action = ?");
+            binds.push(Bind::Text(v.clone()));
+        }
+        if let Some(v) = &filter.action_prefix {
+            // 用 `instr(action, ?) = 1` 而不是 `LIKE ? || '%'`：LIKE 会把外部输入里的
+            // `%` 与 `_` 当通配符，必须先转义才安全，而转义规则本身又是一处容易写错的地方；
+            // instr 是纯字面量查找，没有元字符。空前缀在 SQLite 里 `instr(x, '') = 1`，
+            // 等价于不过滤，行为也合理。
+            conds.push("instr(action, ?) = 1");
             binds.push(Bind::Text(v.clone()));
         }
         if let Some(v) = filter.result {

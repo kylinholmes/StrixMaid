@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>StrixMaid /debug</title>
+<link rel="stylesheet" href="/debug/vendor/uplot.css"/>
+<link rel="stylesheet" href="/debug/vendor/xterm.css"/>
+<style>
+/* 开发调试页，不做刻意的 UI 设计（design.md §12.1）。
+   只求信息密度高、错误显眼、深浅色都能看。 */
+:root {
+  color-scheme: light dark;
+  --bg: #fff; --fg: #1a1a1a; --dim: #666; --line: #d8d8d8;
+  --panel: #fafafa; --err-bg: #fff0f0; --err-fg: #a00;
+  --ok: #087443; --warn: #a86100; --crit: #c02626;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c; --fg: #e6e6e6; --dim: #9aa0a6; --line: #2e3239;
+    --panel: #1c1f24; --err-bg: #2a1618; --err-fg: #ff8a8a;
+    --ok: #4ec98a; --warn: #e0a33e; --crit: #ff6b6b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
+}
+header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+header .who { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+main {
+  display: grid; gap: 12px; padding: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  align-items: start;
+}
+section {
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); overflow: hidden;
+}
+section > h2 {
+  margin: 0; padding: 8px 12px; font-size: 13px; font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 8px;
+}
+section > h2 .sub { font-weight: 400; color: var(--dim); font-family: var(--mono); font-size: 11px; }
+section > h2 .spacer { margin-left: auto; }
+.body { padding: 10px 12px; max-height: 460px; overflow: auto; }
+.wide { grid-column: 1 / -1; }
+
+button, select, input {
+  font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--dim); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=text], input[type=password], input[type=number] { padding: 3px 6px; }
+label { color: var(--dim); }
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td {
+  text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px;
+}
+th { color: var(--dim); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+tbody tr:hover { background: var(--bg); }
+tbody tr.clickable { cursor: pointer; }
+td.num { text-align: right; font-family: var(--mono); }
+
+pre {
+  margin: 0; font-family: var(--mono); font-size: 11.5px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12px; }
+.kv dt { color: var(--dim); }
+.kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+
+.err {
+  background: var(--err-bg); color: var(--err-fg);
+  border-radius: 4px; padding: 8px 10px; font-size: 12px;
+}
+.err code { font-family: var(--mono); }
+.muted { color: var(--dim); }
+.tag {
+  display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 11px;
+  border: 1px solid currentColor; font-family: var(--mono);
+}
+.ok { color: var(--ok); } .warn { color: var(--warn); } .crit { color: var(--crit); }
+.chart { width: 100%; }
+.uplot { font-family: inherit; }
+
+/* 终端。给挂载点一个**确定的高度**是硬性要求，不是排版偏好：FitAddon 靠父元素的
+   computed height 反算 rows，高度为 auto 时算出来就是 0 行，fit() 直接放弃。 */
+.term-host {
+  height: 320px; width: 100%;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+}
+/* 唯一一个不套外层滚动条的面板：终端自己有滚动区，两层滚动嵌在一起时
+   滚轮落在哪一层全看鼠标位置，翻回看缓冲会变得很难受。 */
+#p-terminals > .body { max-height: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>StrixMaid <span class="muted">/debug</span></h1>
+  <span class="who" id="who">未登录</span>
+  <span class="spacer" style="margin-left:auto"></span>
+  <a href="/api/docs" style="color:inherit">/api/docs</a>
+  <button id="reload-all">全部刷新</button>
+</header>
+
+<main>
+  <section id="p-auth">
+    <h2>会话 <span class="sub">/auth/*</span></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-caps">
+    <h2>能力 <span class="sub">/capabilities</span>
+      <span class="spacer"></span><button data-reload="caps">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-system">
+    <h2>主机 <span class="sub">/system/info</span>
+      <span class="spacer"></span><button data-reload="system">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-health">
+    <h2>健康 <span class="sub">/system/health · /system/time</span>
+      <span class="spacer"></span><button data-reload="health">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-metrics" class="wide">
+    <h2>指标 <span class="sub">/metrics/series · /metrics/query</span>
+      <span class="spacer"></span><button data-reload="metrics">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-processes" class="wide">
+    <h2>进程 <span class="sub">/processes</span>
+      <span class="spacer"></span><button data-reload="processes">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-services" class="wide">
+    <h2>服务 <span class="sub">/services</span>
+      <span class="spacer"></span><button data-reload="services">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-logs" class="wide">
+    <h2>日志 <span class="sub">/logs</span>
+      <span class="spacer"></span><button data-reload="logs">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-audit" class="wide">
+    <h2>审计 <span class="sub">/audit</span>
+      <span class="spacer"></span><button data-reload="audit">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-ws" class="wide">
+    <h2>实时 <span class="sub">WS /ws</span></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-terminals" class="wide">
+    <h2>终端 <span class="sub">/terminals · WS /ws/terminal/{id}</span>
+      <span class="spacer"></span><button data-reload="terminals">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+</main>
+
+<script src="/debug/vendor/uplot.js"></script>
+<script src="/debug/vendor/xterm.js"></script>
+<script src="/debug/vendor/addon-fit.js"></script>
+<script>
+"use strict";
+// ===========================================================================
+// 基础设施
+// ===========================================================================
+
+const S = {
+  token: sessionStorage.getItem("strix_token"),
+  user: null,
+  ws: null,
+  wsSubs: new Set(),
+  wsSeq: 1,
+};
+
+const $ = (sel, root) => (root || document).querySelector(sel);
+const el = (tag, attrs, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    n.append(kid instanceof Node ? kid : String(kid));
+  }
+  return n;
+};
+
+/** 调 API。失败时抛出解析好的 ApiError（带 code / message / detail）。 */
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers);
+  if (S.token) headers["Authorization"] = "Bearer " + S.token;
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    opts = Object.assign({}, opts, { body: JSON.stringify(opts.body) });
+  }
+  const res = await fetch("/api/v1" + path, Object.assign({}, opts, { headers }));
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { /* 非 JSON 响应 */ }
+  if (!res.ok) {
+    const e = new Error((data && data.message) || res.statusText || ("HTTP " + res.status));
+    e.status = res.status;
+    e.code = data && data.code;
+    e.detail = data && data.detail;
+    e.capability = data && data.capability;
+    e.canRetryElevated = !!(data && data.can_retry_elevated);
+    e.raw = data || text;
+    throw e;
+  }
+  return data;
+}
+
+/** 把一个 ApiError 渲染成人能看懂的错误块。 */
+function errBox(e) {
+  const parts = [];
+  if (e.status) parts.push(el("span", { class: "tag" }, String(e.status)));
+  if (e.code) parts.push(el("span", { class: "tag" }, e.code));
+  const box = el("div", { class: "err" },
+    el("div", { class: "row", style: "margin:0 0 4px" }, parts, el("b", {}, e.message || "请求失败")));
+  if (e.detail) box.append(el("pre", { class: "muted" }, e.detail));
+  if (e.capability) {
+    box.append(el("div", { class: "muted" },
+      "缺失的能力：" + e.capability + "（本机没有这项能力，前端应隐藏对应页面）"));
+  }
+  if (e.canRetryElevated) box.append(el("div", { class: "muted" }, "提权后重试可能成功。"));
+  return box;
+}
+
+/**
+ * 面板的统一外壳：**每个面板独立容错**。
+ * 某个端点未实现 / 报错 / 该能力不存在时，只有这一个面板显示错误，其余不受影响。
+ */
+const PANELS = {};
+function definePanel(name, sectionId, render) {
+  const body = $("#" + sectionId + " .body");
+  PANELS[name] = async () => {
+    body.replaceChildren(el("div", { class: "muted" }, "加载中…"));
+    try {
+      const nodes = await render();
+      body.replaceChildren(...[].concat(nodes).filter(Boolean));
+    } catch (e) {
+      // 这里刻意 catch 一切：面板出错绝不能波及别的面板。
+      body.replaceChildren(errBox(e));
+    }
+  };
+}
+function reloadAll() { for (const f of Object.values(PANELS)) f(); }
+
+// ---- 小工具 ----
+const fmtBytes = (n) => {
+  if (n === null || n === undefined) return "—";
+  const u = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let v = Number(n), i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return i === 0 ? v + " B" : v.toFixed(1) + " " + u[i];
+};
+const fmtTs = (s) => (s ? new Date(s * 1000).toLocaleString() : "—");
+const fmtDur = (s) => {
+  if (!s && s !== 0) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return (d ? d + "天 " : "") + h + "时 " + m + "分";
+};
+const kv = (pairs) => el("dl", { class: "kv" },
+  pairs.filter(([, v]) => v !== undefined).map(([k, v]) =>
+    [el("dt", { text: k }), el("dd", {}, v === null || v === "" ? "—" : v)]).flat());
+const table = (cols, rows, onRowClick) => {
+  const t = el("table", {},
+    el("thead", {}, el("tr", {}, cols.map((c) => el("th", { text: c.label })))),
+    el("tbody", {}, rows.map((r) => {
+      const tr = el("tr", { class: onRowClick ? "clickable" : null },
+        cols.map((c) => {
+          const v = c.get(r);
+          return el("td", { class: c.num ? "num" : null, title: v === null ? "" : String(v) },
+            v === null || v === undefined ? "—" : v);
+        }));
+      if (onRowClick) tr.addEventListener("click", () => onRowClick(r));
+      return tr;
+    })));
+  return t;
+};
+
+// ===========================================================================
+// 会话
+// ===========================================================================
+
+function setToken(tok, user) {
+  S.token = tok;
+  S.user = user;
+  if (tok) sessionStorage.setItem("strix_token", tok);
+  else sessionStorage.removeItem("strix_token");
+  $("#who").textContent = user
+    ? `${user.username} (uid=${user.uid})${user.elevated ? " · 已提权" : ""}`
+    : (tok ? "已登录" : "未登录");
+}
+
+/** 渲染一轮 PAM prompts；返回一个 form。多轮由调用方循环驱动（design.md §5.2）。 */
+function promptForm(prompts, onSubmit) {
+  const inputs = [];
+  const form = el("form", {
+    onsubmit: (ev) => {
+      ev.preventDefault();
+      onSubmit(inputs.map((i) => ({ id: i.promptId, value: i.value })));
+    },
+  });
+  for (const p of prompts) {
+    if (p.style === "info" || p.style === "error") {
+      form.append(el("div", { class: p.style === "error" ? "err" : "muted" }, p.text));
+      continue;
+    }
+    const input = el("input", {
+      type: p.style === "prompt" ? "password" : "text",
+      autocomplete: p.style === "prompt" ? "current-password" : "off",
+      required: "required",
+    });
+    input.promptId = p.id;
+    inputs.push(input);
+    form.append(el("div", { class: "row" }, el("label", { text: p.text }), input));
+  }
+  form.append(el("div", { class: "row" },
+    el("button", { type: "submit" }, inputs.length ? "提交" : "继续")));
+  if (inputs.length) setTimeout(() => inputs[0].focus(), 0);
+  return form;
+}
+
+definePanel("auth", "p-auth", async () => {
+  const out = [];
+
+  if (S.token) {
+    let sess = null;
+    try {
+      sess = await api("/auth/session");
+    } catch (e) {
+      if (e.status === 401) {
+        // token 过期：清掉再重画登录表单，而不是把面板卡在错误上
+        setToken(null, null);
+        return [el("div", { class: "muted" }, "会话已失效，请重新登录。"),
+          ...(await PANELS.auth._loginUi())];
+      }
+      throw e;
+    }
+    setToken(S.token, sess);
+    out.push(kv([
+      ["用户", sess.username],
+      ["uid / gid", `${sess.uid} / ${sess.gid}`],
+      ["组", (sess.groups || []).join(", ")],
+      ["已提权", sess.elevated ? el("span", { class: "warn" }, "是") : "否"],
+      ["认证于", fmtTs(sess.authed_at)],
+      ["最后活动", fmtTs(sess.last_active)],
+    ]));
+
+    const elevBox = el("div", {});
+    out.push(el("div", { class: "row" },
+      el("button", {
+        onclick: async () => {
+          elevBox.replaceChildren(el("div", { class: "muted" }, "请求提权…"));
+          try {
+            const r = await api("/auth/elevate/start", { method: "POST", body: { username: sess.username } });
+            elevBox.replaceChildren(promptForm(r.prompts, async (responses) => {
+              try {
+                const o = await api("/auth/elevate/respond", {
+                  method: "POST", body: { session: r.session, responses },
+                });
+                elevBox.replaceChildren(el("div", { class: "ok" },
+                  o.status === "complete" ? "提权成功" : "还需要更多回应：" + JSON.stringify(o.prompts)));
+                PANELS.auth(); PANELS.caps();
+              } catch (e2) { elevBox.replaceChildren(errBox(e2)); }
+            }));
+          } catch (e) { elevBox.replaceChildren(errBox(e)); }
+        },
+      }, "启用管理访问"),
+      el("button", {
+        onclick: async () => {
+          try { await api("/auth/logout", { method: "POST" }); } catch (_) { /* 登出失败也当登出 */ }
+          if (S.ws) { S.ws.close(); S.ws = null; }
+          // 终端那条 WS 不在 S.ws 里，得单独断——token 一作废它下一次重连也连不上了
+          termDetach("已登出");
+          setToken(null, null);
+          reloadAll();
+        },
+      }, "登出")));
+    out.push(elevBox);
+    return out;
+  }
+
+  return PANELS.auth._loginUi();
+});
+
+/** 登录表单。挂在 panel 上，token 失效时可以直接复用。 */
+PANELS.auth._loginUi = async () => {
+  const box = el("div", {});
+  const user = el("input", { type: "text", value: "", autocomplete: "username", required: "required" });
+  const form = el("form", {
+    onsubmit: async (ev) => {
+      ev.preventDefault();
+      box.replaceChildren(el("div", { class: "muted" }, "正在与 PAM 对话…"));
+      try {
+        let r = await api("/auth/start", { method: "POST", body: { username: user.value } });
+        const round = (resp) => {
+          box.replaceChildren(promptForm(resp.prompts, async (responses) => {
+            box.replaceChildren(el("div", { class: "muted" }, "验证中…"));
+            try {
+              const o = await api("/auth/respond", {
+                method: "POST", body: { session: resp.session, responses },
+              });
+              if (o.status === "complete") {
+                setToken(o.token, o.user);
+                reloadAll();
+              } else {
+                round(o); // PAM 还要问（2FA / 改密），继续下一轮
+              }
+            } catch (e) {
+              box.replaceChildren(errBox(e), form);
+            }
+          }));
+        };
+        round(r);
+      } catch (e) {
+        box.replaceChildren(errBox(e), form);
+      }
+    },
+  },
+    el("div", { class: "row" }, el("label", { text: "用户名" }), user,
+      el("button", { type: "submit" }, "登录")));
+  user.value = "";
+  box.append(form);
+  setTimeout(() => user.focus(), 0);
+  return [
+    el("div", { class: "muted", style: "margin-bottom:8px" },
+      "PAM 认证，映射到系统用户（design.md §5）。密码只在提交那一刻存在于内存，不写入任何存储。"),
+    box,
+  ];
+};
+
+// ===========================================================================
+// 能力
+// ===========================================================================
+
+definePanel("caps", "p-caps", async () => {
+  const c = await api("/capabilities");
+  const yn = (v) => v
+    ? el("span", { class: "ok" }, "✓ 是")
+    : el("span", { class: "muted" }, "✗ 否");
+  const out = [
+    el("div", { class: "muted", style: "margin-bottom:6px" }, "system 层（启动时探测一次）"),
+    kv(Object.entries(c.system).map(([k, v]) => [k, yn(v)])),
+  ];
+  out.push(el("div", { class: "muted", style: "margin:10px 0 6px" }, "user 层（会话建立时探测）"));
+  if (!c.user) {
+    out.push(el("div", { class: "muted" },
+      "null —— 未认证。本端点未认证也返回 200，登录页据此判断 helper 是否可用（design.md §6）。"));
+  } else {
+    out.push(kv(Object.entries(c.user).map(([k, v]) =>
+      [k, typeof v === "boolean" ? yn(v) : (Array.isArray(v) ? v.join(", ") : String(v))])));
+  }
+  return out;
+});
+
+// ===========================================================================
+// 主机
+// ===========================================================================
+
+definePanel("system", "p-system", async () => {
+  const i = await api("/system/info");
+  const out = [kv([
+    ["主机名", i.hostname],
+    ["显示名", i.pretty_hostname],
+    ["machine-id", i.machine_id],
+    ["系统", i.os.pretty_name],
+    ["内核", i.kernel],
+    ["架构", i.arch],
+    ["虚拟化", i.virtualization || el("span", { class: "muted" }, "物理机 / 未检测到")],
+    ["机型", i.hardware ? [i.hardware.vendor, i.hardware.product].filter(Boolean).join(" ") : null],
+    ["CPU", `${i.cpu.model} · ${i.cpu.logical_cores} 逻辑核` +
+      (i.cpu.physical_cores ? ` / ${i.cpu.physical_cores} 物理核` : "")],
+    ["内存", `${fmtBytes(i.memory.total_bytes)}，可用 ${fmtBytes(i.memory.available_bytes)}`],
+    ["交换", i.memory.swap_total_bytes
+      ? `${fmtBytes(i.memory.swap_total_bytes)}，空闲 ${fmtBytes(i.memory.swap_free_bytes)}`
+      : el("span", { class: "muted" }, "未配置")],
+    ["运行时长", fmtDur(i.uptime_secs)],
+    ["开机于", fmtTs(i.boot_ts)],
+  ])];
+
+  out.push(el("div", { class: "muted", style: "margin:10px 0 4px" },
+    `文件系统（${i.filesystems.length}）`));
+  out.push(table([
+    { label: "挂载点", get: (f) => f.mount_point },
+    { label: "设备", get: (f) => f.device },
+    { label: "类型", get: (f) => f.fs_type },
+    { label: "已用", num: true, get: (f) => fmtBytes(f.used_bytes) },
+    { label: "总量", num: true, get: (f) => fmtBytes(f.total_bytes) },
+    { label: "使用率", num: true, get: (f) => f.total_bytes
+        ? (f.used_bytes / (f.used_bytes + f.available_bytes) * 100).toFixed(1) + "%" : "—" },
+    { label: "只读", get: (f) => (f.read_only ? "是" : "") },
+  ], i.filesystems));
+
+  if (i.disks.length) {
+    out.push(el("div", { class: "muted", style: "margin:10px 0 4px" }, `磁盘（${i.disks.length}）`));
+    out.push(table([
+      { label: "名称", get: (d) => d.name },
+      { label: "型号", get: (d) => d.model },
+      { label: "容量", num: true, get: (d) => fmtBytes(d.size_bytes) },
+      { label: "类型", get: (d) => (d.rotational ? "HDD" : "SSD") },
+    ], i.disks));
+  } else {
+    out.push(el("div", { class: "muted", style: "margin-top:10px" },
+      "磁盘列表为空——本平台不采集（macOS 需要 IOKit，见 docs/macos-dev-platform.md）。"));
+  }
+  return out;
+});
+
+// ===========================================================================
+// 健康 + 时间
+// ===========================================================================
+
+definePanel("health", "p-health", async () => {
+  const out = [];
+  // 两个端点各自容错：时间读不到不该让健康报告也看不见。
+  try {
+    const h = await api("/system/health");
+    const cls = { ok: "ok", warning: "warn", critical: "crit" }[h.status] || "";
+    out.push(el("div", { class: "row" },
+      el("span", { class: "tag " + cls }, h.status),
+      el("span", { class: "muted" }, fmtTs(h.ts))));
+    if (!h.items.length) {
+      out.push(el("div", { class: "muted" }, "没有需要关注的条目。"));
+    } else {
+      out.push(table([
+        { label: "级别", get: (x) => el("span", { class: { ok: "ok", warning: "warn", critical: "crit" }[x.severity] }, x.severity) },
+        { label: "标题", get: (x) => x.title },
+        { label: "目标", get: (x) => x.target },
+        { label: "详情", get: (x) => x.detail },
+      ], h.items));
+    }
+    if (h.skipped.length) {
+      out.push(el("div", { class: "muted", style: "margin-top:6px" },
+        "未检查：" + h.skipped.join("、")));
+    }
+  } catch (e) {
+    out.push(errBox(e));
+  }
+
+  out.push(el("div", { class: "muted", style: "margin:10px 0 4px" }, "时间"));
+  try {
+    const t = await api("/system/time");
+    const off = t.utc_offset_secs / 3600;
+    out.push(kv([
+      ["时区", `${t.timezone}（UTC${off >= 0 ? "+" : ""}${off}）`],
+      ["服务端时间", fmtTs(t.ts)],
+      ["NTP 启用", t.ntp_enabled === null ? el("span", { class: "muted" }, "未知（本平台无法探测）") : String(t.ntp_enabled)],
+      ["NTP 已同步", t.ntp_synchronized === null ? el("span", { class: "muted" }, "未知") : String(t.ntp_synchronized)],
+      ["NTP 服务", t.ntp_service],
+      ["RTC 走本地时间", t.rtc_local === null ? "未知" : String(t.rtc_local)],
+    ]));
+  } catch (e) {
+    out.push(errBox(e));
+  }
+  return out;
+});
+
+// ===========================================================================
+// 指标
+// ===========================================================================
+
+const METRICS_UI = { series: null, range: 3600, chart: null };
+
+definePanel("metrics", "p-metrics", async () => {
+  const list = await api("/metrics/series");
+  if (!list.length) {
+    return el("div", { class: "muted" }, "还没有 series——采集器刚起，等一轮落盘（约 1 分钟）。");
+  }
+
+  const names = [...new Set(list.map((s) => s.metric))].sort();
+  if (!METRICS_UI.series || !list.some((s) => key(s) === METRICS_UI.series)) {
+    const pref = list.find((s) => s.metric === "cpu.usage") || list[0];
+    METRICS_UI.series = key(pref);
+  }
+  function key(s) { return s.labels ? `${s.metric}{${s.labels}}` : s.metric; }
+
+  const pick = el("select", {
+    onchange: (e) => { METRICS_UI.series = e.target.value; draw(); },
+  }, list.map((s) => el("option", {
+    value: key(s), selected: key(s) === METRICS_UI.series ? "selected" : null,
+  }, key(s) + (s.unit ? ` [${s.unit}]` : ""))));
+
+  const range = el("select", {
+    onchange: (e) => { METRICS_UI.range = Number(e.target.value); draw(); },
+  }, [[600, "10 分钟"], [3600, "1 小时"], [21600, "6 小时"], [86400, "1 天"], [604800, "7 天"]]
+    .map(([v, t]) => el("option", { value: v, selected: v === METRICS_UI.range ? "selected" : null }, t)));
+
+  const info = el("span", { class: "muted" });
+  const chartBox = el("div", { class: "chart" });
+
+  async function draw() {
+    info.textContent = "查询中…";
+    chartBox.replaceChildren();
+    try {
+      const to = Math.floor(Date.now() / 1000);
+      const from = to - METRICS_UI.range;
+      const r = await api(`/metrics/query?series=${encodeURIComponent(METRICS_UI.series)}` +
+        `&from=${from}&to=${to}`);
+      const s = r.series[0];
+      if (!s || !s.points.length) {
+        info.textContent = `层 ${r.layer} · step ${r.step}s · 无数据点`;
+        chartBox.append(el("div", { class: "muted" }, "该时间范围内没有数据。"));
+        return;
+      }
+      info.textContent = `层 ${r.layer} · step ${r.step}s · ${s.points.length} 点` +
+        (s.meta.unit ? ` · ${s.meta.unit}` : "");
+      renderChart(chartBox, s);
+    } catch (e) {
+      chartBox.replaceChildren(errBox(e));
+      info.textContent = "";
+    }
+  }
+
+  // 先返回骨架，再异步填图——查询失败只影响图，不影响 series 列表。
+  setTimeout(draw, 0);
+
+  const out = [
+    el("div", { class: "row" },
+      el("label", { text: "series" }), pick,
+      el("label", { text: "范围" }), range,
+      info),
+    chartBox,
+  ];
+
+  // 实时快照
+  const cur = el("div", { style: "margin-top:10px" });
+  out.push(cur);
+  api("/metrics/current").then((snap) => {
+    cur.replaceChildren(
+      el("div", { class: "muted", style: "margin-bottom:4px" },
+        `实时快照 ${fmtTs(snap.ts)} · ${snap.values.length} 项（${names.length} 种指标）`),
+      table([
+        { label: "指标", get: (v) => v.metric },
+        { label: "标签", get: (v) => v.labels },
+        { label: "值", num: true, get: (v) => (Math.round(v.value * 100) / 100).toLocaleString() },
+        { label: "单位", get: (v) => v.unit },
+      ], snap.values.slice(0, 200)));
+  }).catch((e) => cur.replaceChildren(errBox(e)));
+
+  return out;
+});
+
+/**
+ * uPlot band 图（design.md §7.5）：
+ * min–max 画半透明区间带，avg 实线，med 虚线。
+ * **avg 与 med 两条线的分离程度直接可视化了负载的偏斜**——贴合即平稳，分离即尖峰型。
+ */
+function renderChart(box, s) {
+  const xs = s.points.map((p) => p.ts);
+  const mins = s.points.map((p) => p.min);
+  const maxs = s.points.map((p) => p.max);
+  const avgs = s.points.map((p) => (p.cnt > 0 ? p.sum / p.cnt : null));
+  const meds = s.points.map((p) => p.med);
+
+  if (METRICS_UI.chart) { METRICS_UI.chart.destroy(); METRICS_UI.chart = null; }
+
+  const stroke = getComputedStyle(document.body).color;
+  const opts = {
+    width: box.clientWidth || 900,
+    height: 260,
+    scales: { x: { time: true } },
+    axes: [
+      { stroke, grid: { stroke: "rgba(128,128,128,.18)" } },
+      { stroke, grid: { stroke: "rgba(128,128,128,.18)" } },
+    ],
+    legend: { live: true },
+    series: [
+      {},
+      // 顺序要与 bands 的索引对应：1=max，2=min 组成区间带
+      { label: "max", stroke: "rgba(90,150,220,.55)", width: 1, points: { show: false } },
+      { label: "min", stroke: "rgba(90,150,220,.55)", width: 1, points: { show: false } },
+      { label: "avg", stroke: "#3b82f6", width: 2, points: { show: false } },
+      { label: "med", stroke: "#f59e0b", width: 1.5, dash: [5, 3], points: { show: false } },
+    ],
+    bands: [{ series: [1, 2], fill: "rgba(90,150,220,.16)" }],
+  };
+  METRICS_UI.chart = new uPlot(opts, [xs, maxs, mins, avgs, meds], box);
+}
+
+// ===========================================================================
+// 进程
+// ===========================================================================
+
+const PROC_UI = { sort: "cpu", order: "desc", q: "", tree: false, limit: 60 };
+
+definePanel("processes", "p-processes", async () => {
+  const qs = new URLSearchParams({
+    sort: PROC_UI.sort, order: PROC_UI.order, limit: String(PROC_UI.limit),
+  });
+  if (PROC_UI.q) qs.set("q", PROC_UI.q);
+  if (PROC_UI.tree) qs.set("tree", "true");
+  const list = await api("/processes?" + qs);
+
+  const detail = el("div", { style: "margin-top:10px" });
+
+  const controls = el("div", { class: "row" },
+    el("label", { text: "排序" }),
+    el("select", { onchange: (e) => { PROC_UI.sort = e.target.value; PANELS.processes(); } },
+      ["cpu", "mem", "pid", "name", "start"].map((v) =>
+        el("option", { value: v, selected: v === PROC_UI.sort ? "selected" : null }, v))),
+    el("button", {
+      onclick: () => { PROC_UI.order = PROC_UI.order === "desc" ? "asc" : "desc"; PANELS.processes(); },
+    }, PROC_UI.order === "desc" ? "降序 ↓" : "升序 ↑"),
+    el("label", { text: "搜索" }),
+    (() => {
+      const i = el("input", { type: "text", value: PROC_UI.q, placeholder: "名称或 cmdline" });
+      i.addEventListener("change", () => { PROC_UI.q = i.value; PANELS.processes(); });
+      return i;
+    })(),
+    (() => {
+      const c = el("input", { type: "checkbox" });
+      c.checked = PROC_UI.tree;
+      c.addEventListener("change", () => { PROC_UI.tree = c.checked; PANELS.processes(); });
+      return el("label", {}, c, " 树模式");
+    })(),
+    el("span", { class: "muted" }, `${list.length} 项`));
+
+  const t = table([
+    { label: "pid", num: true, get: (p) => p.pid },
+    { label: "ppid", num: true, get: (p) => p.ppid },
+    { label: "用户", get: (p) => p.user || p.uid },
+    { label: "名称", get: (p) => p.name },
+    { label: "状态", get: (p) => p.state },
+    { label: "CPU%", num: true, get: (p) => p.cpu_percent.toFixed(1) },
+    { label: "内存%", num: true, get: (p) => p.mem_percent.toFixed(2) },
+    { label: "RSS", num: true, get: (p) => fmtBytes(p.rss_bytes) },
+    { label: "线程", num: true, get: (p) => p.threads },
+    { label: "cmdline", get: (p) => p.cmdline },
+  ], list, async (p) => {
+    detail.replaceChildren(el("div", { class: "muted" }, `加载 pid ${p.pid}…`));
+    try {
+      const d = await api("/processes/" + p.pid);
+      detail.replaceChildren(
+        el("div", { class: "muted", style: "margin-bottom:4px" }, `pid ${d.summary.pid} 详情`),
+        kv([
+          ["exe", d.exe], ["cwd", d.cwd],
+          ["euid / gid", [d.euid, d.gid].filter((x) => x !== null).join(" / ")],
+          ["tty", d.tty], ["cgroup", d.cgroup], ["unit", d.unit],
+          ["IO 读 / 写", d.io_read_bytes !== null
+            ? `${fmtBytes(d.io_read_bytes)} / ${fmtBytes(d.io_write_bytes)}` : null],
+          ["fd 数", d.fds ? d.fds.length : null],
+          ["参数", el("pre", {}, (d.cmdline_args || []).join("\n"))],
+          ["环境变量", d.environ
+            ? el("pre", {}, Object.entries(d.environ).map(([k, v]) => `${k}=${v}`).join("\n"))
+            : el("span", { class: "muted" }, "读不到（非同 uid 或本平台不支持）")],
+        ]));
+    } catch (e) { detail.replaceChildren(errBox(e)); }
+  });
+
+  return [controls, t, detail];
+});
+
+// ===========================================================================
+// 服务
+// ===========================================================================
+
+const SVC_UI = { scope: "system", state: "", q: "" };
+
+definePanel("services", "p-services", async () => {
+  const qs = new URLSearchParams({ scope: SVC_UI.scope });
+  if (SVC_UI.state) qs.set("state", SVC_UI.state);
+  if (SVC_UI.q) qs.set("q", SVC_UI.q);
+  const list = await api("/services?" + qs);
+
+  const detail = el("div", { style: "margin-top:10px" });
+
+  const controls = el("div", { class: "row" },
+    el("label", { text: "作用域" }),
+    el("select", { onchange: (e) => { SVC_UI.scope = e.target.value; PANELS.services(); } },
+      ["system", "user"].map((v) =>
+        el("option", { value: v, selected: v === SVC_UI.scope ? "selected" : null }, v))),
+    el("label", { text: "状态" }),
+    el("select", { onchange: (e) => { SVC_UI.state = e.target.value; PANELS.services(); } },
+      [["", "全部"], ["active", "active"], ["inactive", "inactive"], ["failed", "failed"]]
+        .map(([v, t]) => el("option", { value: v, selected: v === SVC_UI.state ? "selected" : null }, t))),
+    el("label", { text: "搜索" }),
+    (() => {
+      const i = el("input", { type: "text", value: SVC_UI.q });
+      i.addEventListener("change", () => { SVC_UI.q = i.value; PANELS.services(); });
+      return i;
+    })(),
+    el("span", { class: "muted" }, `${list.length} 项`));
+
+  const t = table([
+    { label: "unit", get: (u) => u.name },
+    { label: "类型", get: (u) => u.unit_type },
+    { label: "load", get: (u) => u.load_state },
+    { label: "active", get: (u) => el("span", {
+        class: u.active_state === "failed" ? "crit" : (u.active_state === "active" ? "ok" : ""),
+      }, u.active_state) },
+    { label: "sub", get: (u) => u.sub_state },
+    { label: "开机启动", get: (u) => u.enable_state || "—" },
+    { label: "描述", get: (u) => u.description },
+  ], list, async (u) => {
+    detail.replaceChildren(el("div", { class: "muted" }, `加载 ${u.name}…`));
+    const box = el("div", {});
+    // 详情、unit 文件、依赖三者各自容错：launchd 上依赖图是 501，
+    // 不该因此看不到详情。
+    try {
+      const d = await api(`/services/${encodeURIComponent(u.name)}?scope=${SVC_UI.scope}`);
+      box.append(kv([
+        ["unit", d.name], ["描述", d.description],
+        ["状态", `${d.load_state} / ${d.active_state} / ${d.sub_state}`],
+        ["主 PID", d.main_pid], ["重启次数", d.n_restarts],
+        ["退出码", d.exit_code], ["结果", d.result],
+        ["文件", d.fragment_path], ["运行用户", d.user],
+        ["内存", d.cgroup && d.cgroup.memory_current_bytes
+          ? fmtBytes(d.cgroup.memory_current_bytes) : null],
+      ]));
+    } catch (e) { box.append(errBox(e)); }
+
+    const fileBox = el("details", {}, el("summary", {}, "unit 文件"));
+    fileBox.addEventListener("toggle", async function once() {
+      fileBox.removeEventListener("toggle", once);
+      try {
+        const f = await api(`/services/${encodeURIComponent(u.name)}/file?scope=${SVC_UI.scope}`);
+        fileBox.append(el("pre", {}, f.fragment ? f.fragment.content : "（无内容）"));
+      } catch (e) { fileBox.append(errBox(e)); }
+    });
+    box.append(fileBox);
+
+    const depBox = el("details", {}, el("summary", {}, "依赖"));
+    depBox.addEventListener("toggle", async function once() {
+      depBox.removeEventListener("toggle", once);
+      try {
+        const d = await api(`/services/${encodeURIComponent(u.name)}/deps?scope=${SVC_UI.scope}`);
+        depBox.append(el("pre", {}, JSON.stringify(d, null, 2)));
+      } catch (e) { depBox.append(errBox(e)); }
+    });
+    box.append(depBox);
+
+    detail.replaceChildren(box);
+  });
+
+  return [controls, t, detail];
+});
+
+// ===========================================================================
+// 日志
+// ===========================================================================
+
+const LOG_UI = { priority: "", unit: "", q: "", cursor: null, stack: [] };
+
+definePanel("logs", "p-logs", async () => {
+  const qs = new URLSearchParams({ limit: "60" });
+  if (LOG_UI.priority) qs.set("priority", LOG_UI.priority);
+  if (LOG_UI.unit) qs.set("unit", LOG_UI.unit);
+  if (LOG_UI.q) qs.set("q", LOG_UI.q);
+  if (LOG_UI.cursor) qs.set("cursor", LOG_UI.cursor);
+  const page = await api("/logs?" + qs);
+
+  const controls = el("div", { class: "row" },
+    el("label", { text: "优先级 ≤" }),
+    el("select", { onchange: (e) => { LOG_UI.priority = e.target.value; LOG_UI.cursor = null; LOG_UI.stack = []; PANELS.logs(); } },
+      [["", "全部"], ["err", "err"], ["warning", "warning"], ["notice", "notice"], ["info", "info"], ["debug", "debug"]]
+        .map(([v, t]) => el("option", { value: v, selected: v === LOG_UI.priority ? "selected" : null }, t))),
+    el("label", { text: "unit" }),
+    (() => {
+      const i = el("input", { type: "text", value: LOG_UI.unit, placeholder: "如 sshd / com.apple.x" });
+      i.addEventListener("change", () => { LOG_UI.unit = i.value; LOG_UI.cursor = null; LOG_UI.stack = []; PANELS.logs(); });
+      return i;
+    })(),
+    el("label", { text: "搜索" }),
+    (() => {
+      const i = el("input", { type: "text", value: LOG_UI.q });
+      i.addEventListener("change", () => { LOG_UI.q = i.value; LOG_UI.cursor = null; LOG_UI.stack = []; PANELS.logs(); });
+      return i;
+    })(),
+    el("button", {
+      disabled: LOG_UI.stack.length ? null : "disabled",
+      onclick: () => { LOG_UI.cursor = LOG_UI.stack.pop() || null; PANELS.logs(); },
+    }, "← 上一页"),
+    el("button", {
+      disabled: page.next_cursor ? null : "disabled",
+      onclick: () => { LOG_UI.stack.push(LOG_UI.cursor); LOG_UI.cursor = page.next_cursor; PANELS.logs(); },
+    }, "下一页 →"),
+    el("span", { class: "muted" }, `${page.entries.length} 条`));
+
+  const detail = el("div", { style: "margin-top:10px" });
+  const t = table([
+    { label: "时间", get: (e) => new Date(e.ts * 1000).toLocaleTimeString() +
+        "." + String(e.us).padStart(6, "0").slice(0, 3) },
+    { label: "级别", get: (e) => el("span", {
+        class: ["emerg", "alert", "crit", "err"].includes(e.priority) ? "crit"
+          : (e.priority === "warning" ? "warn" : ""),
+      }, e.priority) },
+    { label: "来源", get: (e) => e.identifier },
+    { label: "unit", get: (e) => e.unit },
+    { label: "pid", num: true, get: (e) => e.pid },
+    { label: "消息", get: (e) => e.message },
+  ], page.entries, async (entry) => {
+    detail.replaceChildren(el("div", { class: "muted" }, "加载详情…"));
+    try {
+      const d = await api("/logs/entry/" + encodeURIComponent(entry.cursor));
+      detail.replaceChildren(
+        el("pre", {}, d.entry.message),
+        el("div", { class: "muted", style: "margin:6px 0 2px" }, "全字段"),
+        kv(Object.entries(d.fields)));
+    } catch (e) { detail.replaceChildren(errBox(e)); }
+  });
+
+  const boots = el("details", { style: "margin-top:8px" }, el("summary", {}, "boot 列表"));
+  boots.addEventListener("toggle", async function once() {
+    boots.removeEventListener("toggle", once);
+    try {
+      const list = await api("/logs/boots");
+      boots.append(table([
+        { label: "#", num: true, get: (b) => b.index },
+        { label: "boot id", get: (b) => b.boot_id },
+        { label: "起", get: (b) => fmtTs(b.first_ts) },
+        { label: "止", get: (b) => fmtTs(b.last_ts) },
+      ], list));
+    } catch (e) { boots.append(errBox(e)); }
+  });
+
+  return [controls, t, boots, detail];
+});
+
+// ===========================================================================
+// 审计
+// ===========================================================================
+// 这个端点要求会话已提权（roadmap/02 §4.3）——审计表在主进程的 SQLite 里，
+// 没有对应的 OS 权限可以外包，只能按会话状态判断。未提权时面板显示 403，
+// 那正是预期行为，不是故障。
+
+const AUDIT_UI = { action: "", result: "", username: "", cursor: null, stack: [] };
+
+definePanel("audit", "p-audit", async () => {
+  const qs = new URLSearchParams({ limit: "50" });
+  for (const [k, v] of [["action", AUDIT_UI.action], ["result", AUDIT_UI.result],
+                        ["username", AUDIT_UI.username], ["before_id", AUDIT_UI.cursor]]) {
+    if (v) qs.set(k, v);
+  }
+  const page = await api("/audit?" + qs);
+
+  const reset = () => { AUDIT_UI.cursor = null; AUDIT_UI.stack = []; PANELS.audit(); };
+  const textFilter = (key, placeholder) => {
+    const i = el("input", { type: "text", value: AUDIT_UI[key], placeholder });
+    i.addEventListener("change", () => { AUDIT_UI[key] = i.value; reset(); });
+    return i;
+  };
+
+  const controls = el("div", { class: "row" },
+    el("label", { text: "动作" }), textFilter("action", "前缀匹配，如 service."),
+    el("label", { text: "用户" }), textFilter("username", "如 alice"),
+    el("label", { text: "结果" }),
+    el("select", { onchange: (e) => { AUDIT_UI.result = e.target.value; reset(); } },
+      [["", "全部"], ["ok", "ok"], ["denied", "denied"], ["error", "error"]]
+        .map(([v, t]) => el("option", { value: v, selected: v === AUDIT_UI.result ? "selected" : null }, t))),
+    el("button", {
+      disabled: AUDIT_UI.stack.length ? null : "disabled",
+      onclick: () => { AUDIT_UI.cursor = AUDIT_UI.stack.pop() || null; PANELS.audit(); },
+    }, "← 上一页"),
+    el("button", {
+      disabled: page.next_before_id ? null : "disabled",
+      onclick: () => { AUDIT_UI.stack.push(AUDIT_UI.cursor); AUDIT_UI.cursor = page.next_before_id; PANELS.audit(); },
+    }, "下一页 →"),
+    el("span", { class: "muted" }, `${page.entries.length} 条`));
+
+  if (!page.entries.length) {
+    return [controls, el("div", { class: "muted" }, "没有匹配的审计记录。")];
+  }
+
+  const t = table([
+    { label: "id", num: true, get: (e) => e.id },
+    { label: "时间", get: (e) => fmtTs(e.ts) },
+    { label: "用户", get: (e) => e.username },
+    { label: "提权", get: (e) => (e.elevated ? el("span", { class: "warn" }, "是") : "") },
+    { label: "动作", get: (e) => e.action },
+    { label: "目标", get: (e) => e.target },
+    { label: "结果", get: (e) => el("span", {
+        class: { ok: "ok", denied: "warn", error: "crit" }[e.result] || "",
+      }, e.result) },
+    { label: "来源", get: (e) => e.remote_addr },
+    { label: "详情", get: (e) => e.detail },
+  ], page.entries);
+
+  return [
+    controls,
+    el("div", { class: "muted", style: "margin-bottom:6px" },
+      "按 id 倒序。id 是 AUTOINCREMENT，与写入顺序严格一致，"
+      + "因此同一秒内的多条记录翻页也不会重复或遗漏（design.md §8）。"),
+    t,
+  ];
+});
+
+// ===========================================================================
+// 实时（WS）
+// ===========================================================================
+// 服务端注册了哪些频道取决于 provider 是否可用；未注册的频道 sub 会回 err 帧，
+// 那也是有效的观察结果，所以三个都列出来。
+
+const WS_CHANNELS = ["metrics.live", "logs.follow", "services.changed"];
+
+definePanel("ws", "p-ws", async () => {
+  const status = el("span", { class: "muted" }, "未连接");
+  const log = el("pre", { style: "max-height:220px;overflow:auto" });
+  const counts = el("span", { class: "muted" });
+  let n = 0;
+
+  const append = (line) => {
+    log.textContent = line + "\n" + log.textContent.slice(0, 8000);
+    counts.textContent = `已收 ${++n} 帧`;
+  };
+
+  function connect() {
+    if (!S.token) { status.textContent = "需要先登录"; return; }
+    if (S.ws) { S.ws.close(); }
+    // 鉴权走子协议，不走 URL——`?token=` 会泄进访问日志与反代日志（design.md §9.2）
+    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+    const ws = new WebSocket(url, ["bearer", S.token]);
+    S.ws = ws;
+    status.textContent = "连接中…";
+    ws.onopen = () => {
+      status.textContent = "已连接";
+      status.className = "ok";
+      for (const ch of S.wsSubs) send({ v: 1, t: "sub", ch, id: S.wsSeq++ });
+    };
+    ws.onclose = (ev) => {
+      status.textContent = `已断开（code ${ev.code}）`;
+      status.className = "muted";
+      S.ws = null;
+    };
+    ws.onerror = () => { status.textContent = "连接出错"; status.className = "crit"; };
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (_) { append("非 JSON 帧: " + ev.data); return; }
+      const head = `[${m.t}]${m.ch ? " " + m.ch : ""}${m.id ? " #" + m.id : ""}`;
+      const payload = m.d === undefined ? "" : " " + JSON.stringify(m.d).slice(0, 400);
+      append(head + payload);
+    };
+  }
+  function send(obj) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(obj)); }
+
+  const subBoxes = WS_CHANNELS.map((ch) => {
+    const c = el("input", { type: "checkbox" });
+    c.checked = S.wsSubs.has(ch);
+    c.addEventListener("change", () => {
+      if (c.checked) { S.wsSubs.add(ch); send({ v: 1, t: "sub", ch, id: S.wsSeq++ }); }
+      else { S.wsSubs.delete(ch); send({ v: 1, t: "unsub", ch, id: S.wsSeq++ }); }
+    });
+    return el("label", { style: "margin-right:10px" }, c, " " + ch);
+  });
+
+  return [
+    el("div", { class: "row" },
+      el("button", { onclick: connect }, "连接"),
+      el("button", { onclick: () => { if (S.ws) S.ws.close(); } }, "断开"),
+      el("button", { onclick: () => send({ v: 1, t: "ping", id: S.wsSeq++ }) }, "ping"),
+      status, counts),
+    el("div", { class: "row" }, el("span", { class: "muted" }, "订阅："), subBoxes),
+    el("div", { class: "muted", style: "margin-bottom:4px" },
+      "鉴权走 Sec-WebSocket-Protocol 子协议（design.md §9.2）；未注册的频道会回 err 帧。"),
+    log,
+  ];
+});
+
+// ===========================================================================
+// 终端（xterm.js）
+// ===========================================================================
+// roadmap/03-terminal.md §4.4 / §4.7。
+//
+// 为什么终端不并进上面那条 /ws 多路复用连接（design.md Q13）：终端是**字节流**。
+// 塞进 JSON 信封就得对每个字节做转义或 base64，`cat` 一个二进制文件的开销直接翻倍；
+// 更要命的是一条刷屏的终端会把指标、日志推送一起堵在同一个 sender 后面。
+// 所以它自己一条 WS：二进制帧＝终端字节（双向），文本帧只有 resize / exit 两种。
+//
+// 回看缓冲在服务端，**前端一个字节都不存**——存在前端的话刷新页面就没了，
+// 而「刷新后内容恢复」正是这个功能的验收标准之一（§7）。
+
+const TERM = {
+  id: null,          // 当前附着的终端 id
+  ws: null,
+  term: null,        // xterm.js 实例
+  fit: null,
+  lastSize: "",      // "cols×rows"，用来抑制没必要的 resize
+  resizeTimer: null,
+  statusText: "未附着",
+  statusCls: "muted",
+  statusEl: null,    // 面板每次重绘都换新的，所以状态文本要另存一份
+  msgEl: null,
+};
+
+/**
+ * 终端的挂载点：**整个页面只有这一个，且跨面板重绘复用**。
+ * 面板刷新走的是 replaceChildren；若每次都新建挂载点，
+ * 已附着终端的屏幕内容、滚动位置和 xterm 实例都要跟着重来一遍。
+ * 复用同一个 DOM 节点，replaceChildren 只是把它搬个位置，里面的东西原样还在。
+ */
+const TERM_HOST = el("div", { class: "term-host" });
+const TERM_ENC = new TextEncoder();
+
+function termStatus(text, cls) {
+  TERM.statusText = text;
+  TERM.statusCls = cls || "muted";
+  if (TERM.statusEl) {
+    TERM.statusEl.textContent = text;
+    TERM.statusEl.className = TERM.statusCls;
+  }
+}
+
+/** 在终端里插一行本地提示。染成黄色是为了跟 shell 自己的输出区分开。 */
+function termNote(text) {
+  if (TERM.term) TERM.term.write("\r\n\x1b[33m*** " + text + " ***\x1b[0m\r\n");
+}
+
+/** 懒建 xterm 实例。vendor 脚本没加载成功时给一句人话，而不是让面板抛 undefined。 */
+function termEnsure() {
+  if (TERM.term) return TERM.term;
+  if (typeof Terminal === "undefined" || typeof FitAddon === "undefined") {
+    throw new Error("xterm.js 没加载成功，检查 /debug/vendor/xterm.js 与 /debug/vendor/addon-fit.js");
+  }
+  // 跟着页面的深浅色走。xterm 自己画字符，拿不到 CSS 变量，只能把算好的颜色喂给它。
+  const css = getComputedStyle(document.body);
+  const t = new Terminal({
+    fontFamily: css.getPropertyValue("--mono").trim() || "monospace",
+    fontSize: 12,
+    cursorBlink: true,
+    // 本地也留一点回滚纯粹为了看着顺手；权威的回看缓冲在服务端
+    scrollback: 5000,
+    theme: { background: css.backgroundColor, foreground: css.color },
+  });
+  TERM.fit = new FitAddon.FitAddon();
+  t.loadAddon(TERM.fit);
+  t.open(TERM_HOST);
+  // onData 与 onBinary 两条都要接：前者给的是字符串（按 UTF-8 编码送出），
+  // 后者给的是逐字节的 latin1 字符串（鼠标上报一类的 8 位数据）。
+  // 只接 onData 会把鼠标事件里的高位字节 UTF-8 成两个字节，远端解不出坐标。
+  t.onData((str) => termSend(TERM_ENC.encode(str)));
+  t.onBinary((str) => {
+    const b = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) b[i] = str.charCodeAt(i) & 255;
+    termSend(b);
+  });
+  TERM.term = t;
+  return t;
+}
+
+function termSend(bytes) {
+  if (TERM.ws && TERM.ws.readyState === 1) TERM.ws.send(bytes);
+}
+
+/**
+ * 把当前容器尺寸量成 cols/rows 同步给 PTY。
+ *
+ * `force` 只在刚附着上的那一刻为真：不发这一次，PTY 用的还是创建时的默认尺寸。
+ * 其余时候尺寸没变就不发——这个 resize 会一路走到 worker 里的 ioctl(TIOCSWINSZ)，
+ * 而 TIOCSWINSZ 会给前台进程组发 SIGWINCH，vim / htop 收到就重画一整屏。
+ */
+function termSyncSize(force) {
+  if (!TERM.term || !TERM.fit || !TERM_HOST.isConnected) return;
+  try {
+    TERM.fit.fit();
+  } catch (_) {
+    return; // 容器还没排完版（面板正在加载中），这一次跳过
+  }
+  const cols = TERM.term.cols, rows = TERM.term.rows;
+  const sig = cols + "×" + rows;
+  if (!force && sig === TERM.lastSize) return;
+  TERM.lastSize = sig;
+  if (!TERM.id) return;
+  if (TERM.ws && TERM.ws.readyState === 1) {
+    TERM.ws.send(JSON.stringify({ t: "resize", cols, rows }));
+  } else {
+    // 没附着时退回 REST，两者等价（roadmap/03-terminal.md §4.4）。
+    api(`/terminals/${encodeURIComponent(TERM.id)}/resize`, { method: "POST", body: { cols, rows } })
+      .catch(() => { TERM.lastSize = ""; }); // 发失败就作废缓存，下次同样的尺寸还敢再发
+  }
+}
+
+/** 解除附着。`reason` 非空表示是用户主动的，顺带清掉当前 id。 */
+function termDetach(reason) {
+  const ws = TERM.ws;
+  TERM.ws = null;
+  if (ws) {
+    ws.quiet = true; // 自己关的，onclose 不必再报一遍
+    try { ws.close(); } catch (_) { /* 已经关了 */ }
+  }
+  if (reason) {
+    TERM.id = null;
+    termStatus(reason, "muted");
+  }
+}
+
+function termAttach(id) {
+  if (!S.token) { termStatus("需要先登录", "crit"); return; }
+  let t;
+  try {
+    t = termEnsure();
+  } catch (e) {
+    if (TERM.msgEl) TERM.msgEl.replaceChildren(errBox(e));
+    return;
+  }
+
+  termDetach(null); // 服务端一个终端同时只允许一个 WS（§4.3），本地也只保持一条
+  TERM.id = id;
+  TERM.lastSize = "";
+  // 服务端会把回看缓冲整段回放，不先清屏的话旧内容会和回放叠在一起
+  t.reset();
+
+  // 鉴权同 /ws：走子协议而不是 ?token=（design.md §9.2）
+  const url = (location.protocol === "https:" ? "wss://" : "ws://")
+    + location.host + "/ws/terminal/" + encodeURIComponent(id);
+  const ws = new WebSocket(url, ["bearer", S.token]);
+  ws.binaryType = "arraybuffer";
+  TERM.ws = ws;
+  termStatus("附着中… " + id, "muted");
+
+  ws.onopen = () => {
+    termStatus("已附着 " + id, "ok");
+    termSyncSize(true);
+    t.focus();
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== "string") { t.write(new Uint8Array(ev.data)); return; }
+    // 文本帧只可能是 exit（§4.4）；解析不出来也照样显示，调试页要看得见异常帧
+    let m = null;
+    try { m = JSON.parse(ev.data); } catch (_) { /* 落到下面的兜底分支 */ }
+    if (m && m.t === "exit") {
+      termNote(`shell 已退出，code ${m.code}`);
+      termStatus(`shell 已退出（code ${m.code}）`, "warn");
+    } else {
+      termNote("未知控制帧：" + ev.data);
+    }
+  };
+  ws.onerror = () => termStatus("连接出错", "crit");
+  ws.onclose = (ev) => {
+    if (ws.quiet || TERM.ws !== ws) return; // 已被新的附着顶掉，别覆盖新状态
+    TERM.ws = null;
+    termStatus(`已断开（code ${ev.code}）`, "muted");
+    termNote("WS 已断开，PTY 仍在服务端运行；再点一次列表里这一行即可恢复");
+  };
+}
+
+async function termClose(id, listBox) {
+  if (TERM.msgEl) TERM.msgEl.replaceChildren(el("div", { class: "muted" }, `关闭 ${id}…`));
+  try {
+    await api("/terminals/" + encodeURIComponent(id), { method: "DELETE" });
+    if (TERM.msgEl) TERM.msgEl.replaceChildren();
+    if (TERM.id === id) termDetach("终端已关闭");
+  } catch (e) {
+    if (TERM.msgEl) TERM.msgEl.replaceChildren(errBox(e));
+  }
+  termRefreshList(listBox);
+}
+
+async function termRefreshList(box) {
+  box.replaceChildren(el("div", { class: "muted" }, "加载中…"));
+  try {
+    const list = await api("/terminals");
+    if (!list.length) {
+      box.replaceChildren(el("div", { class: "muted" }, "本会话还没有终端，用上面的「新建」开一个。"));
+      return;
+    }
+    box.replaceChildren(table([
+      { label: "id", get: (x) => (x.id === TERM.id ? el("b", {}, x.id) : x.id) },
+      { label: "shell", get: (x) => x.shell },
+      { label: "用户", get: (x) => x.user },
+      // uid 0 是 root 终端——这台机器上权限最大的一个东西，必须一眼认得出来，
+      // 不能只是表格里一个和别人一样灰的数字（roadmap/03-terminal.md §3 Q20）。
+      { label: "uid", num: true, get: (x) => (x.uid === 0
+          ? el("span", { class: "tag crit" }, "0 · root")
+          : x.uid) },
+      { label: "尺寸", num: true, get: (x) => `${x.cols}×${x.rows}` },
+      { label: "创建", get: (x) => fmtTs(x.created_ts) },
+      { label: "最后活动", get: (x) => fmtTs(x.last_active_ts) },
+      { label: "已附着", get: (x) => (x.attached
+          ? el("span", { class: "ok" }, "是")
+          : el("span", { class: "muted" }, "否")) },
+      { label: "", get: (x) => el("button", {
+          // 行本身是「附着」，按钮得把事件截住，否则关完又去连一个刚没了的 id
+          onclick: (ev) => { ev.stopPropagation(); termClose(x.id, box); },
+        }, "关闭") },
+    ], list, (x) => termAttach(x.id)));
+  } catch (e) {
+    box.replaceChildren(errBox(e));
+  }
+}
+
+definePanel("terminals", "p-terminals", () => {
+  const shell = el("input", { type: "text", placeholder: "留空 = 登录 shell", style: "width:160px" });
+  const user = el("input", { type: "text", placeholder: "留空 = 会话用户", style: "width:140px" });
+  const msg = el("div", {});
+  const listBox = el("div", { style: "margin:8px 0" });
+  TERM.msgEl = msg;
+  TERM.statusEl = el("span", { class: TERM.statusCls }, TERM.statusText);
+
+  const controls = el("div", { class: "row" },
+    el("label", { text: "shell" }), shell,
+    el("label", { text: "user" }), user,
+    el("button", {
+      onclick: async () => {
+        msg.replaceChildren(el("div", { class: "muted" }, "创建中…"));
+        try {
+          // 「留空」和「传空字符串」不是一回事：字段整个不传，服务端才会去
+          // /etc/passwd 取登录 shell、用会话用户自己的身份开（§4.2）。
+          const body = {};
+          if (shell.value.trim()) body.shell = shell.value.trim();
+          if (user.value.trim()) body.user = user.value.trim();
+          const r = await api("/terminals", { method: "POST", body });
+          msg.replaceChildren();
+          await termRefreshList(listBox);
+          termAttach(r.id);
+        } catch (e) {
+          msg.replaceChildren(errBox(e));
+        }
+      },
+    }, "新建"),
+    el("button", { onclick: () => termRefreshList(listBox) }, "刷新列表"),
+    el("button", { onclick: () => termDetach("已断开（手动）") }, "断开"),
+    TERM.statusEl);
+
+  // 列表单独容错：/terminals 报错（未实现 / 401 / 已达上限）时只有列表那一块显示错误，
+  // 终端本体连同它那条 WS 原样留在 DOM 里——这是「面板独立容错」在面板内部的延伸。
+  termRefreshList(listBox);
+  setTimeout(() => {
+    // 面板重绘后容器宽度可能变了，等浏览器排完版再量一次
+    termSyncSize(false);
+    // 重绘会把挂载点从 DOM 上摘下来再放回去，xterm 的渲染层可能停在旧的一帧上；
+    // 强制重画一屏，好过让人对着一块空白终端猜是不是断了。
+    if (TERM.term) TERM.term.refresh(0, TERM.term.rows - 1);
+  }, 0);
+
+  return [
+    el("div", { class: "muted", style: "margin-bottom:6px" },
+      "点列表里的一行即附着。断开后 PTY 仍在服务端运行，重新附着时服务端会回放回看缓冲；"
+      + "全屏程序（vim / htop）在回放后可能要按一下 Ctrl-L 才正常（roadmap/03-terminal.md §8.2）。"),
+    controls, msg, listBox, TERM_HOST,
+  ];
+});
+
+// ===========================================================================
+// 启动
+// ===========================================================================
+
+// 拖窗口一次会连着触发几十个 resize 事件；每次都发一遍 resize 会一路打到 worker 的
+// ioctl 并给前台进程组刷一串 SIGWINCH。所以防抖 150ms，
+// termSyncSize 内部还会再比一次 cols/rows 是否真的变了。
+window.addEventListener("resize", () => {
+  clearTimeout(TERM.resizeTimer);
+  TERM.resizeTimer = setTimeout(() => termSyncSize(false), 150);
+});
+
+$("#reload-all").addEventListener("click", reloadAll);
+for (const b of document.querySelectorAll("[data-reload]")) {
+  b.addEventListener("click", () => PANELS[b.dataset.reload]());
+}
+setToken(S.token, null);
+reloadAll();
+</script>
+</body>
+</html>

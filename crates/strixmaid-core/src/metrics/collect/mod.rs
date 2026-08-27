@@ -1,11 +1,26 @@
-//! 采集器：直读 `/proc` 与 `/sys`，产出一轮 [`Sample`]（design.md §7.1）。
+//! 采集器：产出一轮 [`Sample`]（design.md §7.1）。
 //!
-//! # 约定
+//! # 平台
 //!
-//! - 每个采集器把「读文件」与「解析文本」分开：`collect()` 只负责 IO，然后交给
-//!   纯函数 `parse_*` / `ingest()`。差分逻辑因此可以用固定文本样本做单测。
-//! - **可选文件缺失不是错误**（容器里没有 `/proc/pressure`、`/sys/block` 受限），
-//!   采集器返回少几个样本即可；只有核心文件（`/proc/stat` 这类）读不到才返回 `Err`。
+//! 本文件只放**与平台无关**的部分：[`Sample`]、[`Collector`] trait、[`CollectError`]
+//! 与几个小工具。具体采集实现按平台分目录：
+//!
+//! | 目录 | 数据源 | 覆盖的采集项 |
+//! |---|---|---|
+//! | [`linux`] | `/proc`、`/sys` | §7.1 全部七项（目标平台） |
+//! | [`macos`] | mach、`sysctl`、`getifaddrs`、`getmntinfo` | CPU / 内存 / 负载 / 网络 / 文件系统 |
+//!
+//! macOS 是**开发与联调平台**，不是交付目标：那里没有 PSI（`/proc/pressure` 是 Linux
+//! 独有的内核特性），逐设备磁盘 IO 要走 IOKit，成本与收益都不匹配，故两者都不注册。
+//! 少注册几个采集器不需要任何额外处理——指标是否存在本来就由
+//! `GET /metrics/series` 如实报告，前端据此决定画不画。
+//!
+//! # 约定（两个平台共同遵守）
+//!
+//! - 每个采集器把「取数」与「解析」分开：`collect()` 只负责 IO，然后交给纯函数
+//!   `parse_*` / `ingest()`。差分逻辑因此可以用固定样本做单测。
+//! - **可选输入缺失不是错误**（容器里没有 `/proc/pressure`、`/sys/block` 受限），
+//!   采集器返回少几个样本即可；只有核心输入（`/proc/stat` 这类）读不到才返回 `Err`。
 //!   调度器对 `Err` 只记 warn，不退出。
 //! - 速率类指标（`*_bytes` / `*_iops` / `*_packets` …）由采集器用两轮之间的
 //!   **单调时钟**差分，第一轮没有基线时不产出这些样本。计数器回绕或设备被替换
@@ -15,21 +30,15 @@
 use std::path::Path;
 use std::time::Instant;
 
-pub mod cpu;
-pub mod disk;
-pub mod fs;
-pub mod load;
-pub mod mem;
-pub mod net;
-pub mod psi;
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 
-pub use cpu::CpuCollector;
-pub use disk::DiskCollector;
-pub use fs::FsCollector;
-pub use load::LoadCollector;
-pub use mem::MemCollector;
-pub use net::NetCollector;
-pub use psi::PsiCollector;
+#[cfg(target_os = "linux")]
+use linux as sys;
+#[cfg(target_os = "macos")]
+use macos as sys;
 
 /// 标签集合：键为静态字符串（见 [`crate::metrics::catalog::label`]），值由采集器生成。
 /// 绝大多数指标只有 0–1 个标签，`Vec` 足够。
@@ -114,23 +123,22 @@ pub trait Collector: Send {
     fn collect(&mut self, now: Instant) -> Result<Vec<Sample>, CollectError>;
 }
 
-/// design.md §7.1 全部 P0 采集器，按类别顺序。
+/// 本平台的默认采集器集合。
+///
+/// Linux 上是 design.md §7.1 的全部七项；macOS 上是其中能原生对应的五项
+/// （见本模块头部的表）。`per_core_detail` 的语义两平台一致：关闭时每核只留
+/// `cpu.core.usage` 一条曲线（§7.2）。
 pub fn default_collectors(per_core_detail: bool) -> Vec<Box<dyn Collector>> {
-    vec![
-        Box::new(CpuCollector::new().per_core_states(per_core_detail)),
-        Box::new(MemCollector::new()),
-        Box::new(LoadCollector::new()),
-        Box::new(PsiCollector::new()),
-        Box::new(DiskCollector::new()),
-        Box::new(FsCollector::new()),
-        Box::new(NetCollector::new()),
-    ]
+    sys::default_collectors(per_core_detail)
 }
 
 // ============================ 公共小工具 ============================
 
 /// 读整个文本文件。procfs 文件 `stat` 报的大小是 0，必须用 `read_to_string` 而不是
 /// 按大小预分配。
+///
+/// 只有 Linux 采集器用得到——macOS 侧的数据源是 `sysctl` 与 mach 调用，不读文件。
+#[cfg(target_os = "linux")]
 pub(crate) fn read_text(path: &Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }

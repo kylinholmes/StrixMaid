@@ -13,6 +13,7 @@
 | `05-agent.md` | `strixmaid-agent`：本地采集与存储、向 Server 推送、断连补发、Server 端汇聚 | 无 | 中 |
 | `06-packaging.md` | musl 静态构建、helper 的 glibc 构建、`strixmaid.service`、pam.d 安装、`ui` feature、发布产物 | 无 | 中 |
 | `07-verification.md` | root 环境、浏览器、长时间运行、release 性能的验证清单与预期结果 | 06 | — |
+| `08-metrics-and-panel.md` | 采集项从 58 种裁到 34 种（含新增 GPU）；按 Win10 任务管理器密度重做性能面板；资源组与聚合语义。配套可交互样稿 `08-metrics-and-panel.mockup.html` | 无 | 大 |
 
 ## 实施约定
 

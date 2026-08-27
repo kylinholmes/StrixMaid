@@ -16,6 +16,7 @@ use strixmaid_types::ipc::{self, FromHelper, IpcPromptResponse, ToHelper};
 use zeroize::Zeroizing;
 
 use super::*;
+use super::{AUDIT_ACTOR_SYSTEM, AUDIT_DROP_ELEVATION, AUDIT_SESSION_EXPIRE};
 use crate::worker::Dispatcher;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -113,7 +114,10 @@ impl MockLauncher {
                     uid: nix::unistd::getuid().as_raw(),
                     gid: nix::unistd::getgid().as_raw(),
                     username: username.clone(),
-                    groups: vec![username],
+                    // 主组 + wheel。给 wheel 是为了让默认的 elevate_groups 放行它——
+                    // 提权路径的用例要走通，就得是个「有资格提权」的用户。
+                    // 「无资格被拒」由 `不在_elevate_groups_的用户提权被提前拒绝` 单独覆盖。
+                    groups: vec![username, "wheel".to_owned()],
                 },
             },
         )
@@ -196,6 +200,11 @@ fn cfg(idle: Duration, elevated: Duration, pending: Duration) -> SessionManagerC
         elevated_idle_timeout: elevated,
         pending_timeout: pending,
         node_id: LOCAL_NODE_ID.into(),
+        // mock helper 让测试用户属于 wheel，默认组列表因此放行它
+        elevate_groups: strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
     }
 }
 
@@ -616,4 +625,170 @@ async fn 真实_helper_错误密码路径() {
     assert_eq!(m.session_count().await, 0);
     assert_eq!(m.pending_count().await, 0);
     assert!(m.store().list_sessions().await.unwrap().is_empty());
+}
+
+/// `roadmap/01-worker-execution.md` §6.5：不在 `elevate_groups` 的用户提权应被
+/// **提前**拒绝——返回 403，且**不 spawn 第二个 helper**、不进入 PAM 对话。
+///
+/// 断言 helper 的 spawn 计数不增加，等价于 roadmap 里写的
+/// 「`pgrep -c strixmaid-helper` 不增加」。
+#[tokio::test]
+async fn 不在_elevate_groups_的用户提权被提前拒绝() {
+    let mock = MockLauncher::new(true, 1);
+    // 只允许 wheel；mock helper 给用户的组是 [用户名, "wheel"]，
+    // 这里把允许列表改成一个它肯定不属于的组。
+    let mut c = cfg(
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+    c.elevate_groups = vec!["no-such-group".to_owned()];
+    let m = manager(Arc::new(mock.clone()), c).await;
+
+    let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
+    let (token, session) = match m.login_respond(&pending, answer(PASSWORD)).await.unwrap() {
+        LoginOutcome::Complete { token, session } => (token, session),
+        LoginOutcome::More { .. } => panic!("单轮不该 More"),
+    };
+    assert!(!session.elevated);
+
+    let launched_before = mock.launched.load(Ordering::SeqCst);
+    let err = m
+        .elevate_start(&hash_token(&token), None)
+        .await
+        .expect_err("没有资格的用户不该进入提权对话");
+
+    let api: ApiError = err.into();
+    assert_eq!(api.code, ErrorCode::PermissionDenied);
+    let detail = api.detail.unwrap_or_default();
+    assert!(detail.contains("no-such-group"), "要说清需要哪个组：{detail}");
+    assert!(detail.contains("wheel"), "也要说清用户实际所属：{detail}");
+    assert!(
+        !api.can_retry_elevated,
+        "再提一次权也不会变，这个标志必须是 false"
+    );
+
+    assert_eq!(
+        mock.launched.load(Ordering::SeqCst),
+        launched_before,
+        "提前拒绝就不该 spawn 第二个 helper"
+    );
+    // 会话本身不受影响，仍然可用
+    assert!(m.resolve_hash(&hash_token(&token)).await.is_some());
+}
+
+/// 有资格的用户照常能提权——上一条不能是靠「把提权整个关掉」实现的。
+#[tokio::test]
+async fn 在_elevate_groups_的用户提权正常() {
+    let mock = MockLauncher::new(true, 1);
+    let mut c = cfg(
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+    c.elevate_groups = vec!["wheel".to_owned()];
+    let m = manager(Arc::new(mock.clone()), c).await;
+
+    let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
+    let (token, _) = match m.login_respond(&pending, answer(PASSWORD)).await.unwrap() {
+        LoginOutcome::Complete { token, session } => (token, session),
+        LoginOutcome::More { .. } => panic!("单轮不该 More"),
+    };
+
+    let launched_before = mock.launched.load(Ordering::SeqCst);
+    let (pending, _) = m
+        .elevate_start(&hash_token(&token), None)
+        .await
+        .expect("wheel 用户应能进入提权对话");
+    assert!(
+        mock.launched.load(Ordering::SeqCst) > launched_before,
+        "进入提权对话意味着起了第二个 helper"
+    );
+    match m.elevate_respond(&pending, answer(PASSWORD)).await.unwrap() {
+        ElevateOutcome::Complete(session) => assert!(session.elevated),
+        ElevateOutcome::More { .. } => panic!("单轮不该 More"),
+    }
+}
+
+/// `roadmap/02-audit.md` §4.1：超时回收要留下审计痕迹。
+///
+/// 回收是**系统**做的决定，没有发起者；但事后追查时要能按用户筛出
+/// 「他的会话什么时候被回收过」，所以 `target` 与 `uid` 仍记该用户。
+#[tokio::test]
+async fn 超时回收写入审计记录() {
+    let mock = MockLauncher::new(true, 1);
+    let idle = Duration::from_millis(400);
+    let elevated = Duration::from_millis(120);
+    let m = manager(
+        Arc::new(mock.clone()),
+        cfg(idle, elevated, Duration::from_secs(60)),
+    )
+    .await;
+
+    let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
+    let token = match m.login_respond(&pending, answer(PASSWORD)).await.unwrap() {
+        LoginOutcome::Complete { token, .. } => token,
+        LoginOutcome::More { .. } => panic!("单轮不该 More"),
+    };
+    let hash = hash_token(&token);
+
+    // 提权，然后等提权先超时
+    let (p, _) = m.elevate_start(&hash, None).await.unwrap();
+    match m.elevate_respond(&p, answer(PASSWORD)).await.unwrap() {
+        ElevateOutcome::Complete(s) => assert!(s.elevated),
+        ElevateOutcome::More { .. } => panic!("单轮不该 More"),
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let r = m.sweep().await;
+    assert_eq!(r.elevations_expired, 1, "提权应先于会话过期");
+
+    let page = m
+        .store()
+        .audit_query(&strixmaid_core_audit_filter())
+        .await
+        .unwrap();
+    let drop_row = page
+        .entries
+        .iter()
+        .find(|e| e.action == AUDIT_DROP_ELEVATION)
+        .expect("应有一条 session.drop_elevation");
+    assert_eq!(drop_row.username, AUDIT_ACTOR_SYSTEM, "执行者是系统");
+    assert_eq!(drop_row.target.as_deref(), Some("alice"), "目标是被影响的用户");
+    assert_eq!(drop_row.result, crate::store::AuditOutcome::Ok);
+
+    // 再等会话超时
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let r = m.sweep().await;
+    assert_eq!(r.sessions_expired, 1);
+
+    let page = m
+        .store()
+        .audit_query(&strixmaid_core_audit_filter())
+        .await
+        .unwrap();
+    let expire_row = page
+        .entries
+        .iter()
+        .find(|e| e.action == AUDIT_SESSION_EXPIRE)
+        .expect("应有一条 session.expire");
+    assert_eq!(expire_row.username, AUDIT_ACTOR_SYSTEM);
+    assert_eq!(expire_row.target.as_deref(), Some("alice"));
+
+    // 审计里绝不能出现密码（design.md §5.3）
+    for e in &page.entries {
+        let blob = format!("{e:?}");
+        assert!(
+            !blob.contains(PASSWORD),
+            "审计记录里出现了密码：{blob}"
+        );
+    }
+}
+
+/// 取全部审计记录的过滤器。
+fn strixmaid_core_audit_filter() -> crate::store::AuditFilter {
+    crate::store::AuditFilter {
+        limit: 100,
+        ..Default::default()
+    }
 }

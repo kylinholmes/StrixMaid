@@ -83,3 +83,30 @@ pub struct UserCapabilities {
     #[schema(example = false)]
     pub elevated: bool,
 }
+
+/// user 层能力的**实测**结果（`roadmap/01-worker-execution.md` §4.6）。
+///
+/// 与 `derive_user_caps` 的按组推导互补：推导快、离线、但只是猜；实测要在
+/// **user worker 内**真的去试（试读系统日志、看 session bus 在不在），
+/// 贵一些但准。两者合并时**实测值覆盖推导值**。
+///
+/// 每个字段都是 `Option`：`None` 表示「这一项没测出结论」，此时沿用推导值，
+/// 而不是当成 `false`——把「没测出来」和「测出来是否」混为一谈，
+/// 会让前端把一项其实可用的能力灰掉。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UserProbe {
+    /// 能否读到**系统**日志（而不只是自己的）。
+    ///
+    /// 判据见 worker 侧实现：能读到内核日志即说明有系统日志的可见权限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_read_journal: Option<bool>,
+    /// 能否管理服务单元。polkit 的裁决无法离线探测，实测只在「已经是 root」时给 true。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_manage_units: Option<bool>,
+    /// 是否支持用户级 unit：`/run/user/<uid>` 的 session bus 可连。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_units: Option<bool>,
+    /// worker 实际运行的 uid。**用来端到端证明请求确实在该用户身份下执行**——
+    /// 它与会话用户不符，说明 worker 路由错了。
+    pub uid: u32,
+}

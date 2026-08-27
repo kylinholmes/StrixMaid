@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use rand::Rng as _;
 use sha2::{Digest, Sha256};
-use strixmaid_types::auth::{AuthUser, Prompt, SessionInfo};
+use strixmaid_types::auth::{AuthUser, Prompt, SessionInfo, may_elevate};
 use strixmaid_types::ipc::{FromHelper, IpcError, IpcPromptResponse, ToHelper};
 use strixmaid_types::{ApiError, ErrorCode};
 use tokio::sync::{Mutex, RwLock};
@@ -56,6 +56,15 @@ use crate::config::Config;
 use crate::store::{NodeKind, Store, StoreError, now_unix};
 
 pub use helper::{HelperConn, HelperLauncher, ProcessHelperLauncher};
+
+/// 系统自身发起的操作在审计里的「执行者」。
+///
+/// 用一个不可能与真实用户名冲突的值：Unix 用户名不允许含空格与方括号。
+pub const AUDIT_ACTOR_SYSTEM: &str = "[system]";
+/// 会话空闲超时被回收。
+pub const AUDIT_SESSION_EXPIRE: &str = "session.expire";
+/// 提权状态空闲超时被回收。
+pub const AUDIT_DROP_ELEVATION: &str = "session.drop_elevation";
 pub use worker_handle::WorkerHandle;
 
 // ===========================================================================
@@ -121,6 +130,8 @@ impl From<SessionError> for ApiError {
                 ApiError::capability_unavailable("helper", "PAM helper 不可用，无法登录")
                     .with_detail(msg)
             }
+            // 提权被拒**不设 can_retry_elevated**：再提一次权也不会变，
+            // 那个标志的含义是「提权后重试可能成功」。
             SessionError::ElevationDenied(msg) => {
                 ApiError::permission_denied("无法启用管理访问").with_detail(msg)
             }
@@ -167,6 +178,11 @@ pub struct SessionManagerConfig {
     pub pending_timeout: Duration,
     /// 本节点 id。
     pub node_id: String,
+    /// 允许提权的系统组，来自 `session.elevate_groups`。
+    ///
+    /// 这里持有它有两个用途：认证时随 `AuthStart` 下发给 helper（权威判断在那边），
+    /// 以及 `elevate_start` 提前拒绝（省掉一次 helper spawn 与一轮 PAM 对话）。
+    pub elevate_groups: Vec<String>,
 }
 
 impl SessionManagerConfig {
@@ -180,12 +196,22 @@ impl SessionManagerConfig {
             elevated_idle_timeout: cfg.session.elevated_idle_timeout(),
             pending_timeout: DEFAULT_PENDING_TIMEOUT,
             node_id: LOCAL_NODE_ID.to_string(),
+            elevate_groups: cfg.session.elevate_groups.clone(),
         }
     }
 
     /// 实际生效的提权超时：提权必须比会话更早过期（§12）。
     pub fn effective_elevated_timeout(&self) -> Duration {
         self.elevated_idle_timeout.min(self.idle_timeout)
+    }
+}
+
+/// 把组名列表渲染成人能读的一行；空列表说清是「空」而不是打印一对空括号。
+fn render_groups(groups: &[String]) -> String {
+    if groups.is_empty() {
+        "（空）".to_owned()
+    } else {
+        groups.join("、")
     }
 }
 
@@ -307,6 +333,13 @@ fn generate_pending_id() -> String {
 /// 一次进行中的 PAM 对话。
 struct Pending {
     kind: PendingKind,
+    /// 这次对话认证的是哪个用户。
+    ///
+    /// PAM 可能改写它（大小写规范化、别名映射），因此**认证成功后以 `AuthOk`
+    /// 返回的规范名为准**；这里存的是调用方最初给的那个。审计需要它：
+    /// `/auth/respond` 的请求体里只有 pending id，登录失败时没有别的地方
+    /// 能拿到用户名，而「有人用这个名字尝试登录并失败了」正是要记的事实。
+    username: String,
     helper: HelperConn,
     meta: ClientMeta,
     created: Instant,
@@ -374,6 +407,12 @@ struct Inner {
     launcher: Arc<dyn HelperLauncher>,
     pending: Mutex<HashMap<String, Pending>>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// 终端注册表，由宿主在启动时装进来（见 [`SessionManager::set_terminal_registry`]）。
+    ///
+    /// 用 `OnceLock` 而不是构造参数：注册表与会话管理器互不依赖，谁先建都行，
+    /// 但把它做成构造参数就会强行给两者定一个顺序。装不装得上也不影响会话本身
+    /// 能不能用——没装时终端功能不可用，会话照常工作。
+    terminals: std::sync::OnceLock<Arc<crate::terminal::TerminalRegistry>>,
 }
 
 // ===========================================================================
@@ -416,6 +455,7 @@ impl SessionManager {
                 launcher,
                 pending: Mutex::new(HashMap::new()),
                 sessions: RwLock::new(HashMap::new()),
+            terminals: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -550,6 +590,20 @@ impl SessionManager {
             .live(token_hash)
             .await
             .ok_or(SessionError::SessionNotFound)?;
+
+        // 提前拒绝没有资格的用户：不 spawn 第二个 helper、不进入 PAM 对话
+        // （`roadmap/01-worker-execution.md` §4.8）。这是 UX 优化，**不是安全边界**
+        // ——权威判断在 helper 内部，用它自己经 NSS 查到的组。
+        let allow = &self.inner.cfg.elevate_groups;
+        if !may_elevate(live.user.uid, &live.user.groups, allow) {
+            return Err(SessionError::ElevationDenied(format!(
+                "用户 {} 没有提权资格：需属于 {} 之一，实际所属 {}",
+                live.user.username,
+                render_groups(allow),
+                render_groups(&live.user.groups),
+            )));
+        }
+
         let username = username.unwrap_or(&live.user.username).to_string();
         self.start_auth(
             &username,
@@ -769,6 +823,7 @@ impl SessionManager {
                     tracing::warn!(error = %e, "写回 elevated=0 失败");
                 }
                 report.elevations_expired += 1;
+                self.audit_system(&live, AUDIT_DROP_ELEVATION).await;
             }
 
             let session_expired = {
@@ -777,12 +832,62 @@ impl SessionManager {
             };
             if session_expired {
                 tracing::info!(username = %live.user.username, "会话空闲超时，登出");
+                // 先写审计再登出：`logout` 之后 `live` 里的身份信息还在（它是快照），
+                // 但顺序反过来会让「登出成功才记」这件事依赖于一个可能失败的操作。
+                // 超时回收是**系统**做的决定，无论后续拆解是否顺利都该留痕。
+                self.audit_system(&live, AUDIT_SESSION_EXPIRE).await;
                 if self.logout(&live.token_hash).await {
                     report.sessions_expired += 1;
                 }
             }
         }
         report
+    }
+
+    /// 装上终端注册表：会话结束（登出、空闲超时、进程退出）时一并关掉它的终端。
+    ///
+    /// 只能装一次，重复装会被忽略并记一条警告——第二次装进来的注册表不会收到
+    /// 任何关闭通知，那种「装了却不生效」的状态比直接报错更难查。
+    pub fn set_terminal_registry(&self, registry: Arc<crate::terminal::TerminalRegistry>) {
+        if self.inner.terminals.set(registry).is_err() {
+            tracing::warn!("终端注册表已经装过了，忽略这次设置");
+        }
+    }
+
+    /// 进行中的认证对话认证的是哪个用户。
+    ///
+    /// 供审计使用（`roadmap/02-audit.md` §4.1）：`/auth/respond` 的请求体里只有
+    /// pending id，登录失败时若不问这里就拿不到用户名。id 不认识（伪造、或已超时
+    /// 被回收）时返回 `None`——那种情况下 PAM 根本没收到任何凭据，也就没有
+    /// 「谁尝试登录」这回事可记。
+    pub async fn pending_username(&self, pending_id: &str) -> Option<String> {
+        self.inner
+            .pending
+            .lock()
+            .await
+            .get(pending_id)
+            .map(|p| p.username.clone())
+    }
+
+    /// 写一条由**系统**发起的审计（超时回收），`roadmap/02-audit.md` §4.1。
+    ///
+    /// 与用户操作的审计不同，这类事件没有发起者：执行者写成 [`AUDIT_ACTOR_SYSTEM`]，
+    /// `target` 记被影响的用户，`uid` 仍记该用户的——事后追查时要能按用户筛出
+    /// 「他的会话什么时候被回收过」。
+    ///
+    /// 写失败只记日志：审计写不进去不该影响回收本身（见 `roadmap/02` §4.2）。
+    async fn audit_system(&self, live: &Live, action: &str) {
+        let entry = crate::store::NewAuditEntry::new(
+            self.inner.cfg.node_id.clone(),
+            AUDIT_ACTOR_SYSTEM,
+            action,
+            crate::store::AuditOutcome::Ok,
+        )
+        .target(live.user.username.clone())
+        .actor(i64::from(live.user.uid), false);
+        if let Err(e) = self.inner.store.audit_write(&entry).await {
+            tracing::warn!(error = %e, action, "写超时回收的审计记录失败");
+        }
     }
 
     /// 起一个后台 task 每 `interval` 跑一次 [`sweep`](Self::sweep)。
@@ -851,6 +956,7 @@ impl SessionManager {
                 username: username.to_string(),
                 worker_exe: worker_exe.map(|p| p.to_string_lossy().into_owned()),
                 rhost: meta.remote_addr.clone(),
+                elevate_groups: self.inner.cfg.elevate_groups.clone(),
             })
             .await?;
 
@@ -876,6 +982,7 @@ impl SessionManager {
             pending_id.clone(),
             Pending {
                 kind,
+                username: username.to_string(),
                 helper,
                 meta,
                 created: Instant::now(),
@@ -950,6 +1057,20 @@ impl SessionManager {
     }
 
     async fn teardown(&self, live: Arc<Live>) {
+        // **先关终端，再关 worker**：终端的 PTY 跑在这个 worker 里，关闭要靠
+        // 一次 `term.close` RPC 送进去。worker 先没了，那个 RPC 就发不出去，
+        // shell 只能等 worker 进程死掉时被动收场——而那条路径不保证 SIGHUP
+        // 能送到整个进程组，可能留下游离的 shell。
+        //
+        // 会话都没了还留着终端，等于留下一个没有主人的登录态（§4.3）。
+        if let Some(reg) = self.inner.terminals.get() {
+            let n = reg
+                .close_all_for(&live.token_hash, crate::terminal::CloseReason::Logout)
+                .await;
+            if n > 0 {
+                tracing::info!(username = %live.user.username, count = n, "随会话关闭终端");
+            }
+        }
         if let Some(admin) = live.admin.lock().await.take() {
             teardown_admin(admin).await;
         }

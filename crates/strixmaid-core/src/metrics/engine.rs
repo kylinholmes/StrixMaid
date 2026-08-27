@@ -643,8 +643,14 @@ mod tests {
             Some(store.clone()),
             vec![Box::new(SeqCollector::new())],
         );
-        // 数据从 5 分钟前开始，跑到现在；经过 4 次分钟切换 → m_1m 里有 4-5 行
+        // 数据从 5 分钟前开始，跑到现在；经过 4 次分钟切换 → m_1m 里有 4 行。
+        //
+        // `now` **必须**对齐到整分：不对齐时落进 m_1m 的行数会随当前墙上时刻变化。
+        // 实测 60 个偏移里恰好有一个（start ≡ 1 mod 60）只得到 3 行，
+        // 于是这个测试会以 1/60 的概率无故失败。对齐掉这个自由度，它才是在
+        // 测「选路」，而不是在测「今天几点跑的 CI」。
         let now = now_unix();
+        let now = now - now.rem_euclid(60);
         let start = now - 300;
         fill(&mut s, start, now).await;
 
@@ -778,6 +784,7 @@ mod tests {
         assert_eq!(stats.bytes, stats.series * 1800 * 16);
         assert!(round.duration_ms < 1000.0);
     }
+
 
     #[tokio::test]
     async fn start_与_stop() {

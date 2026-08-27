@@ -11,6 +11,7 @@
 pub mod channels;
 pub mod handler;
 pub mod hub;
+pub mod terminal;
 
 pub use handler::router;
 pub use hub::Hub;

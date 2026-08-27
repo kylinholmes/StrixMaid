@@ -280,3 +280,74 @@ pub struct SessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_addr: Option<String>,
 }
+
+// ===========================================================================
+// 提权资格
+// ===========================================================================
+
+/// 允许提权的默认组（`session.elevate_groups` 的缺省值）。
+///
+/// Debian 系是 `sudo`，RHEL / Arch 系是 `wheel`，老 Ubuntu 与 macOS 是 `admin`。
+/// 三者都列上，一份默认值覆盖常见发行版与开发机。
+pub const DEFAULT_ELEVATE_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
+
+/// 这个用户是否有资格提权（成为 admin worker 的属主）。
+///
+/// # 为什么放在 types 里
+///
+/// `roadmap/01-worker-execution.md` §4.8 要求这条规则在**两处**执行：
+/// helper 内部（权威，它才是持有 root 的组件）与 `elevate_start`（提前拒绝，
+/// 省掉一次 helper spawn 与一轮 PAM 对话）。helper 是独立二进制、只依赖本 crate，
+/// 因此判断逻辑必须落在这里——两边 `use` 同一个函数，才不会出现
+/// 「UI 说你能提权、helper 说不行」这种最难查的不一致。
+///
+/// # 规则
+///
+/// uid 0 本来就是 root，无条件放行；其余看是否属于 `elevate_groups` 之一。
+///
+/// 这**不是**自建 RBAC（`design.md` §5.1 明确不做）：它把「谁能成为 root」
+/// 交给系统的组策略，与 `sudo` 的默认配置、与 Cockpit 的管理访问模型一致。
+/// 更严格的做法是在 worker 内 `sudo -n -v` 去问 sudoers（能覆盖非基于组的规则），
+/// 那依赖 `sudo` 存在，留作后续选项。
+pub fn may_elevate(uid: u32, groups: &[String], elevate_groups: &[String]) -> bool {
+    uid == 0 || groups.iter().any(|g| elevate_groups.contains(g))
+}
+
+#[cfg(test)]
+mod elevate_tests {
+    use super::*;
+
+    fn g(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn 按组放行() {
+        let allow = g(DEFAULT_ELEVATE_GROUPS);
+        assert!(may_elevate(1000, &g(&["alice", "sudo"]), &allow));
+        assert!(may_elevate(1000, &g(&["alice", "wheel"]), &allow));
+        assert!(may_elevate(501, &g(&["staff", "admin"]), &allow), "macOS 的 admin 组");
+        assert!(!may_elevate(1000, &g(&["alice", "users"]), &allow));
+        assert!(!may_elevate(1000, &[], &allow), "没有任何组");
+    }
+
+    #[test]
+    fn root_无条件放行() {
+        assert!(may_elevate(0, &[], &g(DEFAULT_ELEVATE_GROUPS)));
+        assert!(may_elevate(0, &g(&["root"]), &[]), "组列表为空也放行");
+    }
+
+    #[test]
+    fn 空的允许列表等于禁止提权() {
+        // 配置成空列表是「谁都不许提权」的合法表达，不能被理解成「不限制」
+        assert!(!may_elevate(1000, &g(&["sudo", "wheel", "admin"]), &[]));
+    }
+
+    #[test]
+    fn 组名精确匹配不做前缀或大小写宽容() {
+        let allow = g(&["sudo"]);
+        assert!(!may_elevate(1000, &g(&["sudoers"]), &allow), "不能前缀匹配");
+        assert!(!may_elevate(1000, &g(&["SUDO"]), &allow), "Unix 组名区分大小写");
+        assert!(!may_elevate(1000, &g(&["nosudo"]), &allow));
+    }
+}

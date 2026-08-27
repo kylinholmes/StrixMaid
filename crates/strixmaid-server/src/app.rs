@@ -1,6 +1,6 @@
 //! 组装 axum 应用：
 //! 1. `/api/v1` REST（自动收集 OpenAPI）
-//! 2. `/ws` 控制面 WebSocket（受鉴权保护，token 走子协议）
+//! 2. `/ws` 控制面 WebSocket 与 `/ws/terminal/{id}` 终端流（均受鉴权保护，token 走子协议）
 //! 3. debug 构建：`/api/docs`、`/api/v1/openapi.json`、`/debug`，且 `/` 302 到 `/debug`
 //! 4. fallback：静态资源与 SPA 回退
 
@@ -17,11 +17,16 @@ use crate::routes::{self, ApiStates};
 use crate::ws::Hub;
 
 pub fn build(states: ApiStates, hub: Arc<Hub>, auth: Arc<AuthState>) -> Router {
+    // 终端 WS 要在 `states` 被 `api_v1` 消费掉之前把注册表取出来。
+    let terminals = states.terminals.registry.clone();
+
     let (api_router, openapi) = OpenApiRouter::with_openapi(routes::ApiDoc::openapi())
         .nest("/api/v1", routes::api_v1(states))
         .split_for_parts();
 
-    let ws = crate::auth::middleware::protect(crate::ws::router(hub), auth);
+    // 两个 WS 端点共用同一套鉴权：token 走子协议，在升级之前完成。
+    let ws = crate::ws::router(hub).merge(crate::ws::terminal::router(terminals));
+    let ws = crate::auth::middleware::protect(ws, auth);
 
     let router = crate::apidoc::attach(api_router, openapi).merge(ws);
 

@@ -1,30 +1,52 @@
-//! process provider（id `"proc"`）：进程列表 / 详情 / 信号 / renice，全部直读 `/proc`。
+//! process provider（id `"proc"`）：进程列表 / 详情 / 信号 / renice。
 //!
-//! # 性能
+//! # 结构
 //!
-//! 一次列表要遍历几百到几千个进程。每个进程只读 **`stat` + `cmdline`**（内核线程连 cmdline
-//! 都省掉，靠 `PF_KTHREAD` 标志判断）外加一次 `fstat` 取 uid；线程数、RSS、nice、状态、
-//! 启动时刻都在 `stat` 里。cgroup / status / environ / fd 只在详情里读。
-//! 整个遍历在 `spawn_blocking` 里跑。
+//! 本文件是**与平台无关**的外壳：[`ProcProvider`] 的接口形状、`kill(2)` / `setpriority(2)`
+//! 这两个 POSIX 写操作、pid 校验，以及 [`cpu`]（CPU% 差分）、[`filter`]（排序 / 过滤 / 树）、
+//! [`users`]（uid → 用户名）三个纯逻辑子模块。
+//!
+//! 「怎么把进程枚举出来」按平台分：
+//!
+//! | 模块 | 数据源 | 备注 |
+//! |---|---|---|
+//! | [`linux`] | `/proc`（`procfs` crate） | 目标平台 |
+//! | [`macos`] | `libproc`（`proc_listpids` / `proc_pidinfo`） | 开发平台；无 cgroup，`unit` 恒为 `None` |
+//!
+//! 两个后端产出同一套 DTO（`strixmaid_types::process`），差异由字段的 `Option` 表达，
+//! 不新增平台分支到 API 契约里。
 //!
 //! # CPU%
 //!
 //! 差分计算见 [`cpu`]：provider 内部持有上一轮 `(pid, starttime) → ticks` 快照，
 //! 每次列表 / 详情都更新它，并清理已消失的 pid。**首次调用没有基线，CPU% 为 0.0**。
+//! 两个平台的「tick」单位不同（Linux 是 jiffies，macOS 是纳秒），由各自后端连同
+//! 对应的 `hz` 一起交给 [`cpu::CpuSamples::observe`]，差分公式本身是共用的。
 //!
 //! # 权限
 //!
-//! 读列表几乎不需要权限；`cwd` / `exe` / `environ` / `fd` / `io` 只有同 uid 或 root 能读，
+//! 读列表几乎不需要权限；`cwd` / `exe` / `environ` / `fd` 只有同 uid 或 root 能读，
 //! 读不到就是 `None`。信号与 renice 由内核裁决，`EPERM` → `PermissionDenied`（可提权重试）。
 
-pub mod cgroup;
 pub mod cpu;
 pub mod filter;
-pub mod tty;
 pub mod users;
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
+#[cfg(target_os = "linux")]
+pub mod cgroup;
+#[cfg(target_os = "linux")]
+pub mod tty;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
+
+#[cfg(target_os = "linux")]
+use linux as sys;
+#[cfg(target_os = "macos")]
+use macos as sys;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -32,19 +54,14 @@ use async_trait::async_trait;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use procfs::process::{Process, Stat, all_processes};
 use strixmaid_types::process::{
-    FdInfo, ProcessDetail, ProcessListQuery, ProcessState, ProcessSummary, SignalName,
+    ProcessDetail, ProcessListQuery, ProcessSummary, SignalName,
 };
 use strixmaid_types::{ApiError, ApiResult};
 
-use super::system::util::meminfo_value;
 use super::{Probe, Provider};
 use cpu::CpuSamples;
 use users::{UserDb, UserTable};
-
-/// `/proc/<pid>/stat` 的 `flags` 里的内核线程标志（`include/linux/sched.h`）。
-const PF_KTHREAD: u32 = 0x0020_0000;
 
 /// 进程 provider。内部是 `Arc`，`Clone` 廉价，便于丢进 `spawn_blocking`。
 #[derive(Clone)]
@@ -55,11 +72,7 @@ pub struct ProcProvider {
 struct Inner {
     cpu: Mutex<CpuSamples>,
     users: UserDb,
-    /// `sysconf(_SC_CLK_TCK)`，几乎总是 100。
-    hz: u64,
-    page_size: u64,
-    /// `/proc/stat` 的 `btime`；读不到为 0，此时 `start_ts` 退化成「开机以来的秒数」。
-    boot_time: u64,
+    sys: sys::Backend,
 }
 
 impl Default for ProcProvider {
@@ -69,15 +82,13 @@ impl Default for ProcProvider {
 }
 
 impl ProcProvider {
-    /// 创建 provider；读一次时钟频率、页大小与开机时刻。
+    /// 创建 provider。后端在这里读一次常量（时钟频率、页大小、开机时刻等）。
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
                 cpu: Mutex::new(CpuSamples::new()),
                 users: UserDb::new(),
-                hz: procfs::ticks_per_second().max(1),
-                page_size: procfs::page_size().max(1),
-                boot_time: procfs::boot_time_secs().unwrap_or(0),
+                sys: sys::Backend::new(),
             }),
         }
     }
@@ -103,71 +114,22 @@ impl ProcProvider {
         blocking(move || this.detail_blocking(pid)).await?
     }
 
-    /// 同步版列表：遍历 `/proc`、更新 CPU 快照、按查询参数筛选排序。
+    /// 同步版列表：枚举进程、更新 CPU 快照、按查询参数筛选排序。
     pub fn list_blocking(&self, query: &ProcessListQuery) -> Vec<ProcessSummary> {
         let ctx = self.context();
-        let mut all: Vec<ProcessSummary> = Vec::with_capacity(512);
-        let mut seen: HashSet<u32> = HashSet::with_capacity(512);
-        {
+        let all = {
             let mut cpu = self.inner.cpu.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(iter) = all_processes() {
-                for proc in iter.flatten() {
-                    let Ok(stat) = proc.stat() else { continue };
-                    if let Some(s) = self.summarize(&proc, &stat, &mut cpu, &ctx) {
-                        seen.insert(s.pid);
-                        all.push(s);
-                    }
-                }
-            }
-            cpu.retain_seen(&seen);
-        }
+            self.inner.sys.list(&mut cpu, &ctx)
+        };
         filter::apply(all, query, |name| ctx.users.uid_of(name))
     }
 
     /// 同步版详情。
     pub fn detail_blocking(&self, pid: u32) -> ApiResult<ProcessDetail> {
         let raw_pid = checked_pid(pid)?;
-        let not_found = || ApiError::not_found(format!("进程 {pid} 不存在"));
-        let proc = Process::new(raw_pid).map_err(|_| not_found())?;
-        let stat = proc.stat().map_err(|_| not_found())?;
         let ctx = self.context();
-        let summary = {
-            let mut cpu = self.inner.cpu.lock().unwrap_or_else(|e| e.into_inner());
-            self.summarize(&proc, &stat, &mut cpu, &ctx)
-                .ok_or_else(not_found)?
-        };
-
-        let status = proc.status().ok();
-        let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup"))
-            .ok()
-            .and_then(|raw| cgroup::parse_cgroup_path(&raw));
-        let unit = cgroup.as_deref().and_then(cgroup::unit_from_cgroup_path);
-        let io = proc.io().ok();
-
-        Ok(ProcessDetail {
-            summary,
-            cmdline_args: proc.cmdline().unwrap_or_default(),
-            exe: proc.exe().ok().map(|p| p.to_string_lossy().into_owned()),
-            cwd: proc.cwd().ok().map(|p| p.to_string_lossy().into_owned()),
-            euid: status.as_ref().map(|s| s.euid),
-            gid: status.as_ref().map(|s| s.rgid),
-            tty: tty::tty_name(stat.tty_nr),
-            cgroup,
-            unit,
-            environ: proc.environ().ok().map(|m| {
-                m.into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k.to_string_lossy().into_owned(),
-                            v.to_string_lossy().into_owned(),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            }),
-            fds: read_fds(pid),
-            io_read_bytes: io.as_ref().map(|i| i.read_bytes),
-            io_write_bytes: io.as_ref().map(|i| i.write_bytes),
-        })
+        let mut cpu = self.inner.cpu.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.sys.detail(raw_pid, &mut cpu, &ctx)
     }
 
     /// `POST /processes/{pid}/signal`：`kill(2)`。
@@ -188,7 +150,8 @@ impl ProcProvider {
             ))
             .with_detail(e.to_string())
             .retry_elevated(),
-            other => ApiError::internal(format!("向进程 {pid} 发送 {sig} 失败")).with_detail(other.to_string()),
+            other => ApiError::internal(format!("向进程 {pid} 发送 {sig} 失败"))
+                .with_detail(other.to_string()),
         })
     }
 
@@ -215,61 +178,13 @@ impl ProcProvider {
         })
     }
 
-    /// 一次列表 / 详情共用的上下文：用户表快照、MemTotal、采样时刻。
+    /// 一次列表 / 详情共用的上下文：用户表快照、内存总量、采样时刻。
     fn context(&self) -> Context {
-        let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
         Context {
             users: self.inner.users.snapshot(),
-            mem_total: meminfo_value(&meminfo, "MemTotal").unwrap_or(0),
+            mem_total: self.inner.sys.mem_total(),
             now: Instant::now(),
         }
-    }
-
-    /// 把一个进程的 `stat` 转成 [`ProcessSummary`]，同时更新 CPU 快照。
-    fn summarize(
-        &self,
-        proc: &Process,
-        stat: &Stat,
-        cpu: &mut CpuSamples,
-        ctx: &Context,
-    ) -> Option<ProcessSummary> {
-        let pid = u32::try_from(stat.pid).ok().filter(|p| *p > 0)?;
-        let uid = proc.uid().ok()?;
-        let kernel_thread = stat.flags & PF_KTHREAD != 0;
-        let cmdline = if kernel_thread {
-            None
-        } else {
-            proc.cmdline()
-                .ok()
-                .filter(|v| !v.is_empty())
-                .map(|v| v.join(" "))
-        };
-        let ticks = stat.utime.saturating_add(stat.stime);
-        let cpu_percent = cpu
-            .observe(pid, stat.starttime, ticks, ctx.now, self.inner.hz)
-            .unwrap_or(0.0);
-        let rss_bytes = stat.rss.saturating_mul(self.inner.page_size);
-        let mem_percent = if ctx.mem_total > 0 {
-            ((rss_bytes as f64 / ctx.mem_total as f64 * 100.0) * 100.0).round() / 100.0
-        } else {
-            0.0
-        };
-        Some(ProcessSummary {
-            pid,
-            ppid: u32::try_from(stat.ppid).unwrap_or(0),
-            name: stat.comm.clone(),
-            cmdline,
-            uid,
-            user: ctx.users.name_of(uid).map(str::to_owned),
-            state: map_state(stat.state),
-            cpu_percent,
-            rss_bytes,
-            vms_bytes: stat.vsize,
-            mem_percent,
-            threads: u32::try_from(stat.num_threads).unwrap_or(0),
-            start_ts: self.inner.boot_time as i64 + (stat.starttime / self.inner.hz) as i64,
-            nice: stat.nice as i32,
-        })
     }
 }
 
@@ -280,17 +195,26 @@ impl Provider for ProcProvider {
     }
 
     async fn probe(&self) -> Probe {
-        match fs::read_to_string("/proc/self/stat") {
-            Ok(_) => Probe::Available,
-            Err(e) => Probe::unavailable(format!("无法读取 /proc/self/stat：{e}")),
-        }
+        sys::probe()
     }
 }
 
-struct Context {
-    users: Arc<UserTable>,
-    mem_total: u64,
-    now: Instant,
+/// 一次枚举共用的上下文，由外壳构造、交给平台后端。
+pub struct Context {
+    pub users: Arc<UserTable>,
+    /// 物理内存总量，用于算 `mem_percent`；读不到为 0（此时 `mem_percent` 恒为 0）。
+    pub mem_total: u64,
+    pub now: Instant,
+}
+
+impl Context {
+    /// RSS 占物理内存的百分比，保留两位小数。
+    pub fn mem_percent(&self, rss_bytes: u64) -> f64 {
+        if self.mem_total == 0 {
+            return 0.0;
+        }
+        ((rss_bytes as f64 / self.mem_total as f64 * 100.0) * 100.0).round() / 100.0
+    }
 }
 
 /// 在阻塞线程池里跑一段同步采集。
@@ -308,73 +232,10 @@ fn checked_pid(pid: u32) -> ApiResult<i32> {
         .ok_or_else(|| ApiError::invalid_request(format!("非法的 pid：{pid}")))
 }
 
-/// `/proc/<pid>/stat` 第 3 字段 → [`ProcessState`]。
-pub fn map_state(c: char) -> ProcessState {
-    match c {
-        'R' => ProcessState::Running,
-        'S' => ProcessState::Sleeping,
-        'D' => ProcessState::DiskSleep,
-        'Z' => ProcessState::Zombie,
-        'T' => ProcessState::Stopped,
-        't' => ProcessState::TracingStop,
-        'X' | 'x' => ProcessState::Dead,
-        'I' => ProcessState::Idle,
-        _ => ProcessState::Unknown,
-    }
-}
-
-/// 读 `/proc/<pid>/fd`。目录打不开（无权限）→ `None`；单个 fd 在读取间隙被关闭则跳过。
-fn read_fds(pid: u32) -> Option<Vec<FdInfo>> {
-    let dir = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
-    let mut out: Vec<FdInfo> = dir
-        .flatten()
-        .filter_map(|e| {
-            let fd: u32 = e.file_name().to_str()?.parse().ok()?;
-            let target = fs::read_link(e.path()).ok()?;
-            let target = target.to_string_lossy().into_owned();
-            let kind = classify_fd(&target, &e.path());
-            Some(FdInfo {
-                fd,
-                target,
-                kind: kind.to_owned(),
-            })
-        })
-        .collect();
-    out.sort_by_key(|f| f.fd);
-    Some(out)
-}
-
-/// 按软链目标归类 fd：`file` / `socket` / `pipe` / `anon_inode` / `dir` / `other`。
-fn classify_fd(target: &str, link_path: &std::path::Path) -> &'static str {
-    if target.starts_with("socket:") {
-        "socket"
-    } else if target.starts_with("pipe:") {
-        "pipe"
-    } else if target.starts_with("anon_inode:") {
-        "anon_inode"
-    } else if target.starts_with('/') {
-        // metadata 跟随软链：目标是目录就是 dir
-        match fs::metadata(link_path) {
-            Ok(m) if m.is_dir() => "dir",
-            _ => "file",
-        }
-    } else {
-        "other"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use strixmaid_types::ErrorCode;
-
-    #[test]
-    fn 状态映射() {
-        assert_eq!(map_state('R'), ProcessState::Running);
-        assert_eq!(map_state('D'), ProcessState::DiskSleep);
-        assert_eq!(map_state('I'), ProcessState::Idle);
-        assert_eq!(map_state('?'), ProcessState::Unknown);
-    }
 
     #[test]
     fn pid_校验() {
@@ -384,13 +245,16 @@ mod tests {
     }
 
     #[test]
-    fn fd_归类() {
-        let p = std::path::Path::new("/nonexistent");
-        assert_eq!(classify_fd("socket:[123]", p), "socket");
-        assert_eq!(classify_fd("pipe:[9]", p), "pipe");
-        assert_eq!(classify_fd("anon_inode:[eventpoll]", p), "anon_inode");
-        assert_eq!(classify_fd("/var/log/x.log", p), "file");
-        assert_eq!(classify_fd("weird", p), "other");
+    fn 内存百分比() {
+        let ctx = Context {
+            users: Arc::new(UserTable::default()),
+            mem_total: 1000,
+            now: Instant::now(),
+        };
+        assert_eq!(ctx.mem_percent(125), 12.5);
+        assert_eq!(ctx.mem_percent(0), 0.0);
+        let zero = Context { mem_total: 0, ..ctx };
+        assert_eq!(zero.mem_percent(500), 0.0, "读不到 MemTotal 时不该除以 0");
     }
 
     #[test]
@@ -417,7 +281,6 @@ mod tests {
         let second_elapsed = t1.elapsed();
         assert!(second.iter().any(|p| p.pid == me));
 
-        // 性能：目标 500 进程 < 50ms，按比例放宽到本机的进程数；上限 2s 只是防止彻底退化。
         let per_proc = second_elapsed.as_secs_f64() / second.len().max(1) as f64;
         eprintln!(
             "进程列表：{} 个进程，首轮 {:?}，次轮 {:?}（每进程 {:.1}µs）",
@@ -430,38 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn 本进程详情_unit_解析一致() {
+    fn 本进程详情() {
         let provider = ProcProvider::new();
         let me = std::process::id();
         let d = provider.detail_blocking(me).unwrap();
         assert_eq!(d.summary.pid, me);
         assert!(!d.cmdline_args.is_empty());
-        // 自己的进程：cwd / exe / environ / fd 都应可读
-        assert!(d.exe.is_some());
-        assert!(d.cwd.is_some());
-        assert!(d.environ.is_some());
-        assert!(d.fds.as_ref().is_some_and(|f| !f.is_empty()));
+        assert!(d.exe.is_some(), "自己的 exe 总该读得到");
+        // SAFETY: geteuid 无副作用。
         assert_eq!(d.euid, Some(unsafe { libc::geteuid() }));
-
-        // unit 必须与直接解析 /proc/self/cgroup 的结果一致；
-        // 只要本进程在某个 .service/.scope 下（ssh.service、user@N.service/…、session-N.scope），unit 就非空。
-        let raw = fs::read_to_string("/proc/self/cgroup").unwrap();
-        let expected_path = cgroup::parse_cgroup_path(&raw);
-        assert_eq!(d.cgroup, expected_path);
-        let expected_unit = expected_path.as_deref().and_then(cgroup::unit_from_cgroup_path);
-        assert_eq!(d.unit, expected_unit);
-        if let Some(path) = &expected_path
-            && path.contains(".service")
-        {
-            assert!(d.unit.is_some(), "cgroup {path} 里有 .service，unit 不该为空");
-        }
-        eprintln!("本进程 cgroup={:?} unit={:?}", d.cgroup, d.unit);
     }
 
     #[test]
     fn 不存在的进程() {
         let provider = ProcProvider::new();
-        // pid_max 默认 4194304；用一个远超它的合法 i32
+        // Linux 的 pid_max 默认 4194304，macOS 更小；用一个远超两者的合法 i32
         let err = provider.detail_blocking(2_000_000_000).unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
         let err = provider.signal(2_000_000_000, SignalName::Term).unwrap_err();
@@ -473,9 +319,18 @@ mod tests {
     #[test]
     fn 参数校验() {
         let provider = ProcProvider::new();
-        assert_eq!(provider.signal(1, SignalName::Kill).unwrap_err().code, ErrorCode::InvalidRequest);
-        assert_eq!(provider.signal(0, SignalName::Term).unwrap_err().code, ErrorCode::InvalidRequest);
-        assert_eq!(provider.renice(std::process::id(), 40).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            provider.signal(1, SignalName::Kill).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            provider.signal(0, SignalName::Term).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            provider.renice(std::process::id(), 40).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
@@ -497,13 +352,11 @@ mod tests {
         assert_eq!(p.probe().await, Probe::Available);
         let list = p
             .list(ProcessListQuery {
-                q: Some("strixmaid".into()),
                 tree: Some(true),
                 ..Default::default()
             })
             .await
             .unwrap();
-        // 树模式下命中项的祖先也在，故列表里必然有 pid 1 或某个根
         assert!(!list.is_empty());
         let me = std::process::id();
         let d = p.detail(me).await.unwrap();
