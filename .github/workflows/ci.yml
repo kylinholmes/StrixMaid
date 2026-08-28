@@ -80,8 +80,11 @@ jobs:
           cp -L /usr/lib/x86_64-linux-gnu/libpam.so.0 /tmp/pamlib/libpam.so.0
           ls -l /tmp/pamlib
       - name: zigbuild（glibc 2.28 基线：Debian 10 / RHEL 8）
+        # 按绝对路径链而不是 `-l:libpam.so.0`：zig 那套 clang/lld 包装还原不出
+        # GNU ld 的 `-l:` 语法，即使 -L 指到了确有该文件的目录也报找不到。
+        # DT_NEEDED 记的是 SONAME 不是路径，下一步的 ldd 断言会验掉这点。
         env:
-          RUSTFLAGS: -L/tmp/pamlib
+          STRIXMAID_PAM_LINK_ARG: /tmp/pamlib/libpam.so.0
         run: |
           pip install cargo-zigbuild
           cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p strixmaid-helper
@@ -92,6 +95,11 @@ jobs:
           bad=$(ldd "$f" | awk '{print $1}' \
             | grep -vE '^(linux-vdso|libpam\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|ld-linux)' || true)
           [ -z "$bad" ] || { echo "多余的动态依赖：$bad"; exit 1; }
+          # 按绝对路径链时若 SONAME 没被采用，DT_NEEDED 会变成构建机的路径，
+          # 装到别的机器上就找不到——这种二进制看着能链成，实际不可交付。
+          readelf -d "$f" | grep NEEDED
+          readelf -d "$f" | grep -q 'NEEDED.*\[libpam\.so\.0\]' \
+            || { echo "DT_NEEDED 不是 SONAME libpam.so.0"; readelf -d "$f"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: strixmaid-helper-gnu228
