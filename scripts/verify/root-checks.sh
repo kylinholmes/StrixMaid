@@ -54,9 +54,19 @@ login()   { STRIX_PASSWORD="$2" "$HERE/login.sh" login "$BASE" "$1"; }
 elevate() { STRIX_PASSWORD="$2" "$HERE/login.sh" elevate "$BASE" "$1" ""; }
 
 worker_count() { pgrep -u "$1" -f 'strixmaid worker' 2>/dev/null | wc -l | tr -d ' '; }
-# pgrep -c 无匹配时**既打印 0 又以非零退出**，写成 `pgrep -c ... || echo 0`
-# 会得到两行 "0\n0"，之后的 [ "$n" -le ... ] 直接报 integer expression expected。
-helper_count() { local n; n="$(pgrep -c -x strixmaid-helper 2>/dev/null)"; [ -n "$n" ] || n=0; echo "$n"; }
+# 两个坑，都是首轮真跑才发现的：
+#
+# 1. Linux 的 comm 只有 15 个字符，而 `strixmaid-helper` 是 16 个——内核把它截成
+#    `strixmaid-helpe`，于是 `pgrep -x strixmaid-helper` **永远匹配不到**。这条
+#    检查一直在拿 0 和 0 比，恒真（HANDOFF.md §5：只断言没报错的测试等于没测）。
+#    模式写成 `strixmaid-helpe.?`，截断与不截断的系统都能覆盖。
+#    不用 `pgrep -f`：它匹配整条 cmdline，连「命令行里碰巧出现过这个词的 shell」
+#    都会算进去——实测能多数出一个。
+# 2. `pgrep -c` 无匹配时**既打印 0 又以非零退出**，写成 `pgrep -c ... || echo 0`
+#    会得到两行 "0\n0"，之后的 [ "$n" -le ... ] 直接报 integer expression expected。
+helper_count() {
+  local n; n="$(pgrep -c -x 'strixmaid-helpe.?' 2>/dev/null)"; [ -n "$n" ] || n=0; echo "$n"
+}
 
 # ===========================================================================
 sec "§1.2 未认证与 alice（普通用户）"
@@ -85,6 +95,7 @@ if [ -n "$ATOK" ]; then
   code GET /api/v1/capabilities "${AH[@]}"
   ce="$(echo "$BODY" | jq -r '.user.can_elevate') $(echo "$BODY" | jq -r '.user.elevated')"
   [ "$ce" = "false false" ] && ok "#4 alice can_elevate=false elevated=false" || bad "#4 alice 能力异常" "$BODY"
+  ALICE_CAP_J="$(echo "$BODY" | jq -r '.user.can_read_journal')"
 
   # 读不到日志的普通用户应得到 403 + can_retry_elevated（提权确实能解决——
   # 日志读取走 exec::escalate），而**不是 500**。RHEL 系上曾是 500：journalctl 说
@@ -96,6 +107,14 @@ if [ -n "$ATOK" ]; then
            && ok "#5 alice 读不到日志 → 403 且提示可提权重试" \
            || bad "#5 /logs 403 但没带 can_retry_elevated" "$BODY" ;;
     *) bad "#5 /logs 异常" "$C $BODY" ;;
+  esac
+  # capabilities 的 can_read_journal 必须**能预测 /logs 的实际结果**——前端就是靠它
+  # 决定日志页显示还是灰掉。标志位说能读却拿到 403，或说不能读却其实能读，
+  # 两种都会让用户困惑，所以这里断言的是二者一致，而不是某个具体取值。
+  case "$ALICE_CAP_J:$C" in
+    true:200|false:403|true:501|false:501)
+      ok "#5 alice can_read_journal=$ALICE_CAP_J 与 /logs 的 $C 一致" ;;
+    *) bad "#5 can_read_journal=$ALICE_CAP_J 与 /logs 的 $C 不一致" "标志位必须能预测端点行为" ;;
   esac
 
   WPID="$(pgrep -u "$ALICE" -f 'strixmaid worker' 2>/dev/null | head -1)"
@@ -169,18 +188,16 @@ else
     caps="$(echo "$BODY" | jq -r '.user.elevated') $(echo "$BODY" | jq -r '.user.can_manage_units')"
     [ "$caps" = "true true" ] && ok "#12 bob elevated=true can_manage_units=true" \
       || bad "#12 bob 提权后能力不全" "$caps · $BODY"
-    # 对照必须**以同一个身份**做。日志读取三处都是 Privilege::User（logs.rs），
-    # 提权不改变 /logs 返回什么，所以这里要问的是「bob 自己读不读得到内核日志」，
-    # 而不是「root 读不读得到」——拿 root 去比会得到必然的假阳性。
+    # 不要拿「bob 以自己的身份读不读得到」来对照：日志读取走 exec::escalate，
+    # **已提权的会话被拒后会换 admin worker 重试**，所以提权后这两个值本就不该相等。
+    # 该断言的是标志位能不能预测端点行为——前端靠它决定日志页显示还是灰掉。
     cap_j="$(echo "$BODY" | jq -r '.user.can_read_journal')"
-    if su - "$BOB" -c 'journalctl -n 1 -q --no-pager --output=cat _TRANSPORT=kernel' 2>/dev/null | grep -q .; then
-      real_j=true
-    else
-      real_j=false
-    fi
-    [ "$cap_j" = "$real_j" ] \
-      && ok "#12 can_read_journal=$cap_j 与 $BOB 实际的内核日志可见性一致" \
-      || bad "#12 can_read_journal=$cap_j 但 $BOB 实测可见性=$real_j" "$BODY"
+    code GET '/api/v1/logs?limit=1' "${BH[@]}"
+    case "$cap_j:$C" in
+      true:200|false:403|true:501|false:501)
+        ok "#12 can_read_journal=$cap_j 与 /logs 的 $C 一致（提权后经升级读到）" ;;
+      *) bad "#12 can_read_journal=$cap_j 与 /logs 的 $C 不一致" "标志位必须能预测端点行为" ;;
+    esac
 
     code POST "/api/v1/services/$TEST_UNIT/action" "${BH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}'
     if [ "$C" = 200 ]; then
