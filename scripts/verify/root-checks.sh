@@ -108,14 +108,19 @@ if [ -n "$ATOK" ]; then
            || bad "#5 /logs 403 但没带 can_retry_elevated" "$BODY" ;;
     *) bad "#5 /logs 异常" "$C $BODY" ;;
   esac
-  # capabilities 的 can_read_journal 必须**能预测 /logs 的实际结果**——前端就是靠它
-  # 决定日志页显示还是灰掉。标志位说能读却拿到 403，或说不能读却其实能读，
-  # 两种都会让用户困惑，所以这里断言的是二者一致，而不是某个具体取值。
-  case "$ALICE_CAP_J:$C" in
-    true:200|false:403|true:501|false:501)
-      ok "#5 alice can_read_journal=$ALICE_CAP_J 与 /logs 的 $C 一致" ;;
-    *) bad "#5 can_read_journal=$ALICE_CAP_J 与 /logs 的 $C 不一致" "标志位必须能预测端点行为" ;;
-  esac
+  # 契约只有一个方向成立：**说能读就必须真能读**（true ⇒ 200），否则前端会画出
+  # 一个亮着的日志入口、点进去报错。
+  #
+  # 反方向**不**成立，别把它写进断言：can_read_journal 说的是「能不能看到**系统**
+  # 日志」（探测判据是内核日志），而 /logs 返回 200 只说明 journalctl 成功了——
+  # Ubuntu 上 alice 拿到的正是 200，内容却只有她自己的条目。两者都对。
+  # 「false 时前端要不要显示日志页」是产品决定（只给自己的日志也是有用的），
+  # 不是这里该裁决的事。
+  if [ "$ALICE_CAP_J" = true ] && [ "$C" = 403 ]; then
+    bad "#5 can_read_journal=true 却拿到 403" "标志位说能读就必须真能读"
+  else
+    ok "#5 alice can_read_journal=$ALICE_CAP_J 与 /logs 的 $C 不矛盾"
+  fi
 
   WPID="$(pgrep -u "$ALICE" -f 'strixmaid worker' 2>/dev/null | head -1)"
   if [ -n "$WPID" ]; then
@@ -193,11 +198,13 @@ else
     # 该断言的是标志位能不能预测端点行为——前端靠它决定日志页显示还是灰掉。
     cap_j="$(echo "$BODY" | jq -r '.user.can_read_journal')"
     code GET '/api/v1/logs?limit=1' "${BH[@]}"
-    case "$cap_j:$C" in
-      true:200|false:403|true:501|false:501)
-        ok "#12 can_read_journal=$cap_j 与 /logs 的 $C 一致（提权后经升级读到）" ;;
-      *) bad "#12 can_read_journal=$cap_j 与 /logs 的 $C 不一致" "标志位必须能预测端点行为" ;;
-    esac
+    # 同 #5：只断言「说能读就必须真能读」这一个方向（理由见那里）。
+    # 提权后 cap_j 应为 true——它正是靠升级到 admin worker 成立的。
+    if [ "$cap_j" = true ] && [ "$C" = 403 ]; then
+      bad "#12 提权后 can_read_journal=true 却拿到 403" "升级重试没生效？"
+    else
+      ok "#12 can_read_journal=$cap_j 与 /logs 的 $C 不矛盾（提权后经升级读到）"
+    fi
 
     code POST "/api/v1/services/$TEST_UNIT/action" "${BH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}'
     if [ "$C" = 200 ]; then
