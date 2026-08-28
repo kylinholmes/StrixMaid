@@ -89,17 +89,20 @@ jobs:
           pip install cargo-zigbuild
           cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p strixmaid-helper
       - name: 断言只链 libpam 与 libc 系
+        # 看 DT_NEEDED，不用 ldd。ldd 展开的是整棵**传递**闭包，里面混着宿主
+        # libpam 自己的依赖（Ubuntu 的 libpam 链了 libaudit、libcap-ng），那些
+        # 跟「我们链了什么」无关——目标机上由它自己的 libpam 决定拖谁进来。
+        # 顺带这也验掉了按绝对路径链的风险：若 SONAME 没被采用，DT_NEEDED 会
+        # 变成构建机的路径，装到别的机器上就找不到库——看着能链成，实际不可交付。
         run: |
           f=target/x86_64-unknown-linux-gnu/release/strixmaid-helper
-          ldd "$f"
-          bad=$(ldd "$f" | awk '{print $1}' \
-            | grep -vE '^(linux-vdso|libpam\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|ld-linux)' || true)
-          [ -z "$bad" ] || { echo "多余的动态依赖：$bad"; exit 1; }
-          # 按绝对路径链时若 SONAME 没被采用，DT_NEEDED 会变成构建机的路径，
-          # 装到别的机器上就找不到——这种二进制看着能链成，实际不可交付。
           readelf -d "$f" | grep NEEDED
-          readelf -d "$f" | grep -q 'NEEDED.*\[libpam\.so\.0\]' \
-            || { echo "DT_NEEDED 不是 SONAME libpam.so.0"; readelf -d "$f"; exit 1; }
+          needed=$(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+          bad=$(printf '%s\n' "$needed" \
+            | grep -vE '^(libpam\.so\.0|libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1)$' || true)
+          [ -z "$bad" ] || { echo "多余的直接依赖：$bad"; exit 1; }
+          printf '%s\n' "$needed" | grep -qx 'libpam\.so\.0' \
+            || { echo "DT_NEEDED 里没有 SONAME libpam.so.0（按绝对路径链时 SONAME 没被采用？）"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: strixmaid-helper-gnu228
