@@ -1,5 +1,25 @@
 # 04 文件管理壳与两个 WS 频道
 
+> **实施状态（2026-08-28）**：A、B 两项均已完成。
+>
+> 与方案的三处偏离，均已在代码注释中说明理由：
+>
+> - **A.3 的 `allowed_roots` 下发**：未加 `ToWorker::Configure` 帧，选择随调用经
+>   `FsParams` 传入（方案允许的另一形态）。为一个策略值给 IPC 协议加一种帧、给
+>   分发表加一份可变状态，代价大于每次多传几十字节——文件浏览是人手速驱动的
+>   低频调用，且 `allowed_roots` 不是安全边界（裁决在文件权限）。
+> - **A.3 的大小上限**：读全程带 `take(上限+1)` 双重兜底（procfs 文件 stat 报 0，
+>   普通文件也可能在 stat 之后变大），`FileContent.truncated` 恒为 `false` 并在
+>   DTO 文档里说明保留原因；新增 `lossy` 字段、`DirListing.skipped` 计数。
+> - **B.3 的参数校验**：边界校验与缺省回填在主进程侧（`channels/processes_live.rs`）
+>   ——只有那里能带着订阅方的 `id` 回 `err` 帧；worker 对收到的值只用不复核。
+>
+> B.2 的 `system.health` 由主进程每 30 秒重算，failed units 计数并入
+> `unit.failed` 并把 `systemd` 从 `skipped` 摘除；只有条目集合
+> （id + target + severity）变化才广播。`/debug` 页新增文件面板，
+> WS 面板的频道列表已含两个新频道。集成级验收（A.4-4 的 `/etc/shadow` 403、
+> 浏览器实测）与其余 root 项一并归入 `07-verification.md` 的环境验证。
+
 本文件包含两项互不依赖的小工作。
 
 ## A. 文件管理壳

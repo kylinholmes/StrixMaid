@@ -252,6 +252,11 @@ pub struct MetricQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[param(example = 60)]
     pub step: Option<u32>,
+    /// 节点 id，缺省 `local`。非 local 节点没有内存环，`live` 层不可用，
+    /// 一律走落盘层（roadmap/05 §3.3）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[param(example = "local")]
+    pub node: Option<String>,
 }
 
 /// `GET /api/v1/metrics/query` 的响应体。
@@ -302,6 +307,17 @@ pub struct MetricValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "percent")]
     pub unit: Option<String>,
+}
+
+/// `GET /api/v1/metrics/current` 的查询参数。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SnapshotQuery {
+    /// 节点 id，缺省 `local`。非 local 时返回该节点最近一帧 `agent.snapshot`；
+    /// 节点未连接过或无快照时 404。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[param(example = "local")]
+    pub node: Option<String>,
 }
 
 /// `GET /api/v1/metrics/series` 的查询参数：可用序列列表的过滤条件。

@@ -35,13 +35,13 @@ use std::collections::HashMap;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 use rand::Rng as _;
 use strixmaid_types::rpc::{
-    TERM_CLOSE, TERM_OPEN, TERM_RESIZE, TermCloseParams, TermOpenParams, TermOpenResult,
-    TermResizeParams,
+    TERM_CLOSE, TERM_OPEN, TERM_RESIZE, TermCloseParams, TermCloseResult, TermExit,
+    TermOpenParams, TermOpenResult, TermResizeParams,
 };
 use strixmaid_types::terminal::TerminalInfo;
 use strixmaid_types::{ApiError, ErrorCode};
@@ -254,9 +254,62 @@ pub enum AttachEvent {
     ///
     /// 第一条一定是回看缓冲的**全量回放**（可能为空时不发），之后才是实时输出。
     Data(Vec<u8>),
-    /// 附着结束。宿主应据此发 WS close 帧（`Replaced` / `Stalled` 之外的原因还意味着
-    /// 终端本身没了，`roadmap/03-terminal.md` §4.4 的 `{"t":"exit"}` 由宿主补发）。
-    Closed(CloseReason),
+    /// 附着结束。宿主应据此发 WS close 帧。`Replaced` / `Stalled` 之外的原因还
+    /// 意味着终端本身没了，`roadmap/03-terminal.md` §4.4 的 `{"t":"exit"}` 由宿主
+    /// 补发；`exit` 是 shell 的退出状态——worker 真取到了才有值，取不到就没有，
+    /// 宿主不得编一个顶替。
+    Closed {
+        reason: CloseReason,
+        exit: Option<TermExit>,
+    },
+}
+
+/// 开出这个终端的会话主体（登录用户），随终端保存，关闭时交给 [`TerminalObserver`]。
+///
+/// 单独存一份而不是关闭时反查会话：登出路径上会话正在拆除，等观察者要用时
+/// 可能已经查无此人，而审计恰恰最需要这条记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalOwner {
+    /// 登录用户名（审计的 actor）。
+    pub username: String,
+    /// 登录用户 uid。
+    pub uid: u32,
+    /// 开终端那一刻会话是否处于提权状态。
+    pub elevated: bool,
+}
+
+/// 一次真正执行了的终端关闭。
+#[derive(Debug, Clone)]
+pub struct TerminalClosed {
+    /// 终端 id。
+    pub id: String,
+    /// worker 内 shell 的 pid。
+    pub pid: u32,
+    /// 归属会话（token 的 sha256）。
+    pub session_hash: String,
+    /// 开终端的登录用户。
+    pub owner: TerminalOwner,
+    /// shell 实际运行身份的用户名（提权终端上与 `owner.username` 不同）。
+    pub target_user: String,
+    /// shell 实际运行身份的 uid。
+    pub target_uid: u32,
+    /// 关闭原因。
+    pub reason: CloseReason,
+    /// shell 的退出状态（若 worker 取到了）。
+    pub exit: Option<TermExit>,
+}
+
+/// 终端关闭的观察者钩子（`roadmap/03-terminal.md` §7 的审计要求）。
+///
+/// 空闲回收、shell 自行退出、会话登出这几种关闭发生在 core 内部，而审计的
+/// `Store` 在宿主手里、也该留在宿主手里——这个钩子把「发生了什么」交出去，
+/// 「记到哪里」由宿主决定。**每次真正执行的关闭恰好回调一次**（幂等裁决
+/// 输掉的那一方不回调），`Deleted` 也回调——要不要跳过由实现者定夺。
+///
+/// 回调是同步的且在关闭路径上执行，实现者不得阻塞；要写库就 `spawn` 出去。
+pub trait TerminalObserver: Send + Sync {
+    /// 一个终端被真正关闭了。
+    fn on_closed(&self, event: &TerminalClosed);
 }
 
 /// 当前附着在终端上的那一个 WS。
@@ -366,6 +419,8 @@ pub struct Terminal {
     id: String,
     /// 归属会话（`sessions.id`，即 token 的 sha256）。
     session_hash: String,
+    /// 开这个终端的登录用户，见 [`TerminalOwner`]。
+    owner: TerminalOwner,
     /// worker 内的句柄：shell 的 pid（`roadmap/03-terminal.md` §4.5）。
     pid: u32,
     /// 开这个终端的 worker。持有一份句柄（`Clone` 只是 `Arc` 自增）是为了
@@ -452,7 +507,10 @@ impl Terminal {
         if let Some(old) = previous {
             // 尽力告知原因；即便队列满了投不进去，`old.tx` 在这里 drop，
             // 旧 WS 的接收端仍会看到流结束，不会挂着。
-            let _ = old.tx.try_send(AttachEvent::Closed(CloseReason::Replaced));
+            let _ = old.tx.try_send(AttachEvent::Closed {
+                reason: CloseReason::Replaced,
+                exit: None,
+            });
         }
 
         let attachment = Attachment {
@@ -465,7 +523,8 @@ impl Terminal {
         // 之间装上，摘的就是我们、没问题；若在之后装上，摘的人已经走了，得自己收拾。
         // 不补这一手，附着方会永远等一个已经死掉的终端。
         if self.is_closed() {
-            self.finish_attach(seq, CloseReason::Exited);
+            // 撞上关闭时拿不到退出状态（它在赢家那条路径手里），只能不带。
+            self.finish_attach(seq, CloseReason::Exited, None);
         }
         attachment
     }
@@ -480,7 +539,7 @@ impl Terminal {
     }
 
     /// 通知并解除某一次附着。
-    fn finish_attach(&self, seq: u64, reason: CloseReason) {
+    fn finish_attach(&self, seq: u64, reason: CloseReason, exit: Option<TermExit>) {
         let handle = {
             let mut st = self.lock();
             match st.attached.as_ref() {
@@ -492,7 +551,7 @@ impl Terminal {
             }
         };
         if let Some(h) = handle {
-            let _ = h.tx.try_send(AttachEvent::Closed(reason));
+            let _ = h.tx.try_send(AttachEvent::Closed { reason, exit });
         }
     }
 
@@ -574,6 +633,8 @@ impl Drop for Reservation<'_> {
 pub struct TerminalRegistry {
     cfg: TerminalConfig,
     inner: StdMutex<Inner>,
+    /// 关闭事件的观察者（宿主启动时装入，用于审计）。见 [`TerminalObserver`]。
+    observer: OnceLock<Arc<dyn TerminalObserver>>,
 }
 
 impl std::fmt::Debug for TerminalRegistry {
@@ -590,7 +651,15 @@ impl TerminalRegistry {
         Arc::new(TerminalRegistry {
             cfg,
             inner: StdMutex::new(Inner::default()),
+            observer: OnceLock::new(),
         })
+    }
+
+    /// 装入关闭事件的观察者。只在宿主启动时调用一次，重复装入被忽略。
+    pub fn set_observer(&self, observer: Arc<dyn TerminalObserver>) {
+        if self.observer.set(observer).is_err() {
+            tracing::warn!("终端观察者已装入过，重复调用被忽略");
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -610,6 +679,7 @@ impl TerminalRegistry {
     pub async fn open(
         self: &Arc<Self>,
         session_hash: &str,
+        owner: TerminalOwner,
         worker: &WorkerHandle,
         params: TermOpenParams,
     ) -> Result<TerminalInfo, ApiError> {
@@ -655,6 +725,7 @@ impl TerminalRegistry {
         let term = Arc::new(Terminal {
             id,
             session_hash: session_hash.to_string(),
+            owner,
             pid: result.pid,
             worker: worker.clone(),
             stream: Arc::new(stream),
@@ -804,7 +875,7 @@ impl TerminalRegistry {
         };
         let mut closed = 0;
         for term in doomed {
-            if shutdown(&term, reason).await {
+            if shutdown(&term, reason, self.observer.get()).await {
                 closed += 1;
             }
         }
@@ -835,7 +906,7 @@ impl TerminalRegistry {
         let mut closed = 0;
         for term in doomed {
             tracing::info!(id = %term.id, pid = term.pid, "终端空闲超时，关闭");
-            if shutdown(&term, CloseReason::Idle).await {
+            if shutdown(&term, CloseReason::Idle, self.observer.get()).await {
                 closed += 1;
             }
         }
@@ -846,17 +917,50 @@ impl TerminalRegistry {
     async fn finish(&self, term: &Arc<Terminal>, reason: CloseReason) -> bool {
         // 先摘表：`GET /terminals` 立刻不再列出它，不必等 worker 应答。
         self.lock().terms.remove(&term.id);
-        shutdown(term, reason).await
+        shutdown(term, reason, self.observer.get()).await
     }
 }
 
 /// 真正的关闭动作，幂等。返回 `false` 表示别人已经关过了。
-async fn shutdown(term: &Arc<Terminal>, reason: CloseReason) -> bool {
+///
+/// 顺序上退出状态优先于通知：先把 `term.close` 发去 worker 取回退出状态，
+/// 再通知附着方与观察者——反过来的话 `{"t":"exit"}` 里永远带不上退出码。
+/// 代价是附着方多等一次 RPC 往返：EOF 路径上 shell 已死、状态现成，几毫秒；
+/// 最坏是 DELETE 打在一个不理 SIGHUP 的进程上，等满宽限期到 SIGKILL。
+async fn shutdown(
+    term: &Arc<Terminal>,
+    reason: CloseReason,
+    observer: Option<&Arc<dyn TerminalObserver>>,
+) -> bool {
     // 唯一的裁决点：显式 DELETE 与 shell 退出撞车是**正常**竞态，
     // 输的一方必须安静地返回，尤其不能重发 `term.close`——pid 可能已被复用。
     if term.closed.swap(true, Ordering::AcqRel) {
         return false;
     }
+
+    // 叫醒泵任务。它可能就是当前调用者（EOF 那条路径），那也没关系：
+    // 它会在 `select!` 里看到 stop 已就绪，但那时它已经走出循环了。
+    term.stop.lock().unwrap_or_else(|e| e.into_inner()).take();
+
+    // 跨进程的等待放在所有锁之外。worker 先走一步是常态（会话登出时 worker
+    // 与终端一起拆），那种情况下 PTY 已随 worker 进程消失，退出状态也无从取。
+    let params = serde_json::json!(TermCloseParams { pid: term.pid });
+    let exit = match term.worker.call(TERM_CLOSE, params).await {
+        Ok(v) => {
+            let exit = serde_json::from_value::<TermCloseResult>(v)
+                .ok()
+                .and_then(|r| r.exit);
+            tracing::info!(id = %term.id, pid = term.pid, %reason, ?exit, "终端已关闭");
+            exit
+        }
+        Err(e) => {
+            tracing::debug!(
+                id = %term.id, pid = term.pid, %reason, error = %e,
+                "向 worker 发送 term.close 失败"
+            );
+            None
+        }
+    };
 
     // 通知并摘掉附着方（锁内只做内存操作）。
     let handle = {
@@ -865,23 +969,24 @@ async fn shutdown(term: &Arc<Terminal>, reason: CloseReason) -> bool {
         st.attached.take()
     };
     if let Some(h) = handle {
-        let _ = h.tx.try_send(AttachEvent::Closed(reason));
+        let _ = h.tx.try_send(AttachEvent::Closed { reason, exit });
     }
 
-    // 叫醒泵任务。它可能就是当前调用者（EOF 那条路径），那也没关系：
-    // 它会在 `select!` 里看到 stop 已就绪，但那时它已经走出循环了。
-    term.stop.lock().unwrap_or_else(|e| e.into_inner()).take();
-
-    // 跨进程的等待放在所有锁之外。
-    let params = serde_json::json!(TermCloseParams { pid: term.pid });
-    match term.worker.call(TERM_CLOSE, params).await {
-        Ok(_) => tracing::info!(id = %term.id, pid = term.pid, %reason, "终端已关闭"),
-        // worker 先走一步是常态（会话登出时 worker 与终端一起拆），
-        // 那种情况下 PTY 已随 worker 进程消失，没有需要补救的资源。
-        Err(e) => tracing::debug!(
-            id = %term.id, pid = term.pid, %reason, error = %e,
-            "向 worker 发送 term.close 失败"
-        ),
+    if let Some(obs) = observer {
+        let (target_user, target_uid) = {
+            let st = term.lock();
+            (st.info.user.clone(), st.info.uid)
+        };
+        obs.on_closed(&TerminalClosed {
+            id: term.id.clone(),
+            pid: term.pid,
+            session_hash: term.session_hash.clone(),
+            owner: term.owner.clone(),
+            target_user,
+            target_uid,
+            reason,
+            exit,
+        });
     }
     true
 }
@@ -924,9 +1029,9 @@ async fn pump(
         Some(reg) => {
             reg.finish(&term, reason).await;
         }
-        // 注册表没了（进程在关停）：表已经不存在，直接走关闭动作。
+        // 注册表没了（进程在关停）：表已经不存在，直接走关闭动作，观察者也随之无处可寻。
         None => {
-            shutdown(&term, reason).await;
+            shutdown(&term, reason, None).await;
         }
     }
 }
@@ -965,7 +1070,7 @@ async fn forward(term: &Arc<Terminal>, data: &[u8]) {
                 stall_secs = ATTACH_STALL_LIMIT.as_secs(),
                 "附着方长时间不消费，强制解除附着"
             );
-            term.finish_attach(seq, CloseReason::Stalled);
+            term.finish_attach(seq, CloseReason::Stalled, None);
         }
     }
 }
@@ -1147,7 +1252,13 @@ mod tests {
                         let p: TermCloseParams = serde_json::from_value(params)
                             .map_err(|e| ApiError::invalid_request(e.to_string()))?;
                         closes.lock().unwrap().push(p.pid);
-                        Ok(Value::Null)
+                        Ok(serde_json::to_value(TermCloseResult {
+                            exit: Some(TermExit {
+                                code: Some(0),
+                                signal: None,
+                            }),
+                        })
+                        .unwrap())
                     }
                 });
             }
@@ -1215,8 +1326,16 @@ mod tests {
         }
     }
 
+    fn owner() -> TerminalOwner {
+        TerminalOwner {
+            username: "tester".into(),
+            uid: 1000,
+            elevated: false,
+        }
+    }
+
     async fn open_one(reg: &Arc<TerminalRegistry>, w: &FakeWorker, session: &str) -> TerminalInfo {
-        reg.open(session, &w.handle, params())
+        reg.open(session, owner(), &w.handle, params())
             .await
             .expect("开终端失败")
     }
@@ -1242,7 +1361,7 @@ mod tests {
 
         open_one(&reg, &w, "s1").await;
         open_one(&reg, &w, "s1").await;
-        let err = reg.open("s1", &w.handle, params()).await.unwrap_err();
+        let err = reg.open("s1", owner(), &w.handle, params()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Conflict);
         assert_eq!(err.http_status(), 409);
 
@@ -1264,7 +1383,7 @@ mod tests {
             let reg = reg.clone();
             let handle = w.handle.clone();
             tasks.push(tokio::spawn(async move {
-                reg.open("s1", &handle, params()).await
+                reg.open("s1", owner(), &handle, params()).await
             }));
         }
         let mut ok = 0;
@@ -1416,7 +1535,10 @@ mod tests {
 
         assert_eq!(
             old.next().await,
-            Some(AttachEvent::Closed(CloseReason::Replaced))
+            Some(AttachEvent::Closed {
+                reason: CloseReason::Replaced,
+                exit: None
+            })
         );
         assert_eq!(old.next().await, None, "被顶掉的附着必须彻底结束");
 
@@ -1466,7 +1588,14 @@ mod tests {
 
         assert_eq!(
             att.next().await,
-            Some(AttachEvent::Closed(CloseReason::Exited))
+            Some(AttachEvent::Closed {
+                reason: CloseReason::Exited,
+                exit: Some(TermExit {
+                    code: Some(0),
+                    signal: None
+                })
+            }),
+            "EOF 路径必须把 worker 报告的退出状态带给附着方"
         );
         assert_eq!(att.next().await, None);
         wait_until(|| reg.list_for("s1").is_empty(), "终端从表里消失").await;
@@ -1492,7 +1621,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             att.next().await,
-            Some(AttachEvent::Closed(CloseReason::Deleted))
+            Some(AttachEvent::Closed {
+                reason: CloseReason::Deleted,
+                exit: Some(TermExit {
+                    code: Some(0),
+                    signal: None
+                })
+            })
         );
         assert_eq!(att.next().await, None);
     }
@@ -1617,6 +1752,7 @@ mod tests {
         let err = reg
             .open(
                 "s1",
+                owner(),
                 &w.handle,
                 TermOpenParams {
                     shell: None,
@@ -1645,5 +1781,101 @@ mod tests {
             assert_eq!(info.id.len(), TERMINAL_ID_BYTES * 2);
             assert!(ids.insert(info.id), "终端 id 重复");
         }
+    }
+
+    // -------------------------------------------------------------- 观察者
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: StdMutex<Vec<TerminalClosed>>,
+    }
+
+    impl TerminalObserver for RecordingObserver {
+        fn on_closed(&self, event: &TerminalClosed) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    impl RecordingObserver {
+        fn install(reg: &TerminalRegistry) -> Arc<RecordingObserver> {
+            let obs = Arc::new(RecordingObserver::default());
+            reg.set_observer(obs.clone());
+            obs
+        }
+
+        fn events(&self) -> Vec<TerminalClosed> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    /// 三种非 REST 的关闭（shell 自退、空闲、登出）都要产生恰好一次回调，
+    /// 事件里带原因、归属与退出状态——这是 roadmap/03 §7 审计验收的地基。
+    #[tokio::test]
+    async fn shell_退出_空闲_登出都回调观察者() {
+        let _serial = IN_PROCESS_WORKER.lock().await;
+        let w = FakeWorker::start().await;
+        let reg = registry(4, IDLE_SECS);
+        let obs = RecordingObserver::install(&reg);
+
+        // shell 自行退出（EOF）。
+        let exited = open_one(&reg, &w, "s1").await;
+        let pty = w.pty(reg.get("s1", &exited.id).unwrap().pid());
+        drop(pty);
+        wait_until(|| !obs.events().is_empty(), "EOF 触发回调").await;
+
+        // 空闲回收。
+        let idle = open_one(&reg, &w, "s1").await;
+        tokio::time::sleep(Duration::from_secs(IDLE_SECS) + IDLE_SLACK).await;
+        assert_eq!(reg.sweep_idle().await, 1);
+
+        // 会话登出。
+        let logout = open_one(&reg, &w, "s2").await;
+        assert_eq!(reg.close_all_for("s2", CloseReason::Logout).await, 1);
+
+        let events = obs.events();
+        assert_eq!(events.len(), 3, "每次真正的关闭恰好一次回调");
+        let by_id = |id: &str| {
+            events
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("没有 {id} 的关闭事件"))
+        };
+
+        let e = by_id(&exited.id);
+        assert_eq!(e.reason, CloseReason::Exited);
+        assert_eq!(
+            e.exit,
+            Some(TermExit {
+                code: Some(0),
+                signal: None
+            })
+        );
+        assert_eq!(e.owner, owner());
+        assert_eq!(e.session_hash, "s1");
+
+        assert_eq!(by_id(&idle.id).reason, CloseReason::Idle);
+        assert_eq!(by_id(&logout.id).reason, CloseReason::Logout);
+        assert_eq!(by_id(&logout.id).session_hash, "s2");
+    }
+
+    /// REST 的 DELETE 同样回调（跳不跳过 `deleted` 是宿主的决定，core 只报事实），
+    /// 且幂等裁决输掉的一方不产生第二次回调。
+    #[tokio::test]
+    async fn delete_只回调一次() {
+        let _serial = IN_PROCESS_WORKER.lock().await;
+        let w = FakeWorker::start().await;
+        let reg = registry(4, 1800);
+        let obs = RecordingObserver::install(&reg);
+        let info = open_one(&reg, &w, "s1").await;
+        let term = reg.get("s1", &info.id).unwrap();
+
+        let (a, b) = tokio::join!(
+            reg.finish(&term, CloseReason::Deleted),
+            reg.finish(&term, CloseReason::Exited)
+        );
+        assert!(a ^ b);
+        let events = obs.events();
+        assert_eq!(events.len(), 1, "输掉裁决的一方不得再回调");
+        assert_eq!(events[0].pid, term.pid());
     }
 }

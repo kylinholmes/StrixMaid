@@ -299,11 +299,6 @@ pub struct MetricsConfig {
     /// 落盘保留期预设，默认 `normal`。取值大小写不敏感。
     #[serde(deserialize_with = "deserialize_retention")]
     pub retention: RetentionPreset,
-    /// 是否为每个 CPU 核采集全部 8 个状态（user/nice/system/…）。默认 `false`：
-    /// 每核只保留 `cpu.core.usage` 一条曲线。128 核机器开启后每核 9 条 series，
-    /// 环形缓冲会从约 7MB 涨到约 36MB，而面板上几乎没人看第 97 核的 softirq 历史。
-    #[serde(default)]
-    pub per_core_detail: bool,
 }
 
 impl Default for MetricsConfig {
@@ -312,7 +307,6 @@ impl Default for MetricsConfig {
             interval_secs: 2,
             ring_secs: HOUR,
             retention: RetentionPreset::default(),
-            per_core_detail: false,
         }
     }
 }
@@ -454,6 +448,26 @@ impl TerminalConfig {
     }
 }
 
+/// 文件浏览配置（roadmap/04 §A、design.md Q21）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilesConfig {
+    /// 文件面板允许浏览的根路径列表，默认 `["/"]`。每项必须是绝对路径，
+    /// 列表不能为空。
+    ///
+    /// **它不是安全边界**——文件的可见性由 worker 的 uid 与文件权限裁决——
+    /// 只是文件面板的展示范围。
+    pub allowed_roots: Vec<PathBuf>,
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        FilesConfig {
+            allowed_roots: vec![PathBuf::from("/")],
+        }
+    }
+}
+
 // ===========================================================================
 // 顶层配置
 // ===========================================================================
@@ -494,6 +508,8 @@ pub struct Config {
     pub audit: AuditConfig,
     /// 终端。
     pub terminal: TerminalConfig,
+    /// 文件浏览。
+    pub files: FilesConfig,
 }
 
 impl Default for Config {
@@ -510,6 +526,7 @@ impl Default for Config {
             session: SessionConfig::default(),
             audit: AuditConfig::default(),
             terminal: TerminalConfig::default(),
+            files: FilesConfig::default(),
         }
     }
 }
@@ -520,6 +537,7 @@ impl Config {
     pub const TOP_LEVEL_KEYS: &'static [&'static str] = &[
         "listen",
         "data_dir",
+        "files",
         "run_dir",
         "helper_path",
         "trusted_proxies",
@@ -670,6 +688,24 @@ impl Config {
                 &self.pam_service,
                 "必须是一个合法文件名（对应 /etc/pam.d/<名字>），不能包含 `/` 或 NUL，也不能是 `.` / `..`",
             ));
+        }
+
+        // --- 文件浏览 ---
+        if self.files.allowed_roots.is_empty() {
+            errors.push(FieldError::new(
+                "files.allowed_roots",
+                "<空>",
+                "至少要有一个根路径（默认 [\"/\"]）；想隐藏文件面板不该用空列表表达",
+            ));
+        }
+        for root in &self.files.allowed_roots {
+            if !root.is_absolute() {
+                errors.push(FieldError::new(
+                    "files.allowed_roots",
+                    root.display().to_string(),
+                    "每项都必须是绝对路径",
+                ));
+            }
         }
 
         // --- 指标 ---
@@ -937,14 +973,9 @@ ring_secs = 3600
 #   m_12h   43200s   90 天    90 天
 #   m_1d    86400s   1 年     1 年
 #
-# 以一台 16 核 / 4 盘 / 2 网卡（约 200 条 series）的机器估算：
-#   less   约 35MB，normal 约 100MB（含索引）。
+# 以一台 16 核 / 4 盘 / 2 网卡 / 3 挂载点 / 1 GPU（约 71 条 series）的机器估算
+# （roadmap/08 §4.5）：less 约 12MB，normal 约 35MB（含索引）。
 retention = "normal"
-
-# 是否为每个 CPU 核采集全部 8 个状态（user / nice / system / idle / iowait / irq / softirq / steal）。
-# 关闭时每核只保留一条利用率曲线 `cpu.core.usage`。
-# 128 核机器开启后环形缓冲约 36MB（关闭约 7MB），排查单核 softirq / steal 时再打开。
-per_core_detail = false
 
 [session]
 # 会话空闲超时（秒）。900 = 15 分钟。
@@ -972,6 +1003,11 @@ elevate_groups = ["sudo", "wheel", "admin"]
 # 允许 7 – 3650。下限是一周：审计要用于事后追查，而「事后」往往是几天之后
 # 才有人发现异常，保留期短于一周基本等于没有。
 retention_days = 90
+
+[files]
+# 文件面板允许浏览的根路径（绝对路径，列表不能为空）。
+# 这不是安全边界——文件可见性由登录用户的文件权限裁决——只是界面的展示范围。
+allowed_roots = ["/"]
 "#;
 
 // ===========================================================================

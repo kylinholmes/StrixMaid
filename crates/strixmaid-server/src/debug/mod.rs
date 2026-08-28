@@ -34,6 +34,10 @@ use crate::assets::gzipped;
 /// 页面本体。内联 CSS/JS，因此只有这一个 HTML 文件。
 const PAGE: &str = include_str!("page.html");
 
+/// 性能面板（roadmap/08 §6–§8），由样稿实时化而来。内联 CSS/JS，uPlot 复用
+/// `/debug/vendor/uplot.js` 无关——它自带内联 uPlot。与 `/debug` 同 cfg 门控。
+const PERF: &str = include_str!("perf.html");
+
 /// uPlot 运行时（v1.6.32，gzip）。来源与升级步骤见 `README.md`。
 const UPLOT_JS_GZ: &[u8] = include_bytes!("vendor/uplot.iife.min.js.gz");
 /// uPlot 样式（v1.6.32，gzip）。
@@ -58,11 +62,25 @@ pub fn attach<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> 
     router
         .route("/debug", get(page))
         .route("/debug/vendor/{file}", get(vendor))
+        .route("/perf", get(perf))
 }
 
 /// `/` 的重定向目标。debug 构建下根路径 302 到这里（`design.md` §12.1）。
 pub async fn index_redirect() -> Redirect {
     Redirect::temporary("/debug")
+}
+
+/// 性能面板。同 [`page`] 的 no-store 语义。
+async fn perf() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        PERF,
+    )
+        .into_response()
 }
 
 /// 页面。`no-store`——开发期改一行就要看到效果，缓存只会碍事。
@@ -104,6 +122,13 @@ mod tests {
         // 唯一允许的外部引用是本地 vendor 路径；不能有任何 CDN / 外部域名，
         // 目标机器可能没有外网（design.md §12.1 对 Scalar 的要求同理）。
         assert!(!PAGE.contains("http://"), "页面里不该有明文 http 外链");
+        // 性能面板同样必须自包含（CSP 禁外部请求）。github 归属注释里的 URL 除外。
+        for host in ["fonts.googleapis", "cdn.", "unpkg", "jsdelivr"] {
+            assert!(!PERF.contains(host), "perf.html 引用了外部资源：{host}");
+        }
+        assert!(PERF.contains("id=\"rail\"") && PERF.contains("id=\"detail\""));
+        // §6.7 修正必须在位：成员格不画 PSI 压力带。
+        assert!(PERF.contains("function psiIoOf"));
         for host in ["cdn.", "unpkg", "googleapis", "jsdelivr"] {
             assert!(!PAGE.contains(host), "页面引用了外部资源：{host}");
         }

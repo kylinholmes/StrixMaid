@@ -1,7 +1,11 @@
-//! 网络：`/proc/net/dev` 差分 → 每接口的字节 / 包 / 错误 / 丢包速率。
+//! 网络：`/proc/net/dev` 差分 → 每接口的收发吞吐与异常包速率。
 //!
 //! 排除 `lo`；也排除 `veth*`——容器每起一个就多一对、名字随机，既撑大 series 表
 //! 又没有观测价值（容器侧流量看宿主网桥即可）。
+//!
+//! 产出按 roadmap/08 §4.2 裁剪为 3 条：包速率不采（唯一用途是除出平均包长判断
+//! 小包攻击，那是抓包该干的事）；`net.errors` 是**收发错误与收发丢包四个计数
+//! 之和**——它们平时全零、出事一起涨，回答的是同一个问题。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -97,27 +101,25 @@ impl NetCollector {
                 && let Some(p) = self.prev.get(&d.iface)
             {
                 let iface = sanitize_label(&d.iface);
-                let pairs = [
-                    (cat::NET_RX_BYTES, p.rx_bytes, d.rx_bytes),
-                    (cat::NET_TX_BYTES, p.tx_bytes, d.tx_bytes),
-                    (cat::NET_RX_PACKETS, p.rx_packets, d.rx_packets),
-                    (cat::NET_TX_PACKETS, p.tx_packets, d.tx_packets),
-                    (cat::NET_RX_ERRORS, p.rx_errors, d.rx_errors),
-                    (cat::NET_TX_ERRORS, p.tx_errors, d.tx_errors),
-                    (cat::NET_RX_DROPS, p.rx_drops, d.rx_drops),
-                    (cat::NET_TX_DROPS, p.tx_drops, d.tx_drops),
-                ];
+                let rx = rate(p.rx_bytes, d.rx_bytes, secs);
+                let tx = rate(p.tx_bytes, d.tx_bytes, secs);
+                // 合并项（roadmap/08 §4.2）：四个异常计数之和。
+                let errors = [
+                    (p.rx_errors, d.rx_errors),
+                    (p.tx_errors, d.tx_errors),
+                    (p.rx_drops, d.rx_drops),
+                    (p.tx_drops, d.tx_drops),
+                ]
+                .iter()
+                .map(|(a, b)| rate(*a, *b, secs))
+                .try_fold(0.0, |acc, r| r.map(|v| acc + v));
                 // 任一计数器回退说明接口被重建，整组跳过。
-                let rates: Option<Vec<(&'static str, f64)>> = pairs
-                    .iter()
-                    .map(|(m, a, b)| rate(*a, *b, secs).map(|r| (*m, r)))
-                    .collect();
-                if let Some(rates) = rates {
-                    out.extend(
-                        rates
-                            .into_iter()
-                            .map(|(m, v)| Sample::labeled(m, label::IFACE, iface.clone(), v)),
-                    );
+                if let (Some(rx), Some(tx), Some(errors)) = (rx, tx, errors) {
+                    out.extend([
+                        Sample::labeled(cat::NET_RX_BYTES, label::IFACE, iface.clone(), rx),
+                        Sample::labeled(cat::NET_TX_BYTES, label::IFACE, iface.clone(), tx),
+                        Sample::labeled(cat::NET_ERRORS, label::IFACE, iface, errors),
+                    ]);
                 }
             }
             next.insert(d.iface.clone(), d);
@@ -179,13 +181,13 @@ veth1a:  200  2 0 0 0 0 0 0  200  2 0 0 0 0 0 0
             out.iter().all(|s| s.labels[0].1 == "eth0"),
             "lo 与 veth 被过滤: {out:?}"
         );
-        assert_eq!(out.len(), 8);
+        assert_eq!(out.len(), 3);
         let get = |m: &str| out.iter().find(|s| s.metric == m).unwrap().value;
         assert_eq!(get(cat::NET_RX_BYTES), 2000.0);
         assert_eq!(get(cat::NET_TX_BYTES), 800.0);
-        assert_eq!(get(cat::NET_RX_ERRORS), 0.4);
-        assert_eq!(get(cat::NET_TX_DROPS), 0.8);
-        assert_eq!(get(cat::NET_RX_DROPS), 0.0);
+        // 合并项的算术（roadmap/08 §10）：rx_err +2、tx_err +0、rx_drop +0、
+        // tx_drop +4，共 6 个异常包 / 5 秒。
+        assert!((get(cat::NET_ERRORS) - 1.2).abs() < 1e-9);
 
         // 计数器回退（接口重建）→ 该接口本轮无样本
         let out = c.ingest(parse_net_dev(A), t0 + Duration::from_secs(10));

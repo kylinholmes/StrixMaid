@@ -1,4 +1,10 @@
-//! CPU：`/proc/stat` 的 `cpu` / `cpuN` 行 → 总 + 每核的 8 态百分比（两轮差分）。
+//! CPU：`/proc/stat` 的 `cpu` / `cpuN` 行 → 总量 5 项 + 每核 usage（两轮差分）。
+//!
+//! 产出按 roadmap/08 §4.2 裁剪：总量只留 usage / system / iowait / irq / steal，
+//! 其中 `cpu.irq` 是**硬中断与软中断之和**；被裁的档位（idle、user + nice）是
+//! 派生量，前端按「各档之和恒为 100」的恒等式还原。每核只产出 `cpu.core.usage`。
+//! [`percent_between`] 仍然算全 8 态——差分是纯函数，裁剪只发生在
+//! [`CpuCollector::ingest`] 的产出处。
 //!
 //! `/proc/stat` 的列：`user nice system idle iowait irq softirq steal guest guest_nice`
 //! （单位 jiffies）。内核把 `guest` 计在 `user` 里、`guest_nice` 计在 `nice` 里，
@@ -143,9 +149,6 @@ pub fn percent_between(prev: &CpuTimes, cur: &CpuTimes) -> Option<CpuPercent> {
 /// CPU 采集器。
 pub struct CpuCollector {
     prev: Option<CpuStat>,
-    /// 每核是否也产出 8 态（默认开，对应 design.md §7.1「总 + 每核」）。
-    /// 关掉后每核只剩 `cpu.core.usage`，大核数机器可借此把 series 数砍到 1/9。
-    per_core_states: bool,
     path: PathBuf,
 }
 
@@ -160,16 +163,8 @@ impl CpuCollector {
     pub fn new() -> Self {
         CpuCollector {
             prev: None,
-            per_core_states: true,
             path: PathBuf::from(STAT_PATH),
         }
-    }
-
-    /// 是否为每个核产出全部 8 态。
-    #[must_use]
-    pub fn per_core_states(mut self, on: bool) -> Self {
-        self.per_core_states = on;
-        self
     }
 
     /// 改读别的文件（测试用）。
@@ -186,13 +181,11 @@ impl CpuCollector {
             if let Some(p) = percent_between(&prev.total, &stat.total) {
                 out.extend([
                     Sample::new(cat::CPU_USAGE, p.usage),
-                    Sample::new(cat::CPU_USER, p.user),
-                    Sample::new(cat::CPU_NICE, p.nice),
                     Sample::new(cat::CPU_SYSTEM, p.system),
-                    Sample::new(cat::CPU_IDLE, p.idle),
                     Sample::new(cat::CPU_IOWAIT, p.iowait),
-                    Sample::new(cat::CPU_IRQ, p.irq),
-                    Sample::new(cat::CPU_SOFTIRQ, p.softirq),
+                    // 合并项（roadmap/08 §4.2）：硬 / 软中断要分开看的场合只有
+                    // 网卡多队列调优，那时该上 perf。
+                    Sample::new(cat::CPU_IRQ, p.irq + p.softirq),
                     Sample::new(cat::CPU_STEAL, p.steal),
                 ]);
             }
@@ -208,21 +201,12 @@ impl CpuCollector {
                 let Some(p) = percent_between(prev_times, cur) else {
                     continue;
                 };
-                let core = idx.to_string();
-                let s = |metric, v| Sample::labeled(metric, label::CORE, core.clone(), v);
-                out.push(s(cat::CPU_CORE_USAGE, p.usage));
-                if self.per_core_states {
-                    out.extend([
-                        s(cat::CPU_CORE_USER, p.user),
-                        s(cat::CPU_CORE_NICE, p.nice),
-                        s(cat::CPU_CORE_SYSTEM, p.system),
-                        s(cat::CPU_CORE_IDLE, p.idle),
-                        s(cat::CPU_CORE_IOWAIT, p.iowait),
-                        s(cat::CPU_CORE_IRQ, p.irq),
-                        s(cat::CPU_CORE_SOFTIRQ, p.softirq),
-                        s(cat::CPU_CORE_STEAL, p.steal),
-                    ]);
-                }
+                out.push(Sample::labeled(
+                    cat::CPU_CORE_USAGE,
+                    label::CORE,
+                    idx.to_string(),
+                    p.usage,
+                ));
             }
         }
         self.prev = Some(stat);
@@ -333,8 +317,8 @@ intr 12345 0 0
             "第一轮无基线"
         );
         let out = c.ingest(parse_stat(SAMPLE_B).unwrap());
-        // 总 9 + 每核 9 × 2
-        assert_eq!(out.len(), 9 + 18);
+        // 总 5 + 每核 usage × 2（roadmap/08 §4.2）
+        assert_eq!(out.len(), 5 + 2);
         let core1 = out
             .iter()
             .find(|s| {
@@ -342,10 +326,18 @@ intr 12345 0 0
             })
             .expect("cpu1 的 usage");
         assert!(core1.value > 0.0 && core1.value <= 100.0);
+        assert!(
+            !out.iter().any(|s| s.metric != cat::CPU_CORE_USAGE && !s.labels.is_empty()),
+            "每核只剩 usage 一条：{out:?}"
+        );
 
-        let mut lean = CpuCollector::new().per_core_states(false);
-        lean.ingest(parse_stat(SAMPLE_A).unwrap());
-        assert_eq!(lean.ingest(parse_stat(SAMPLE_B).unwrap()).len(), 9 + 2);
+        // 合并项的算术（roadmap/08 §10）：差分 irq 0 + softirq 10，总 1100 jiffies。
+        let irq = out.iter().find(|s| s.metric == cat::CPU_IRQ).expect("cpu.irq");
+        assert!(
+            (irq.value - 10.0 * 100.0 / 1100.0).abs() < 1e-9,
+            "cpu.irq 必须是硬 + 软中断之和，实际 {}",
+            irq.value
+        );
     }
 
     #[test]
@@ -361,18 +353,11 @@ intr 12345 0 0
                 .map(|s| s.value)
                 .expect(m)
         };
-        let states = [
-            cat::CPU_USER,
-            cat::CPU_NICE,
-            cat::CPU_SYSTEM,
-            cat::CPU_IDLE,
-            cat::CPU_IOWAIT,
-            cat::CPU_IRQ,
-            cat::CPU_SOFTIRQ,
-            cat::CPU_STEAL,
-        ];
-        let sum: f64 = states.iter().map(|m| get(m)).sum();
-        assert!((sum - 100.0).abs() < 0.5, "8 态之和 ≈ 100，实际 {sum}");
+        // 总量 5 条都在，且 usage 不小于 system（usage 涵盖全部非空闲时间）。
+        assert!(get(cat::CPU_USAGE) + 1e-6 >= get(cat::CPU_SYSTEM));
+        for m in [cat::CPU_IOWAIT, cat::CPU_IRQ, cat::CPU_STEAL] {
+            get(m);
+        }
         for s in &out {
             assert!(
                 (0.0..=100.0).contains(&s.value),

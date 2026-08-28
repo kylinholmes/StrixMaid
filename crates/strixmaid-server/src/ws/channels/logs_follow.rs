@@ -25,10 +25,9 @@ use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 use serde_json::Value;
-use strixmaid_core::session::Session;
 use strixmaid_types::log::LogQuery;
 use strixmaid_types::ws::WsChannel;
-use strixmaid_types::{ApiError, ErrorCode, rpc};
+use strixmaid_types::{ApiError, rpc};
 
 use crate::auth::AuthState;
 use crate::ws::hub::{ChannelEvent, ChannelSource, ChannelStream, SubscribeContext};
@@ -71,7 +70,12 @@ impl ChannelSource for LogsFollow {
         let auth = Arc::clone(&self.auth);
         let session = ctx.session.clone();
         let rx = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(open(&auth, &session, params))
+            tokio::runtime::Handle::current().block_on(super::worker_subscribe(
+                &auth,
+                &session,
+                rpc::LOG_FOLLOW,
+                params,
+            ))
         })?;
 
         // 每一项是 worker 送来的一批 `LogEntry`，原样当作一帧 `data`。
@@ -82,23 +86,3 @@ impl ChannelSource for LogsFollow {
     }
 }
 
-/// 取该会话的 user worker 并发起订阅。
-async fn open(
-    auth: &AuthState,
-    session: &Session,
-    params: Value,
-) -> Result<tokio::sync::mpsc::Receiver<Value>, ApiError> {
-    // worker 不在 = 会话的执行者已经没了。与 `auth::exec::call` 同一判断：
-    // 这不是「没权限」，是「没人能替你执行」，因此报 401 让客户端重新登录。
-    let worker = auth
-        .sessions
-        .user_worker(&session.token_hash)
-        .await
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Unauthenticated,
-                "会话的 worker 已退出，请重新登录",
-            )
-        })?;
-    worker.subscribe(rpc::LOG_FOLLOW, params).await
-}

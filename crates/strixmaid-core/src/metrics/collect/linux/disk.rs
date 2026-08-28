@@ -1,5 +1,9 @@
 //! 磁盘：`/proc/diskstats` 差分 → 每个**整盘**的吞吐 / IOPS / util% / await。
 //!
+//! `disk.iops` 是**读写合计**（roadmap/08 §4.2）：方向已由两条 bytes 给出，
+//! IOPS 在面板上只回答「打满的是大 IO 还是小 IO」。[`rates_between`] 仍分别
+//! 算读写，合并只在 [`DiskCollector::ingest`] 的产出处。
+//!
 //! `/proc/diskstats` 每行：`major minor name` 后接 11 个累计计数
 //! （新内核再追加 discard / flush 各若干列，本采集器不用）：
 //!
@@ -207,8 +211,8 @@ impl DiskCollector {
                 out.extend([
                     mk(cat::DISK_READ_BYTES, r.read_bytes),
                     mk(cat::DISK_WRITE_BYTES, r.write_bytes),
-                    mk(cat::DISK_READ_IOPS, r.read_iops),
-                    mk(cat::DISK_WRITE_IOPS, r.write_iops),
+                    // 合并项（roadmap/08 §4.2）。
+                    mk(cat::DISK_IOPS, r.read_iops + r.write_iops),
                     mk(cat::DISK_UTIL, r.util),
                     mk(cat::DISK_AWAIT, r.await_ms),
                 ]);
@@ -330,7 +334,13 @@ mod tests {
             HashSet::from(["nvme0n1".to_string(), "sda".to_string()]),
             "loop 与分区被过滤"
         );
-        assert_eq!(out.len(), 12);
+        assert_eq!(out.len(), 10);
+        // 合并项的算术（roadmap/08 §10）：nvme0n1 读 50 + 写 150 IOPS。
+        let iops = out
+            .iter()
+            .find(|s| s.metric == cat::DISK_IOPS && s.labels[0].1 == "nvme0n1")
+            .expect("disk.iops");
+        assert!((iops.value - 200.0).abs() < 1e-9, "读写合计，实际 {}", iops.value);
 
         // 用 /sys/block 列表时以列表为准
         let mut c = DiskCollector::new();

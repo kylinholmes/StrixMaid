@@ -279,6 +279,7 @@ mod tests {
             inodes_total: inodes.map(|i| i.0),
             inodes_used: inodes.map(|i| i.1),
             read_only: ro,
+            backing_dev: None,
         }
     }
 

@@ -133,11 +133,7 @@ impl MetricsEngine {
     ///
     /// `store` 为 `None` 时只保留内存环，不落盘（测试或无盘场景）。
     pub fn start(cfg: &MetricsConfig, store: Option<Store>) -> MetricsEngine {
-        Self::start_with(
-            SchedulerConfig::from_metrics(cfg),
-            store,
-            default_collectors(cfg.per_core_detail),
-        )
+        Self::start_with(SchedulerConfig::from_metrics(cfg), store, default_collectors())
     }
 
     /// 同上，但自定义调度参数与采集器集合。
@@ -299,6 +295,21 @@ impl MetricsEngine {
             _ => div_ceil(span, DEFAULT_TARGET_POINTS).max(1),
         };
 
+        // 非本机节点没有内存环（roadmap/05 §3.3），一律走落盘层——`live` 在
+        // 选层时被跳过，step 再小也如此。
+        if let Some(node) = q.node.as_deref()
+            && node != self.inner.shared.cfg.node
+        {
+            let store = self.inner.store.as_ref().ok_or_else(|| {
+                ApiError::invalid_request(format!(
+                    "节点 {node} 的数据只在落盘层，当前实例未配置落盘"
+                ))
+            })?;
+            return self
+                .query_store(store, node, &selectors, q.from, q.to, step)
+                .await;
+        }
+
         let shared = &self.inner.shared;
         let now = now_unix();
         // 环覆盖 from：环里确实有这么早的数据，且没被覆盖掉。
@@ -316,7 +327,8 @@ impl MetricsEngine {
             .store
             .as_ref()
             .expect("use_live 为假时必有 store");
-        self.query_store(store, &selectors, q.from, q.to, step)
+        let node = self.inner.shared.cfg.node.clone();
+        self.query_store(store, &node, &selectors, q.from, q.to, step)
             .await
     }
 
@@ -382,10 +394,12 @@ impl MetricsEngine {
         }
     }
 
-    /// 走落盘数据，[`Store::query`] 自动选层。
+    /// 走落盘数据，[`Store::query`] 自动选层。`node` 决定名字型选择器解析到
+    /// 哪个节点的 series；数字 id 型选择器不经解析、按调用方给的用。
     async fn query_store(
         &self,
         store: &Store,
+        node: &str,
         selectors: &[Selector],
         from: i64,
         to: i64,
@@ -394,7 +408,6 @@ impl MetricsEngine {
         let internal = |what: &str, e: crate::store::StoreError| {
             ApiError::internal(what.to_owned()).with_detail(e.to_string())
         };
-        let node = self.inner.shared.cfg.node.as_str();
         let mut ids: Vec<i64> = Vec::with_capacity(selectors.len());
         for sel in selectors {
             let id = match sel {
@@ -580,6 +593,7 @@ mod tests {
                 from: start,
                 to: now,
                 step: Some(2),
+                node: None,
             })
             .await
             .unwrap();
@@ -597,6 +611,7 @@ mod tests {
                 from: start,
                 to: now,
                 step: Some(10),
+                node: None,
             })
             .await
             .unwrap();
@@ -612,6 +627,7 @@ mod tests {
                 from: start,
                 to: now,
                 step: Some(3),
+                node: None,
             })
             .await
             .unwrap();
@@ -661,6 +677,7 @@ mod tests {
                 from: now - 120,
                 to: now,
                 step: Some(2),
+                node: None,
             })
             .await
             .unwrap();
@@ -682,6 +699,7 @@ mod tests {
                 from: start,
                 to: now,
                 step: Some(60),
+                node: None,
             })
             .await
             .unwrap();
@@ -706,6 +724,7 @@ mod tests {
                 from: now - 7200,
                 to: now,
                 step: Some(2),
+                node: None,
             })
             .await
             .unwrap();
@@ -719,6 +738,7 @@ mod tests {
                 from: start,
                 to: now,
                 step: Some(60),
+                node: None,
             })
             .await
             .unwrap();
@@ -736,7 +756,8 @@ mod tests {
                     series: "test.value".into(),
                     from: 10,
                     to: 5,
-                    step: None
+                    step: None,
+                    node: None,
                 })
                 .await
                 .is_err()
@@ -747,17 +768,73 @@ mod tests {
                     series: String::new(),
                     from: 0,
                     to: 5,
-                    step: None
+                    step: None,
+                    node: None,
                 })
                 .await
                 .is_err()
         );
     }
 
+    #[tokio::test]
+    async fn 非本机节点的查询走落盘层() {
+        let store = Store::open_in_memory().await.unwrap();
+        let id = store
+            .get_or_create_series("web-01", "cpu.usage", &[], Some("percent"))
+            .await
+            .unwrap();
+        store
+            .insert_1m(&[crate::store::MetricRow {
+                series_id: id,
+                ts: 60,
+                cnt: 1,
+                min: 1.0,
+                max: 1.0,
+                sum: 1.0,
+                med: 1.0,
+            }])
+            .await
+            .unwrap();
+        let (engine, _s, _rx) = MetricsEngine::build(
+            test_config(),
+            Some(store),
+            vec![Box::new(SeqCollector::new())],
+        );
+
+        // step 再小也不走 live：非本机节点没有环。
+        let resp = engine
+            .query(&MetricQuery {
+                series: "cpu.usage".into(),
+                from: 0,
+                to: 300,
+                step: Some(2),
+                node: Some("web-01".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.layer, MetricLayer::M1m);
+        assert_eq!(resp.series.len(), 1);
+        assert_eq!(resp.series[0].meta.node, "web-01");
+        assert_eq!(resp.series[0].points.len(), 1);
+
+        // 名字解析按节点隔离：local 没有这条 series。
+        let resp = engine
+            .query(&MetricQuery {
+                series: "cpu.usage".into(),
+                from: 0,
+                to: 300,
+                step: Some(60),
+                node: Some("local".into()),
+            })
+            .await
+            .unwrap();
+        assert!(resp.series.is_empty());
+    }
+
     /// 本机真实采集两轮，打印样本数 / 耗时 / 环内存（`--nocapture` 可见），并做基本断言。
     #[tokio::test]
     async fn 本机一轮采集统计() {
-        let (engine, mut s, _rx) = MetricsEngine::build(test_config(), None, default_collectors(true));
+        let (engine, mut s, _rx) = MetricsEngine::build(test_config(), None, default_collectors());
         let now = now_unix();
         let t0 = Instant::now();
         s.tick(now - 2, t0).await.unwrap();

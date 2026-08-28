@@ -1,4 +1,9 @@
-//! 文件系统：`/proc/self/mounts` + `statvfs` → 每挂载点的空间与 inode。
+//! 文件系统：`/proc/self/mounts` + `statvfs` → 每挂载点的空间用量。
+//!
+//! 时序库里只有 `fs.used` / `fs.total` 两条（roadmap/08 §4.2）：使用率是派生量
+//! （前端做一次除法），inode 是慢变量，走健康检查 `disk.inodes`
+//! （`providers/system/health.rs`）而不是曲线。[`FsUsage`] 仍保留 inode 字段与
+//! [`FsUsage::usage_percent`]——那是 `statvfs` 口径的唯一定义处，健康检查同源。
 //!
 //! 过滤规则（参考 node_exporter 的默认排除表并加上本项目的取舍）：
 //!
@@ -219,12 +224,6 @@ impl FsUsage {
         vec![
             mk(cat::FS_USED, self.used() as f64),
             mk(cat::FS_TOTAL, self.total as f64),
-            mk(cat::FS_USAGE, self.usage_percent()),
-            mk(
-                cat::FS_INODES_USED,
-                self.inodes_total.saturating_sub(self.inodes_free) as f64,
-            ),
-            mk(cat::FS_INODES_TOTAL, self.inodes_total as f64),
         ]
     }
 }
@@ -341,8 +340,9 @@ sshfs#u@h:/ /mnt/ssh fuse.sshfs rw 0 0
         // 700 / (700 + 200)
         assert!((u.usage_percent() - 700.0 / 9.0).abs() < 1e-9);
         let s = u.samples("/");
-        assert_eq!(s.len(), 5);
-        assert_eq!(s[3].value, 40.0);
+        assert_eq!(s.len(), 2, "只有 used 与 total 两条曲线");
+        assert_eq!(s[0].value, 700.0);
+        assert_eq!(s[1].value, 1000.0);
         assert_eq!(
             FsUsage {
                 total: 0,
@@ -371,11 +371,7 @@ sshfs#u@h:/ /mnt/ssh fuse.sshfs rw 0 0
                     .value
             };
             assert!(get(cat::FS_USED) <= get(cat::FS_TOTAL), "{mp}");
-            assert!((0.0..=100.0).contains(&get(cat::FS_USAGE)), "{mp}");
-            assert!(
-                get(cat::FS_INODES_USED) <= get(cat::FS_INODES_TOTAL),
-                "{mp}"
-            );
+            assert!(get(cat::FS_TOTAL) > 0.0, "{mp}");
         }
     }
 }

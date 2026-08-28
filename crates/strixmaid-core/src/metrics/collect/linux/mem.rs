@@ -1,4 +1,8 @@
 //! 内存：`/proc/meminfo`。全部换算成字节。
+//!
+//! 产出按 roadmap/08 §4.2 裁剪为 6 条；`mem.cached` 是 **Cached + Buffers 之和**，
+//! `mem.free` / `mem.dirty` / `mem.swap_free` 不再入库（free 对 Linux 是误导数字，
+//! swap_free 是派生量，dirty 属写回排障的深水区——psi.io 叫得更早）。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,14 +47,12 @@ pub fn samples_from(info: &HashMap<&str, u64>) -> Option<Vec<Sample>> {
     let swap_free = get("SwapFree").unwrap_or(0);
     Some(vec![
         Sample::new(cat::MEM_TOTAL, total as f64),
-        Sample::new(cat::MEM_AVAILABLE, available as f64),
         Sample::new(cat::MEM_USED, total.saturating_sub(available) as f64),
-        Sample::new(cat::MEM_FREE, free as f64),
-        Sample::new(cat::MEM_BUFFERS, buffers as f64),
-        Sample::new(cat::MEM_CACHED, cached as f64),
-        Sample::new(cat::MEM_DIRTY, get("Dirty").unwrap_or(0) as f64),
+        Sample::new(cat::MEM_AVAILABLE, available as f64),
+        // 合并项（roadmap/08 §4.2）：现代内核里 Buffers 是页缓存的一小块，
+        // 单列不产生决策差异。
+        Sample::new(cat::MEM_CACHED, cached.saturating_add(buffers) as f64),
         Sample::new(cat::MEM_SWAP_TOTAL, swap_total as f64),
-        Sample::new(cat::MEM_SWAP_FREE, swap_free as f64),
         Sample::new(
             cat::MEM_SWAP_USED,
             swap_total.saturating_sub(swap_free) as f64,
@@ -113,10 +115,12 @@ HugePages_Total:       0
         assert_eq!(m["MemTotal"], 1_024_000);
         assert_eq!(m["HugePages_Total"], 0);
         let s = samples_from(&m).unwrap();
+        assert_eq!(s.len(), 6);
         let get = |k: &str| s.iter().find(|x| x.metric == k).unwrap().value;
         assert_eq!(get(cat::MEM_USED), (1000 - 600) as f64 * 1024.0);
         assert_eq!(get(cat::MEM_SWAP_USED), 50.0 * 1024.0);
-        assert_eq!(get(cat::MEM_DIRTY), 8.0 * 1024.0);
+        // 合并项的算术（roadmap/08 §10）：Cached 400 + Buffers 50。
+        assert_eq!(get(cat::MEM_CACHED), (400 + 50) as f64 * 1024.0);
     }
 
     #[test]
@@ -140,8 +144,7 @@ HugePages_Total:       0
         let get = |k: &str| out.iter().find(|x| x.metric == k).unwrap().value;
         assert!(get(cat::MEM_TOTAL) > 0.0);
         assert!(get(cat::MEM_AVAILABLE) <= get(cat::MEM_TOTAL));
-        assert!(get(cat::MEM_FREE) <= get(cat::MEM_TOTAL));
-        assert!(get(cat::MEM_SWAP_FREE) <= get(cat::MEM_SWAP_TOTAL));
+        assert!(get(cat::MEM_SWAP_USED) <= get(cat::MEM_SWAP_TOTAL));
         assert_eq!(
             get(cat::MEM_USED),
             get(cat::MEM_TOTAL) - get(cat::MEM_AVAILABLE)

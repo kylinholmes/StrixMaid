@@ -9,7 +9,8 @@
 use utoipa::OpenApi;
 
 use crate::{
-    audit, auth, capability, error, file, log, metrics, process, service, system, terminal, ws,
+    agent, audit, auth, capability, error, file, log, metrics, process, service, system, terminal,
+    ws,
 };
 
 #[derive(OpenApi)]
@@ -35,6 +36,10 @@ use crate::{
     system::MemoryInfo,
     system::DiskInfo,
     system::FilesystemInfo,
+    system::CpuPackage,
+    system::GpuSource,
+    system::GpuInfo,
+    system::NetInfo,
     system::HealthSeverity,
     system::HealthReport,
     system::HealthItem,
@@ -82,6 +87,7 @@ use crate::{
     metrics::MetricSnapshot,
     metrics::MetricValue,
     metrics::SeriesListQuery,
+    metrics::SnapshotQuery,
     terminal::CreateTerminalReq,
     terminal::CreateTerminalResp,
     terminal::TerminalInfo,
@@ -93,6 +99,9 @@ use crate::{
     audit::AuditEntry,
     audit::AuditQuery,
     audit::AuditPage,
+    agent::NodeInfo,
+    agent::CreateNodeReq,
+    agent::CreateNodeResp,
     file::FileKind,
     file::FilePathQuery,
     file::DirEntryInfo,
@@ -106,10 +115,10 @@ struct AllSchemas;
 fn every_type_enters_the_spec() {
     let doc = AllSchemas::openapi();
     let components = doc.components.as_ref().expect("components 应存在");
-    // 登记了 84 个类型；数量对不上说明有同名类型互相覆盖，会静默丢失 schema。
+    // 登记了 92 个类型；数量对不上说明有同名类型互相覆盖，会静默丢失 schema。
     assert_eq!(
         components.schemas.len(),
-        84,
+        92,
         "schema 数量与登记数量不一致，说明有重名覆盖：{:?}",
         components.schemas.keys().collect::<Vec<_>>()
     );
@@ -129,6 +138,7 @@ fn query_types_are_into_params() {
     assert_into_params::<process::ProcessListQuery>();
     assert_into_params::<metrics::MetricQuery>();
     assert_into_params::<metrics::SeriesListQuery>();
+    assert_into_params::<metrics::SnapshotQuery>();
     assert_into_params::<audit::AuditQuery>();
     assert_into_params::<file::FilePathQuery>();
 }

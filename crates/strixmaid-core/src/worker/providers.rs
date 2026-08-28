@@ -29,6 +29,7 @@
 //! 主进程共用一个实例的表现一致，只是「第一次」的粒度从进程变成了会话。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
@@ -39,6 +40,7 @@ use strixmaid_types::rpc;
 use strixmaid_types::{ApiError, ApiResult};
 
 use super::Dispatcher;
+use crate::providers::fs::FsProvider;
 use crate::providers::log::{LogProvider, pick_log_provider};
 use crate::providers::process::ProcProvider;
 use crate::providers::service::{ServiceProvider, pick_service_provider};
@@ -53,6 +55,7 @@ pub async fn default_dispatcher() -> Dispatcher {
     register_proc(&mut d);
     register_service(&mut d, pick_service_provider().await);
     register_log(&mut d, pick_log_provider().await);
+    register_fs(&mut d);
     register_caps(&mut d);
     // 终端不是 provider：它没有「本机可不可用」的问题（PTY 是内核基本功能），
     // 也没有可替换的后端，因此直接由 `worker::terminal` 自己挂进来。
@@ -166,12 +169,50 @@ fn register_proc(d: &mut Dispatcher) {
         }
     });
 
+    let p = proc.clone();
     d.register_fn(rpc::PROC_RENICE, move |v| {
-        let p = proc.clone();
+        let p = p.clone();
         async move {
             let q: rpc::ReniceParams = params(rpc::PROC_RENICE, v)?;
             p.renice(q.pid, q.nice)?;
             result(())
+        }
+    });
+
+    // `proc.live` 是订阅：按间隔全量推进程列表（roadmap/04 §B.3）。
+    // 边界校验与缺省回填在主进程侧（`ws/channels/processes_live.rs`），那里才能
+    // 带着订阅方的 `id` 回 `err`；worker 对收到的值只做使用不做复核。
+    d.register_stream(rpc::PROC_LIVE, move |v| {
+        let p = proc.clone();
+        async move {
+            let q: rpc::ProcLiveParams = optional_params(rpc::PROC_LIVE, v)?;
+            let interval = Duration::from_secs(
+                q.interval_secs.unwrap_or(rpc::PROC_LIVE_DEFAULT_INTERVAL_SECS),
+            );
+            let limit = q.limit.unwrap_or(rpc::PROC_LIVE_DEFAULT_LIMIT);
+            let ticker = tokio::time::interval(interval);
+            Ok(stream::unfold(
+                (p, q.query, ticker, limit),
+                |(p, query, mut ticker, limit)| async move {
+                    // `interval` 的第一个 tick 立即到期：订阅后马上有首帧。
+                    ticker.tick().await;
+                    let mut list = match p.list(query.clone()).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "proc.live 一轮列表失败，流结束");
+                            return None;
+                        }
+                    };
+                    list.truncate(limit);
+                    match serde_json::to_value(&list) {
+                        Ok(frame) => Some((frame, (p, query, ticker, limit))),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "proc.live 帧序列化失败，流结束");
+                            None
+                        }
+                    }
+                },
+            ))
         }
     });
 }
@@ -287,6 +328,34 @@ fn register_log(d: &mut Dispatcher, provider: Option<Arc<dyn LogProvider>>) {
 }
 
 // ---------------------------------------------------------------------------
+// fs
+// ---------------------------------------------------------------------------
+
+/// 只读文件浏览（roadmap/04 §A）。权限由文件系统按 worker 的 uid 裁决；
+/// `allowed_roots` 随调用下发（`rpc::FsParams` 的文档解释了为什么不用
+/// 一次性的 Configure 帧）。
+fn register_fs(d: &mut Dispatcher) {
+    let fs = FsProvider::new();
+
+    let f = fs.clone();
+    d.register_fn(rpc::FS_LIST, move |v| {
+        let f = f.clone();
+        async move {
+            let q: rpc::FsParams = params(rpc::FS_LIST, v)?;
+            result(f.list(&q.path, &q.allowed_roots).await?)
+        }
+    });
+
+    d.register_fn(rpc::FS_READ, move |v| {
+        let f = fs.clone();
+        async move {
+            let q: rpc::FsParams = params(rpc::FS_READ, v)?;
+            result(f.read(&q.path, &q.allowed_roots).await?)
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // caps
 // ---------------------------------------------------------------------------
 
@@ -326,6 +395,8 @@ mod tests {
             rpc::LOG_ENTRY,
             rpc::LOG_BOOTS,
             rpc::CAPS_PROBE_USER,
+            rpc::FS_LIST,
+            rpc::FS_READ,
             // `term.open` 交出 fd，注册在另一张表里，但 `methods()` 两张都算——
             // 它对调用方而言就是一个普通方法名。
             rpc::TERM_OPEN,
@@ -335,8 +406,54 @@ mod tests {
             assert!(methods.iter().any(|x| x == m), "方法表缺 {m}；已注册：{methods:?}");
         }
         // 订阅类的频道单独一张表；`log.follow` 不该同时是一个可调用的方法。
-        assert!(d.stream_channels().iter().any(|c| c == rpc::LOG_FOLLOW));
-        assert!(!methods.iter().any(|m| m == rpc::LOG_FOLLOW));
+        for c in [rpc::LOG_FOLLOW, rpc::PROC_LIVE] {
+            assert!(d.stream_channels().iter().any(|x| x == c), "缺订阅频道 {c}");
+            assert!(!methods.iter().any(|m| m == c));
+        }
+    }
+
+    #[tokio::test]
+    async fn proc_live_首帧立即到且遵守_limit() {
+        let d = default_dispatcher().await;
+        let mut s = d
+            .open_stream(
+                rpc::PROC_LIVE,
+                serde_json::json!({ "interval_secs": 2, "limit": 5 }),
+            )
+            .await
+            .unwrap();
+        // 首帧不该等一个完整周期（roadmap/04 §B.4）。5 秒是给 spawn_blocking
+        // 排队留的余量，正常在毫秒级。
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), s.next())
+            .await
+            .expect("首帧应当立即产生")
+            .expect("流不该直接结束");
+        let list = first.as_array().expect("帧应是进程数组");
+        assert!(!list.is_empty());
+        assert!(list.len() <= 5, "limit 必须生效，实际 {}", list.len());
+    }
+
+    #[tokio::test]
+    async fn fs_方法经分发表可用() {
+        let d = default_dispatcher().await;
+        let listing = d
+            .dispatch(
+                rpc::FS_LIST,
+                serde_json::json!({ "path": "/", "allowed_roots": ["/"] }),
+            )
+            .await
+            .unwrap();
+        assert!(listing["entries"].as_array().is_some_and(|a| !a.is_empty()));
+
+        // roots 之外 → 403（roadmap/04 §A.4）。
+        let err = d
+            .dispatch(
+                rpc::FS_LIST,
+                serde_json::json!({ "path": "/etc", "allowed_roots": ["/home"] }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, strixmaid_types::ErrorCode::PermissionDenied);
     }
 
     #[tokio::test]

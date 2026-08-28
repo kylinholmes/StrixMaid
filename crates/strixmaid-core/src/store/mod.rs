@@ -36,7 +36,7 @@ mod settings;
 mod tests;
 
 pub use audit::{AuditEntry, AuditFilter, AuditOutcome, AuditPage, NewAuditEntry};
-pub use metrics::{MAX_QUERY_POINTS, MetricRow, QueryResult, select_tier};
+pub use metrics::{ExportRow, MAX_QUERY_POINTS, MetricRow, QueryResult, select_tier};
 pub use series::{Series, canonical_labels};
 pub use session::{NodeKind, NodeRecord, NodeSession, SessionRecord};
 

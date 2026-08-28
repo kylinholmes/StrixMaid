@@ -143,6 +143,12 @@ pre {
     <div class="body"></div>
   </section>
 
+  <section id="p-perf" class="wide">
+    <h2>性能 <span class="sub">拓扑+实时（roadmap/08 §6–§8 原生版）</span>
+      <span class="spacer"></span><button data-reload="perf">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
   <section id="p-metrics" class="wide">
     <h2>指标 <span class="sub">/metrics/series · /metrics/query</span>
       <span class="spacer"></span><button data-reload="metrics">刷新</button></h2>
@@ -164,6 +170,12 @@ pre {
   <section id="p-logs" class="wide">
     <h2>日志 <span class="sub">/logs</span>
       <span class="spacer"></span><button data-reload="logs">刷新</button></h2>
+    <div class="body"></div>
+  </section>
+
+  <section id="p-files" class="wide">
+    <h2>文件 <span class="sub">/files · /files/content</span>
+      <span class="spacer"></span><button data-reload="files">刷新</button></h2>
     <div class="body"></div>
   </section>
 
@@ -505,7 +517,8 @@ definePanel("system", "p-system", async () => {
     ["虚拟化", i.virtualization || el("span", { class: "muted" }, "物理机 / 未检测到")],
     ["机型", i.hardware ? [i.hardware.vendor, i.hardware.product].filter(Boolean).join(" ") : null],
     ["CPU", `${i.cpu.model} · ${i.cpu.logical_cores} 逻辑核` +
-      (i.cpu.physical_cores ? ` / ${i.cpu.physical_cores} 物理核` : "")],
+      (i.cpu.physical_cores ? ` / ${i.cpu.physical_cores} 物理核` : "") +
+      ((i.cpu.packages && i.cpu.packages.length > 1) ? ` / ${i.cpu.packages.length} 封装` : "")],
     ["内存", `${fmtBytes(i.memory.total_bytes)}，可用 ${fmtBytes(i.memory.available_bytes)}`],
     ["交换", i.memory.swap_total_bytes
       ? `${fmtBytes(i.memory.swap_total_bytes)}，空闲 ${fmtBytes(i.memory.swap_free_bytes)}`
@@ -520,6 +533,7 @@ definePanel("system", "p-system", async () => {
     { label: "挂载点", get: (f) => f.mount_point },
     { label: "设备", get: (f) => f.device },
     { label: "类型", get: (f) => f.fs_type },
+    { label: "承载盘", get: (f) => f.backing_dev || el("span", { class: "muted" }, "—") },
     { label: "已用", num: true, get: (f) => fmtBytes(f.used_bytes) },
     { label: "总量", num: true, get: (f) => fmtBytes(f.total_bytes) },
     { label: "使用率", num: true, get: (f) => f.total_bytes
@@ -538,6 +552,34 @@ definePanel("system", "p-system", async () => {
   } else {
     out.push(el("div", { class: "muted", style: "margin-top:10px" },
       "磁盘列表为空——本平台不采集（macOS 需要 IOKit，见 docs/macos-dev-platform.md）。"));
+  }
+
+  // GPU 拓扑（roadmap/08 §5.3）。source 说明每张卡的指标是否可用。
+  const SRC = { sysfs: "指标可用", nvml: "需 NVML（未启用）", unavailable: "仅拓扑，无指标" };
+  if (i.gpus && i.gpus.length) {
+    out.push(el("div", { class: "muted", style: "margin:10px 0 4px" }, `显卡（${i.gpus.length}）`));
+    out.push(table([
+      { label: "卡", get: (g) => g.card },
+      { label: "型号", get: (g) => g.model },
+      { label: "驱动", get: (g) => g.driver },
+      { label: "显存", num: true, get: (g) => g.vram_bytes ? fmtBytes(g.vram_bytes) : "—" },
+      { label: "PCI", get: (g) => g.bus },
+      { label: "指标", get: (g) => SRC[g.source] || g.source },
+    ], i.gpus));
+  }
+
+  // 网卡拓扑（roadmap/08 §5.4）。
+  if (i.networks && i.networks.length) {
+    out.push(el("div", { class: "muted", style: "margin:10px 0 4px" }, `网卡（${i.networks.length}）`));
+    out.push(table([
+      { label: "接口", get: (n) => n.name },
+      { label: "MAC", get: (n) => n.mac },
+      { label: "速率", num: true, get: (n) => n.speed_mbps ? (n.speed_mbps >= 1000 ? (n.speed_mbps/1000) + "G" : n.speed_mbps + "M") : "—" },
+      { label: "MTU", num: true, get: (n) => n.mtu },
+      { label: "链路", get: (n) => (n.carrier ? "up" : el("span", { class: "muted" }, "down")) },
+      { label: "驱动", get: (n) => n.driver },
+      { label: "地址", get: (n) => (n.addrs && n.addrs.length) ? n.addrs.join(", ") : "—" },
+    ], i.networks));
   }
   return out;
 });
@@ -596,6 +638,118 @@ definePanel("health", "p-health", async () => {
 // ===========================================================================
 
 const METRICS_UI = { series: null, range: 3600, chart: null };
+
+// 性能面板：原生实现（复用本页的 el/api/uPlot），不用 iframe、不与其它面板冲突。
+// 每个资源一张卡：拓扑来自 /system/info，实时 band 图来自 /metrics/query（每 3s 刷）。
+// 样式走本调试页的朴素风格；样稿那套 Win10 密度面板留给正式前端。
+const PERF_UI = { charts: [], timer: null };
+
+function perfChart(box, s) {
+  const xs = s.points.map((p) => p.ts);
+  const mins = s.points.map((p) => p.min);
+  const maxs = s.points.map((p) => p.max);
+  const avgs = s.points.map((p) => (p.cnt > 0 ? p.sum / p.cnt : null));
+  const meds = s.points.map((p) => p.med);
+  if (box._chart) { box._chart.setData([xs, maxs, mins, avgs, meds]); return; }
+  const stroke = getComputedStyle(document.body).color;
+  box._chart = new uPlot({
+    width: box.clientWidth || 400, height: 110,
+    scales: { x: { time: true } },
+    axes: [
+      { stroke, size: 28, grid: { stroke: "rgba(128,128,128,.15)" } },
+      { stroke, size: 34, grid: { stroke: "rgba(128,128,128,.15)" } },
+    ],
+    legend: { show: false },
+    series: [
+      {},
+      { stroke: "rgba(90,150,220,.5)", width: 1, points: { show: false } },
+      { stroke: "rgba(90,150,220,.5)", width: 1, points: { show: false } },
+      { stroke: "#3b82f6", width: 1.5, points: { show: false } },
+      { stroke: "#f59e0b", width: 1, dash: [4, 3], points: { show: false } },
+    ],
+    bands: [{ series: [1, 2], fill: "rgba(90,150,220,.14)" }],
+  }, [xs, maxs, mins, avgs, meds], box);
+  PERF_UI.charts.push(box._chart);
+}
+
+definePanel("perf", "p-perf", async () => {
+  if (!S.token) return el("div", { class: "muted" }, "登录后显示性能面板。");
+  if (PERF_UI.timer) { clearInterval(PERF_UI.timer); PERF_UI.timer = null; }
+  PERF_UI.charts.forEach((c) => { try { c.destroy(); } catch (e) {} });
+  PERF_UI.charts = [];
+
+  const info = await api("/system/info");
+  const res = [];
+  res.push({ label: "CPU 占用", sel: "cpu.usage", kind: "pct" });
+  res.push({ label: "内存已用", sel: "mem.used", kind: "bytes", total: info.memory.total_bytes });
+  (info.gpus || []).forEach((g) => {
+    const facts = [g.model, g.driver, g.vram_bytes ? fmtBytes(g.vram_bytes) + " 显存" : null, g.bus]
+      .filter(Boolean).join(" · ");
+    if (g.source === "sysfs") {
+      // amdgpu 一类:有实时利用率,画图。
+      res.push({ label: "GPU " + g.card, sel: `gpu.usage{gpu=${g.card}}`, kind: "pct", note: facts });
+    } else {
+      // NVIDIA(需 NVML)/ Intel 集显 / BMC 显示芯片(mgag200/ast):sysfs 无利用率。
+      const why = g.source === "nvml" ? "需 NVML,P0 不接（§12 Q1）" : "sysfs 无利用率（BMC/集显）";
+      res.push({ label: "GPU " + g.card, static: true, note: facts,
+        info: "仅拓扑,无实时指标 · " + why });
+    }
+  });
+  (info.disks || []).forEach((d) => res.push({
+    label: "磁盘 " + d.name + " 忙碌", sel: `disk.util{dev=${d.name}}`, kind: "pct",
+    note: (d.rotational ? "HDD" : (d.name.startsWith("nvme") ? "NVMe" : "SSD")),
+  }));
+  (info.networks || []).forEach((n) => res.push({
+    label: "网卡 " + n.name + " 收", sel: `net.rx_bytes{iface=${n.name}}`, kind: "rate",
+    note: n.carrier ? (n.speed_mbps ? (n.speed_mbps >= 1000 ? n.speed_mbps / 1000 + "G" : n.speed_mbps + "M") : "up") : "down",
+  }));
+
+  const head = el("div", { class: "muted", style: "margin-bottom:8px" },
+    `CPU ${info.cpu.logical_cores} 逻辑核 / ${(info.cpu.packages || []).length} 封装` +
+    ` · 显卡 ${(info.gpus || []).length} · 盘 ${(info.disks || []).length} · 网卡 ${(info.networks || []).length}` +
+    `（样稿密度面板见 docs/roadmap/08 §6，此处为原生实时版）`);
+  const grid = el("div", { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:12px" });
+
+  for (const r of res) {
+    const head2 = el("div", {}, el("b", {}, r.label),
+      r.note ? el("span", { class: "muted", style: "margin-left:8px;font-size:11px" }, r.note) : null);
+    if (r.static) {
+      grid.append(el("div", { style: "border:1px solid var(--line);border-radius:6px;padding:8px 10px;opacity:.85" },
+        head2, el("div", { class: "muted", style: "margin-top:6px" }, r.info)));
+      continue;
+    }
+    const val = el("span", { class: "num", style: "font-variant-numeric:tabular-nums;font-weight:600" }, "…");
+    const box = el("div", { style: "height:110px;margin-top:6px" });
+    r.box = box; r.val = val;
+    grid.append(el("div", { style: "border:1px solid var(--line);border-radius:6px;padding:8px 10px" },
+      head2, val, box));
+  }
+
+  async function refresh() {
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 600;
+    for (const r of res) {
+      if (r.static) continue;
+      try {
+        const q = await api(`/metrics/query?series=${encodeURIComponent(r.sel)}&from=${from}&to=${now}`);
+        const s = q.series && q.series[0];
+        if (s && s.points.length) {
+          perfChart(r.box, s);
+          const p = s.points[s.points.length - 1];
+          const v = p.cnt > 0 ? p.sum / p.cnt : 0;
+          r.val.textContent = r.kind === "pct" ? v.toFixed(1) + "%"
+            : r.kind === "bytes" ? fmtBytes(v) + (r.total ? " / " + fmtBytes(r.total) : "")
+            : fmtBytes(v) + "/s";
+        } else {
+          r.val.textContent = "无数据（该指标本机不采集）";
+        }
+      } catch (e) { r.val.textContent = "查询失败"; }
+    }
+  }
+  refresh();
+  PERF_UI.timer = setInterval(refresh, 3000);
+  return [head, grid];
+});
 
 definePanel("metrics", "p-metrics", async () => {
   const list = await api("/metrics/series");
@@ -953,6 +1107,57 @@ definePanel("logs", "p-logs", async () => {
 });
 
 // ===========================================================================
+// 文件
+// ===========================================================================
+
+const FILES_UI = { path: "/" };
+
+definePanel("files", "p-files", async () => {
+  const listing = await api("/files?path=" + encodeURIComponent(FILES_UI.path));
+  FILES_UI.path = listing.path; // 用服务端规范化后的路径
+
+  const goto = (p) => { FILES_UI.path = p || "/"; PANELS.files(); };
+  const joinPath = (name) => (FILES_UI.path === "/" ? "/" : FILES_UI.path + "/") + name;
+
+  const pathInput = el("input", { type: "text", value: FILES_UI.path, style: "flex:1;min-width:260px" });
+  pathInput.addEventListener("change", () => goto(pathInput.value));
+  const controls = el("div", { class: "row" },
+    el("button", {
+      disabled: FILES_UI.path === "/" ? "disabled" : null,
+      onclick: () => goto(FILES_UI.path.replace(/\/[^/]+$/, "") || "/"),
+    }, "↑ 上级"),
+    pathInput,
+    el("span", { class: "muted" },
+      `${listing.entries.length} 项` + (listing.skipped ? ` · ${listing.skipped} 项无法读取` : "")));
+
+  const detail = el("div", { style: "margin-top:10px" });
+  const KIND = { dir: "目录", file: "文件", symlink: "链接", block_device: "块设备",
+    char_device: "字符设备", fifo: "FIFO", socket: "socket", unknown: "?" };
+  const t = table([
+    { label: "名称", get: (e) => e.kind === "dir" ? el("b", {}, e.name + "/") : e.name },
+    { label: "类型", get: (e) => KIND[e.kind] || e.kind },
+    { label: "大小", num: true, get: (e) => e.kind === "file" ? fmtBytes(e.size_bytes) : "—" },
+    { label: "权限", get: (e) => (e.mode & 0o7777).toString(8).padStart(4, "0") },
+    { label: "属主", get: (e) => (e.user || e.uid) + ":" + (e.group || e.gid) },
+    { label: "修改", get: (e) => fmtTs(e.mtime_ts) },
+    { label: "目标", get: (e) => e.target },
+  ], listing.entries, async (entry) => {
+    if (entry.kind === "dir") { goto(joinPath(entry.name)); return; }
+    // 非目录一律尝试按文本读：二进制 / 超限 / 无权限的 400/403 就该在这里看到
+    detail.replaceChildren(el("div", { class: "muted" }, "读取 " + entry.name + "…"));
+    try {
+      const c = await api("/files/content?path=" + encodeURIComponent(joinPath(entry.name)));
+      detail.replaceChildren(
+        el("div", { class: "muted", style: "margin:6px 0 2px" },
+          `${c.path} · ${fmtBytes(c.size_bytes)}` + (c.lossy ? " · 含无效 UTF-8（已替换显示）" : "")),
+        el("pre", {}, c.content));
+    } catch (e) { detail.replaceChildren(errBox(e)); }
+  });
+
+  return [controls, t, detail];
+});
+
+// ===========================================================================
 // 审计
 // ===========================================================================
 // 这个端点要求会话已提权（roadmap/02 §4.3）——审计表在主进程的 SQLite 里，
@@ -1026,7 +1231,7 @@ definePanel("audit", "p-audit", async () => {
 // 服务端注册了哪些频道取决于 provider 是否可用；未注册的频道 sub 会回 err 帧，
 // 那也是有效的观察结果，所以三个都列出来。
 
-const WS_CHANNELS = ["metrics.live", "logs.follow", "services.changed"];
+const WS_CHANNELS = ["metrics.live", "logs.follow", "services.changed", "system.health", "processes.live"];
 
 definePanel("ws", "p-ws", async () => {
   const status = el("span", { class: "muted" }, "未连接");
@@ -1253,8 +1458,12 @@ function termAttach(id) {
     let m = null;
     try { m = JSON.parse(ev.data); } catch (_) { /* 落到下面的兜底分支 */ }
     if (m && m.t === "exit") {
-      termNote(`shell 已退出，code ${m.code}`);
-      termStatus(`shell 已退出（code ${m.code}）`, "warn");
+      // code 与 signal 互斥；服务端取不到状态时两者都没有，只有 reason。
+      const how = m.code != null ? `code ${m.code}`
+        : m.signal != null ? `signal ${m.signal}`
+        : (m.reason || "原因未知");
+      termNote(`shell 已退出，${how}`);
+      termStatus(`shell 已退出（${how}）`, "warn");
     } else {
       termNote("未知控制帧：" + ev.data);
     }

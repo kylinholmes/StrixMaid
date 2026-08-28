@@ -1,0 +1,24 @@
+[Unit]
+Description=StrixMaid server
+Documentation=https://github.com/kylinholmes/Strix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/strixmaid --check-config
+ExecStart=/usr/bin/strixmaid serve
+Restart=on-failure
+RestartSec=2
+StateDirectory=strixmaid
+RuntimeDirectory=strixmaid
+Environment=RUST_LOG=info
+# worker 与 helper 是本进程的子进程，随主进程停止；
+# 主进程收到 SIGTERM 后按序拆会话（Shutdown worker → CloseSession helper），
+# control-group 兜底杀残留。
+KillMode=control-group
+TimeoutStopSec=20
+# 主进程需要 root：spawn setuid helper、读全量 /proc、改主机名与时区。不加沙箱限制。
+
+[Install]
+WantedBy=multi-user.target

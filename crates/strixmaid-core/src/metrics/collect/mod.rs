@@ -7,11 +7,11 @@
 //!
 //! | 目录 | 数据源 | 覆盖的采集项 |
 //! |---|---|---|
-//! | [`linux`] | `/proc`、`/sys` | §7.1 全部七项（目标平台） |
+//! | [`linux`] | `/proc`、`/sys` | roadmap/08 §4.2 全部八类（目标平台，GPU 视 sysfs 而定） |
 //! | [`macos`] | mach、`sysctl`、`getifaddrs`、`getmntinfo` | CPU / 内存 / 负载 / 网络 / 文件系统 |
 //!
 //! macOS 是**开发与联调平台**，不是交付目标：那里没有 PSI（`/proc/pressure` 是 Linux
-//! 独有的内核特性），逐设备磁盘 IO 要走 IOKit，成本与收益都不匹配，故两者都不注册。
+//! 独有的内核特性），逐设备磁盘 IO 与 GPU 要走 IOKit，成本与收益都不匹配，故都不注册。
 //! 少注册几个采集器不需要任何额外处理——指标是否存在本来就由
 //! `GET /metrics/series` 如实报告，前端据此决定画不画。
 //!
@@ -125,11 +125,11 @@ pub trait Collector: Send {
 
 /// 本平台的默认采集器集合。
 ///
-/// Linux 上是 design.md §7.1 的全部七项；macOS 上是其中能原生对应的五项
-/// （见本模块头部的表）。`per_core_detail` 的语义两平台一致：关闭时每核只留
-/// `cpu.core.usage` 一条曲线（§7.2）。
-pub fn default_collectors(per_core_detail: bool) -> Vec<Box<dyn Collector>> {
-    sys::default_collectors(per_core_detail)
+/// Linux 上是 roadmap/08 §4.2 的全部八类；macOS 上是其中能原生对应的五类
+/// （见本模块头部的表）。每核一律只产出 `cpu.core.usage`——原先按需开关
+/// 全部 8 态的 `per_core_detail` 已随裁剪一并删除（roadmap/08 §4.3）。
+pub fn default_collectors() -> Vec<Box<dyn Collector>> {
+    sys::default_collectors()
 }
 
 // ============================ 公共小工具 ============================
@@ -203,7 +203,7 @@ mod tests {
     /// 所有默认采集器在本机跑两轮不 panic，且产出的指标名全部登记在常量表里。
     #[test]
     fn 默认采集器产出的指标都在常量表中() {
-        let mut collectors = default_collectors(true);
+        let mut collectors = default_collectors();
         for round in 0..2 {
             if round == 1 {
                 std::thread::sleep(Duration::from_millis(120));

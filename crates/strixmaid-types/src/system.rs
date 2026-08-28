@@ -55,6 +55,90 @@ pub struct SystemInfo {
     pub uptime_secs: u64,
     /// 开机时刻（`ts - uptime_secs`）。
     pub boot_ts: i64,
+    /// 显卡列表（roadmap/08 §5.3）。Linux 枚举 `/sys/class/drm/card*`，
+    /// **任何驱动的卡都会被列出**（拓扑与驱动无关）；每张卡的 `source` 指明
+    /// 哪些指标可用。macOS 上为空（GPU 走 IOKit，P0 不做）。
+    #[serde(default)]
+    pub gpus: Vec<GpuInfo>,
+    /// 网络接口列表（roadmap/08 §5.4）。用于把吞吐归一成链路利用率、分组展示。
+    /// 排除 `lo` 与 `veth*`（与指标采集的口径一致）。
+    #[serde(default)]
+    pub networks: Vec<NetInfo>,
+}
+
+/// 显卡指标的数据来源（roadmap/08 §5.3）。决定这张卡哪些 `gpu.*` 指标可用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuSource {
+    /// sysfs 直读（`device/gpu_busy_percent` 可读，典型是 amdgpu）：
+    /// `gpu.usage` / `gpu.mem_*` / `gpu.temp` 可用。
+    Sysfs,
+    /// 需要 NVML（NVIDIA 专有驱动）。**P0 不接**（design.md §2：静态 musl 不能
+    /// dlopen；见 roadmap/08 §12 Q1），因此当前采集器不会产出这张卡的指标——
+    /// 前端应显示「指标需 NVML，未启用」。
+    Nvml,
+    /// 卡在，但没有可用的指标源（NVIDIA 无 NVML、Intel 集显无 busy%、BMC 显示芯片）。
+    Unavailable,
+}
+
+/// 一张显卡（roadmap/08 §5.3）。**只描述拓扑**，实时指标走 `gpu.*` series。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GpuInfo {
+    /// DRM 卡名，如 `card0`。与 `gpu.*` 指标的 `gpu` 标签一致。
+    #[schema(example = "card0")]
+    pub card: String,
+    /// 型号串。sysfs 没有营销名，这里给「厂商名 [vendor:device]」这类由 PCI id
+    /// 组出的可读串（前端可再经 pci.ids 美化）；认不出为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "AMD [1002:73a3]")]
+    pub model: Option<String>,
+    /// 内核驱动（`device/driver` 的名字）：`amdgpu` / `i915` / `nvidia` /
+    /// `nouveau` / `ast` / `mgag200` …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "amdgpu")]
+    pub driver: Option<String>,
+    /// 显存字节数（`device/mem_info_vram_total`，多为 amdgpu）。读不到为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_bytes: Option<u64>,
+    /// PCI 地址（`0000:62:00.0`）。虚拟 / 平台设备为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "0000:62:00.0")]
+    pub bus: Option<String>,
+    /// 指标数据源，见 [`GpuSource`]。
+    pub source: GpuSource,
+}
+
+/// 一个网络接口（roadmap/08 §5.4）。**只描述拓扑**，实时吞吐走 `net.*` series。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct NetInfo {
+    /// 接口名。与 `net.*` 指标的 `iface` 标签一致。
+    #[schema(example = "eth0")]
+    pub name: String,
+    /// MAC 地址（`address`）。无硬件地址的接口为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "aa:bb:cc:dd:ee:ff")]
+    pub mac: Option<String>,
+    /// 链路速率，Mb/s（`speed`）。虚拟网卡、bond、无线、断链常返回 -1 → `None`。
+    /// 唯一用途是把吞吐归一成链路利用率；读不到不影响任何功能。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 10000)]
+    pub speed_mbps: Option<u32>,
+    /// 双工（`duplex`）：`full` / `half`；`unknown` 与读不到均为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "full")]
+    pub duplex: Option<String>,
+    /// MTU（`mtu`）。
+    #[schema(example = 1500)]
+    pub mtu: u32,
+    /// 是否有载波（`carrier`），即物理链路是否连通。
+    pub carrier: bool,
+    /// 内核驱动（`device/driver` 的名字）。虚拟接口为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "e1000e")]
+    pub driver: Option<String>,
+    /// 该接口上配置的 IP 地址（v4 与 v6）。
+    #[serde(default)]
+    pub addrs: Vec<String>,
 }
 
 /// 发行版信息，来自 `/etc/os-release`。
@@ -123,6 +207,21 @@ pub struct CpuInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 2.0)]
     pub quota_cores: Option<f64>,
+    /// 物理封装（socket）到逻辑处理器的映射（roadmap/08 §5.2）。
+    /// 逻辑处理器视图按封装分块展示；读不到 topology 时为**一个**封装含全部核。
+    #[serde(default)]
+    pub packages: Vec<CpuPackage>,
+}
+
+/// 一个物理封装（CPU socket / die）及其逻辑处理器（roadmap/08 §5.2）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CpuPackage {
+    /// 物理封装 id，来自 `topology/physical_package_id`。
+    #[schema(example = 0)]
+    pub id: u32,
+    /// 属于该封装的逻辑处理器编号，升序。
+    #[serde(default)]
+    pub logical_cores: Vec<u32>,
 }
 
 /// 内存与 swap 容量（`/proc/meminfo`）。这里只放**容量**，实时使用率走指标接口。
@@ -193,6 +292,13 @@ pub struct FilesystemInfo {
     pub inodes_used: Option<u64>,
     /// 是否以只读挂载。
     pub read_only: bool,
+    /// 承载它的**整盘**块设备名（不带 `/dev/`），如 `nvme0n1` / `dm-0`
+    /// （roadmap/08 §5.1）。伪文件系统（tmpfs / nfs / overlay）与读不到 major:minor
+    /// 时为 `None`——界面显示「无块设备」，速率列显示 `—`。前端据此把同一块盘上的
+    /// 多个挂载点的读写按**去重后的设备**求和，避免把同一份 IO 数多遍。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "nvme0n1")]
+    pub backing_dev: Option<String>,
 }
 
 // ============================= /api/v1/system/health =============================

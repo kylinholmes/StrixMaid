@@ -1,5 +1,29 @@
 # 05 Agent 与多节点汇聚（只读）
 
+> **实施状态（2026-08-28）**：已完成。`strixmaid-agent` 复用 core 的采集 / 环 /
+> 五层聚合，`client.rs` 实现 hello → resume → {行同步 + 快照转发} 与指数退避重连；
+> Server 侧 `/ws/agent`（token ↔ `nodes.token_hash` 鉴权，独立于 PAM 会话）、
+> `AgentRegistry`、`routes/nodes.rs`（POST 需管理访问、token 只在响应出现一次）、
+> 三个 metrics 端点与 `metrics.live` 的 `?node=` 均已接线。
+>
+> 与方案的偏离，各处代码注释有完整理由：
+>
+> - **TLS 未做**：`wss://` 与 `tls.insecure` 推迟到 `06-packaging.md` 一并决策
+>   TLS 栈（rustls 与 musl 静态链接的关系）；`server_url` 暂只接受 `ws://`，
+>   配 `wss://` 在校验时报错说明。
+> - **补发边界**：`since_ts` 按**闭区间**重发（`ts >= since_ts`），非 §3.2 的
+>   开区间——`agent.rows` 一帧一事务，同一 `ts` 的行可能跨帧，开区间在崩溃后
+>   会留下半桶空洞；多发的一桶由 UPSERT 幂等吸收。分页用 `(ts, series_id)`
+>   键集（`Store::export_after`），同 ts 跨批也不重不漏（有测试）。
+> - `agent.rows` 只接受 `m_1m`；粗层由 Server 自己的每分钟 `maintain` 聚合
+>   （它不分节点，Agent 的行自然一起被卷）。
+> - `sync_interval_secs`（默认 20s，5–300）为实现补充的配置项。
+>
+> §5.1 / §5.3 的测试在 `store::metrics::export_tests` 与 `ws/agent.rs`（进程内
+> 起真实 TCP + WS 的端到端测试：错误 token 401、resume 起点、行落库、快照、
+> 重连后 since 前移）。§5.2 的双进程 2 分钟实测与 §6 的静态体积验收归
+> `06-packaging.md` / `07-verification.md` 的环境验证。
+
 ## 1. 目标
 
 `design.md` §11 的 MVP 形态：`strixmaid-agent` 在远程节点常驻采集并本地存储，主动连接 Server 推送指标；Server 汇聚各节点数据；断连后按时间戳补发。Agent 不接受管理操作。

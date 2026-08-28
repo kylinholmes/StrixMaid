@@ -10,13 +10,14 @@
 //!
 //! | 采集项 | macOS | 说明 |
 //! |---|---|---|
-//! | CPU | ✅ 5 态 | mach 只统计 user / system / idle / nice 四态，没有 iowait / irq / softirq / steal |
-//! | 内存 | ✅ 部分 | 没有 `Buffers` / `Dirty` 的对应概念；`available` 是估算值，见 [`mem`] |
+//! | CPU | ✅ 部分 | mach 只统计 user / system / idle / nice，产出 usage / system + 每核 usage；iowait / irq / steal 不存在 |
+//! | GPU | ❌ | sysfs 的 `gpu_busy_percent` 是 Linux DRM 的接口；IOKit 对接留待面板实施时评估（roadmap/08 §9） |
+//! | 内存 | ✅ 部分 | 没有 `Buffers` 的对应概念，`mem.cached` 只含 external 页；`available` 是估算值，见 [`mem`] |
 //! | 负载 | ✅ | `getloadavg(3)`；运行队列长度无对应数据源，只产出 `procs.total` |
 //! | PSI | ❌ | `/proc/pressure` 是 Linux 独有的内核特性，无任何等价物 |
 //! | 磁盘 IO | ❌ | 需要走 IOKit 逐设备取 statistics，成本高、与联调目的不匹配 |
 //! | 文件系统 | ✅ | `getfsstat(2)` |
-//! | 网络 | ✅ 部分 | `sysctl NET_RT_IFLIST2`，没有发送方向的丢包计数 |
+//! | 网络 | ✅ 部分 | `sysctl NET_RT_IFLIST2`，`net.errors` 缺发送方向的丢包计数 |
 //!
 //! **少产出指标不需要任何额外处理**：某条 series 是否存在本来就由 `GET /metrics/series`
 //! 如实报告，前端据此决定画不画。这正是 `design.md` §1 第 2 条「能力探测而非硬依赖」
@@ -50,10 +51,10 @@ pub use load::LoadCollector;
 pub use mem::MemCollector;
 pub use net::NetCollector;
 
-/// macOS 上能原生对应的采集器，顺序与 Linux 版一致（缺的两项直接不出现）。
-pub fn default_collectors(per_core_detail: bool) -> Vec<Box<dyn Collector>> {
+/// macOS 上能原生对应的采集器，顺序与 Linux 版一致（缺的几类直接不出现）。
+pub fn default_collectors() -> Vec<Box<dyn Collector>> {
     vec![
-        Box::new(CpuCollector::new().per_core_states(per_core_detail)),
+        Box::new(CpuCollector::new()),
         Box::new(MemCollector::new()),
         Box::new(LoadCollector::new()),
         Box::new(FsCollector::new()),

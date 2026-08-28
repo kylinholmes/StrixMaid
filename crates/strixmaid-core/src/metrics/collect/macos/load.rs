@@ -76,11 +76,8 @@ impl Collector for LoadCollector {
     fn collect(&mut self, _now: Instant) -> Result<Vec<Sample>, CollectError> {
         let load = read_loadavg()
             .ok_or_else(|| CollectError::new(self.name(), "getloadavg 未返回三个值"))?;
-        let mut out = vec![
-            Sample::new(cat::LOAD_1M, load.one),
-            Sample::new(cat::LOAD_5M, load.five),
-            Sample::new(cat::LOAD_15M, load.fifteen),
-        ];
+        // load.5m / load.15m 不入库（roadmap/08 §4.3：它们是 load.1m 的移动平均）。
+        let mut out = vec![Sample::new(cat::LOAD_1M, load.one)];
         // 进程数读不到只是少一条曲线，不该让整轮失败。
         if let Some(n) = read_proc_count() {
             out.push(Sample::new(cat::PROCS_TOTAL, n as f64));

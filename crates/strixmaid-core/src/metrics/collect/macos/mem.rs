@@ -17,10 +17,10 @@
 //! 内核为保证不 OOM 而必须留下的水位线，因此系统性偏乐观。用于观察趋势足够，
 //! 不要拿它做容量告警的绝对阈值。
 //!
-//! # 不产出的指标
+//! # 与 Linux 版的口径差异
 //!
-//! `mem.buffers`（块设备缓冲）与 `mem.dirty`（等待写回的脏页）在 XNU 里没有
-//! 单独统计，宁可不产出，也不拿别的数字冒充。
+//! `mem.cached` 在 Linux 上是 Cached + Buffers 之和（roadmap/08 §4.2）；XNU 没有
+//! 「块设备缓冲」的单独统计，这里只含 external 页——宁可少算，也不拿别的数字冒充。
 
 use std::time::Instant;
 
@@ -129,19 +129,17 @@ impl MemCollector {
     pub fn samples(stat: &MemStat) -> Vec<Sample> {
         let mut out = vec![
             Sample::new(cat::MEM_TOTAL, stat.total as f64),
-            Sample::new(cat::MEM_AVAILABLE, stat.available as f64),
             Sample::new(
                 cat::MEM_USED,
                 stat.total.saturating_sub(stat.available) as f64,
             ),
-            Sample::new(cat::MEM_FREE, stat.free as f64),
+            Sample::new(cat::MEM_AVAILABLE, stat.available as f64),
             Sample::new(cat::MEM_CACHED, stat.cached as f64),
         ];
-        // 没配交换区时 total 为 0，三条曲线都恒为 0，不如不产出。
+        // 没配交换区时 total 为 0，两条曲线都恒为 0，不如不产出。
         if stat.swap_total > 0 {
             out.extend([
                 Sample::new(cat::MEM_SWAP_TOTAL, stat.swap_total as f64),
-                Sample::new(cat::MEM_SWAP_FREE, stat.swap_free as f64),
                 Sample::new(cat::MEM_SWAP_USED, stat.swap_used as f64),
             ]);
         }
@@ -198,7 +196,7 @@ mod tests {
             ..Default::default()
         };
         let out = MemCollector::samples(&stat);
-        assert_eq!(out.len(), 5);
+        assert_eq!(out.len(), 4);
         assert!(!out.iter().any(|s| s.metric.starts_with("mem.swap")));
         let used = out.iter().find(|s| s.metric == cat::MEM_USED).unwrap();
         assert_eq!(used.value, 60.0);
@@ -209,7 +207,7 @@ mod tests {
             swap_used: 5,
             ..stat
         };
-        assert_eq!(MemCollector::samples(&with_swap).len(), 8);
+        assert_eq!(MemCollector::samples(&with_swap).len(), 6);
     }
 
     #[test]
@@ -226,20 +224,13 @@ mod tests {
         assert!(total > 0.0);
         assert!(get(cat::MEM_AVAILABLE) <= total);
         assert!(get(cat::MEM_USED) <= total);
-        assert!(get(cat::MEM_FREE) <= total);
+        assert!(get(cat::MEM_CACHED) <= total);
         for s in &out {
             assert!(
                 s.value.is_finite() && s.value >= 0.0,
                 "{} = {}",
                 s.metric,
                 s.value
-            );
-        }
-        // XNU 没有这两个概念，不能凭空产出
-        for absent in [cat::MEM_BUFFERS, cat::MEM_DIRTY] {
-            assert!(
-                !out.iter().any(|s| s.metric == absent),
-                "{absent} 在 macOS 上不该存在"
             );
         }
     }

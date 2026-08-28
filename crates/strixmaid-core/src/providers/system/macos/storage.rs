@@ -39,6 +39,8 @@ pub fn read_filesystems() -> Vec<FilesystemInfo> {
             total_bytes: m.total,
             available_bytes: m.available,
             read_only: m.read_only,
+            // 挂载点→块设备的映射在 macOS 上要走 IOKit，P0 不做。
+            backing_dev: None,
         })
         .collect();
     out.sort_by(|a, b| a.mount_point.cmp(&b.mount_point));

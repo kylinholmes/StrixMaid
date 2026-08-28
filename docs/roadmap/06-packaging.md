@@ -1,5 +1,31 @@
 # 06 构建与打包
 
+> **实施状态（2026-08-28）**：仓库侧已全部落地——`.cargo/config.toml`（musl
+> rustflags）、`ui` feature（默认开，`--no-default-features` 产出全 404 JSON 的
+> 无 UI 变体，两种变体 clippy 均零警告）、`build.rs` 注入 git sha 与 target
+> （`strixmaid --version` → `0.1.0 (<sha>, <target>)`）、`config example` 子命令、
+> `--check-config`（已接进 unit 的 ExecStartPre）、`packaging/`（两个 service、
+> `install.sh`、pam.d 模板副本）、`scripts/package.sh`（构建 + 静态性断言 + §3.5
+> 布局的 tar.gz）、`.github/workflows/ci.yml`（check / build-musl / build-helper /
+> size 四个 job）。
+>
+> **本机未能执行的部分**（开发机无 root，装不了 musl-tools，也无 zig）：
+> musl 静态构建、glibc 2.28 基线的 helper、§5 的干净机安装验收与体积上限断言。
+> 这些由 CI 与打包机承担（ci.yml 已含全部断言），并归入 `07-verification.md`。
+> 本机的 gnu release 构建可作体积参考。
+>
+> 偏离与决策记录：
+>
+> - **CI 不跑 `cargo fmt --check`**：仓库历史上不是 rustfmt-clean
+>   （HANDOFF §4），fmt 不在质量门槛里；ci.yml 内有注释。
+> - **`--check-config` 沿用「配置文件缺席不是错误」**（design.md §12 首次启动
+>   语义）：它校验的是最终合并结果，文件不存在时校验的就是默认值。
+> - **Agent 的 TLS（05 遗留）在此定案**：与 design.md §14「TLS 走反代」一致，
+>   Agent 跨公网连 Server 时由 Server 前的反向代理终结 TLS（反代同时代理
+>   `/ws/agent`），Agent 原生 wss 支持维持 P1，不为它引入 rustls 依赖。
+> - helper 无 setuid 位（0755 root:root）：它由 root 主进程 spawn，
+>   不需要也不应有 setuid。
+
 ## 1. 目标
 
 产出 `design.md` §2.1 的三个产物并可安装运行：

@@ -13,10 +13,20 @@
 //!
 //! 未命中静态文件的请求返回 `index.html`，交给前端路由。但 `/api` 与 `/ws` 前缀例外：
 //! 这两处的未命中是**真的 404**，回退成 HTML 只会让调用方拿到一个 200 的 HTML 而不自知。
+//!
+//! # `ui` feature（roadmap/06 §3.2）
+//!
+//! 默认开启。`--no-default-features` 构建无 UI 的精简变体：`web/dist` 一个字节
+//! 都不进二进制，全部非 API 路径（含 `/`）返回 404 JSON——不是空 `index.html`，
+//! 调用方能一眼看出这是无 UI 构建而不是前端坏了。
 
+#[cfg(feature = "ui")]
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
+#[cfg(feature = "ui")]
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Response};
+#[cfg(feature = "ui")]
 use rust_embed::Embed;
 use strixmaid_types::ApiError;
 
@@ -25,11 +35,25 @@ use crate::error::ApiErr;
 /// `web/dist` 的编译期视图。
 ///
 /// 路径相对于本 crate 的 `CARGO_MANIFEST_DIR`。
+#[cfg(feature = "ui")]
 #[derive(Embed)]
 #[folder = "../../web/dist"]
 struct WebAssets;
 
+/// 无 UI 构建的 fallback：一律 404 JSON（`/api`、`/ws` 命名空间的措辞照旧）。
+#[cfg(not(feature = "ui"))]
+pub async fn fallback(uri: Uri, _headers: HeaderMap) -> Response {
+    let path = uri.path();
+    let message = if is_api_namespace(path) {
+        format!("没有这个端点: {path}")
+    } else {
+        format!("本构建不含 UI（ui feature 已关闭）: {path}")
+    };
+    ApiErr(ApiError::not_found(message)).into_response()
+}
+
 /// 全局 fallback：静态文件 → SPA `index.html` → 404。
+#[cfg(feature = "ui")]
 pub async fn fallback(uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path();
 
@@ -70,6 +94,7 @@ pub async fn fallback(uri: Uri, headers: HeaderMap) -> Response {
 /// `/services/nginx.service`、`/services/docker.socket`、`/logs/sshd.service`。
 /// 所以只把已知的静态资源扩展名当文件，其余一律视为前端路由交给 SPA。
 /// 新增一种前端产物类型时把扩展名加进 `STATIC_EXTS` 即可。
+#[cfg(feature = "ui")]
 fn looks_like_file(rel: &str) -> bool {
     const STATIC_EXTS: &[&str] = &[
         "js",
@@ -116,6 +141,7 @@ fn is_api_namespace(path: &str) -> bool {
 }
 
 /// 把一个嵌入文件渲染成响应：Content-Type + ETag + Cache-Control，并处理条件请求。
+#[cfg(feature = "ui")]
 fn serve(rel: &str, file: rust_embed::EmbeddedFile, req_headers: &HeaderMap) -> Response {
     let etag = format!("\"{}\"", hex32(&file.metadata.sha256_hash()));
 
@@ -138,6 +164,7 @@ fn serve(rel: &str, file: rust_embed::EmbeddedFile, req_headers: &HeaderMap) -> 
 ///
 /// `mime_guess` 对 `.html` / `.js` / `.css` 返回的都是不带 charset 的类型；
 /// 前端构建产物一律是 UTF-8，显式声明可以省掉浏览器的编码嗅探。
+#[cfg(feature = "ui")]
 fn content_type(rel: &str) -> String {
     let mime = mime_guess::from_path(rel).first_or_octet_stream();
     let needs_charset = mime.type_() == mime_guess::mime::TEXT
@@ -157,6 +184,7 @@ fn content_type(rel: &str) -> String {
 /// - 其余（尤其 `index.html`）→ `no-cache`，即允许缓存但每次必须带 ETag 回源校验。
 ///
 /// 两者都带 ETag，所以「no-cache」的实际代价是一次 304，不是一次全量传输。
+#[cfg(feature = "ui")]
 fn cache_headers(rel: &str, etag: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let cc = if rel.starts_with("assets/") {
@@ -172,6 +200,7 @@ fn cache_headers(rel: &str, etag: &str) -> HeaderMap {
 }
 
 /// 32 字节摘要转小写十六进制（不值得为此拉一个 `hex` 依赖）。
+#[cfg(feature = "ui")]
 fn hex32(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
@@ -182,7 +211,7 @@ fn hex32(bytes: &[u8; 32]) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ui"))]
 mod tests {
     use super::*;
 

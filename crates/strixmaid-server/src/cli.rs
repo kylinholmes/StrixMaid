@@ -34,12 +34,28 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use strixmaid_core::config::LogLevel;
 
+/// `--version` 输出：`0.1.0 (<git sha>, <target>)`。两个环境变量由
+/// `build.rs` 注入（roadmap/06 §3.5），无 git 时 sha 为 `unknown`。
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("STRIXMAID_GIT_SHA"),
+    ", ",
+    env!("STRIXMAID_BUILD_TARGET"),
+    ")"
+);
+
 /// StrixMaid —— 轻量、通用、现代化的服务器观测与管理平台。
 #[derive(Debug, Parser)]
-#[command(name = "strixmaid", version, about, long_about = None)]
+#[command(name = "strixmaid", version = LONG_VERSION, about, long_about = None)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalArgs,
+
+    /// 加载并校验配置后立即退出（roadmap/06 §3.4）。
+    /// 供 systemd 的 ExecStartPre 与安装脚本使用；校验失败时非零退出。
+    #[arg(long, global = true)]
+    pub check_config: bool,
 
     /// 不给子命令时等价于 `serve`。
     #[command(subcommand)]
@@ -136,6 +152,19 @@ pub enum Command {
     ///
     /// 不读配置文件；通过 --ipc-fd 指定的 socketpair 与主进程通信。
     Worker(WorkerArgs),
+
+    /// 配置工具
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// `config` 的动作。
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// 输出带注释的示例配置（安装脚本用它生成 /etc/strixmaid/config.toml）
+    Example,
 }
 
 /// `worker` 子命令参数。

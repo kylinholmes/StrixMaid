@@ -23,8 +23,10 @@
 
 pub mod actions;
 pub mod cpu;
+pub mod gpu;
 pub mod hardware;
 pub mod health;
+pub mod net;
 pub mod os_release;
 pub mod storage;
 pub mod time;
@@ -84,6 +86,8 @@ pub fn collect_system_info() -> SystemInfo {
         filesystems: storage::read_filesystems(),
         uptime_secs,
         boot_ts: read_btime().unwrap_or(ts - uptime_secs as i64),
+        gpus: gpu::read_gpus(),
+        networks: net::read_networks(),
     }
 }
 

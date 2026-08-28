@@ -249,6 +249,7 @@ impl Session {
             username: self.user.username.clone(),
             groups: self.user.groups.clone(),
             elevated: self.elevated,
+            session_opened: self.session_opened,
             elevated_ts: self.elevated_ts,
             authed_ts: self.authed_ts,
             created_ts: self.created_ts,

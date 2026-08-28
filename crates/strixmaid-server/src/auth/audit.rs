@@ -30,6 +30,7 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 use strixmaid_core::session::Session;
 use strixmaid_core::store::{AuditOutcome, NewAuditEntry, Store};
+use strixmaid_core::terminal::{CloseReason, TerminalClosed, TerminalObserver};
 use strixmaid_types::{ApiError, ErrorCode};
 
 /// 一次审计写入的全部内容。
@@ -186,6 +187,77 @@ pub fn remote_addr(
     peer.map(|a| a.to_string())
 }
 
+// ===========================================================================
+// 终端关闭的观察者
+// ===========================================================================
+
+/// 把 core 内部发生的终端关闭写进审计（`roadmap/03-terminal.md` §7）。
+///
+/// `terminal.open` 与显式 `DELETE` 的 `terminal.close` 由
+/// [`crate::routes::terminals`] 在 REST 层记录（那里拿得到来源地址）；本观察者
+/// 负责其余的关闭——空闲回收、shell 自行退出、会话登出——它们发生在 core
+/// 内部，没有 HTTP 请求可挂。
+pub struct TerminalAudit {
+    store: Store,
+    node_id: String,
+}
+
+impl TerminalAudit {
+    pub fn new(store: Store, node_id: impl Into<String>) -> TerminalAudit {
+        TerminalAudit {
+            store,
+            node_id: node_id.into(),
+        }
+    }
+
+    /// 由关闭事件组装审计记录。拆出来是为了可测：观察者本体只是「组装 + spawn 写库」。
+    fn entry_of(&self, ev: &TerminalClosed) -> NewAuditEntry {
+        let mut params = serde_json::Map::new();
+        params.insert("pid".into(), ev.pid.into());
+        params.insert("user".into(), ev.target_user.clone().into());
+        if let Some(exit) = ev.exit {
+            if let Some(code) = exit.code {
+                params.insert("code".into(), code.into());
+            }
+            if let Some(signal) = exit.signal {
+                params.insert("signal".into(), signal.into());
+            }
+        }
+        let mut entry = NewAuditEntry::new(
+            self.node_id.clone(),
+            ev.owner.username.clone(),
+            "terminal.close",
+            AuditOutcome::Ok,
+        )
+        .actor(i64::from(ev.owner.uid), ev.owner.elevated)
+        .target(ev.id.clone())
+        .detail(ev.reason.as_str());
+        match serde_json::to_string(&Value::Object(params)) {
+            Ok(s) => entry = entry.params(s),
+            Err(e) => tracing::warn!(error = %e, "终端审计参数序列化失败，本条记录不带 params"),
+        }
+        entry
+    }
+}
+
+impl TerminalObserver for TerminalAudit {
+    fn on_closed(&self, event: &TerminalClosed) {
+        // `deleted` 由 `DELETE /terminals/{id}` 的处理器记录（那条带来源地址），
+        // 这里再记就违反「一次用户操作恰好一条记录」（roadmap/02 §7）。
+        if event.reason == CloseReason::Deleted {
+            return;
+        }
+        let entry = self.entry_of(event);
+        let store = self.store.clone();
+        // 回调在关闭路径上，不能阻塞；写库挪到独立任务。失败不阻断，见模块文档。
+        tokio::spawn(async move {
+            if let Err(e) = store.audit_write(&entry).await {
+                tracing::error!(error = %e, "写终端关闭审计失败");
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +363,83 @@ mod tests {
         );
 
         assert_eq!(outcome_of(&Ok(())), AuditOutcome::Ok);
+    }
+
+    fn closed_event(reason: CloseReason) -> TerminalClosed {
+        use strixmaid_core::terminal::TerminalOwner;
+        use strixmaid_types::rpc::TermExit;
+        TerminalClosed {
+            id: "abc123".into(),
+            pid: 4321,
+            session_hash: "h".into(),
+            owner: TerminalOwner {
+                username: "alice".into(),
+                uid: 1000,
+                elevated: true,
+            },
+            target_user: "root".into(),
+            target_uid: 0,
+            reason,
+            exit: Some(TermExit {
+                code: None,
+                signal: Some(1),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn 终端关闭事件被组装成完整的审计记录() {
+        let store = Store::open_in_memory().await.unwrap();
+        let audit = TerminalAudit::new(store, "local");
+        let entry = audit.entry_of(&closed_event(CloseReason::Idle));
+
+        assert_eq!(entry.action, "terminal.close");
+        assert_eq!(entry.node_id, "local");
+        assert_eq!(entry.username, "alice", "actor 是登录用户，不是目标用户");
+        assert_eq!(entry.uid, Some(1000));
+        assert!(entry.elevated);
+        assert_eq!(entry.target.as_deref(), Some("abc123"));
+        assert_eq!(entry.detail.as_deref(), Some("idle"));
+        let params: Value = serde_json::from_str(entry.params.as_deref().unwrap()).unwrap();
+        assert_eq!(params["pid"], 4321);
+        assert_eq!(params["user"], "root");
+        assert_eq!(params["signal"], 1);
+        assert!(params.get("code").is_none(), "没取到的字段不得编造");
+    }
+
+    #[tokio::test]
+    async fn 空闲关闭落库_而_deleted_不落() {
+        use strixmaid_core::store::AuditFilter;
+
+        let store = Store::open_in_memory().await.unwrap();
+        let audit = TerminalAudit::new(store.clone(), "local");
+        audit.on_closed(&closed_event(CloseReason::Idle));
+        let mut deleted = closed_event(CloseReason::Deleted);
+        deleted.id = "t2".into();
+        audit.on_closed(&deleted);
+
+        // 写库在 spawn 的任务里，轮询等它落地。
+        for _ in 0..200 {
+            let landed = !store
+                .audit_query(&AuditFilter::default())
+                .await
+                .unwrap()
+                .entries
+                .is_empty();
+            if landed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // 再等一拍：若 deleted 被错误地写入，它此刻也该到了。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let entries = store
+            .audit_query(&AuditFilter::default())
+            .await
+            .unwrap()
+            .entries;
+        assert_eq!(entries.len(), 1, "idle 落一条、deleted 一条都不落");
+        assert_eq!(entries[0].detail.as_deref(), Some("idle"));
+        assert_eq!(entries[0].target.as_deref(), Some("abc123"));
     }
 }

@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | 双向 | **二进制** | PTY 的原始字节，原样透传 |
 //! | 客户端 → 服务端 | 文本 `{"t":"resize","cols":N,"rows":M}` | 改窗口大小 |
-//! | 服务端 → 客户端 | 文本 `{"t":"exit",...}` | 终端没了，随后关闭连接 |
+//! | 服务端 → 客户端 | 文本 `{"t":"exit","reason":…,"code":…,"signal":…}` | 终端没了，随后关闭连接 |
 //!
 //! # 鉴权
 //!
@@ -32,6 +32,7 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use strixmaid_core::session::Session;
 use strixmaid_core::terminal::{AttachEvent, Attachment, CloseReason, TerminalRegistry};
+use strixmaid_types::rpc::TermExit;
 
 use crate::error::ApiErr;
 
@@ -81,9 +82,9 @@ async fn serve(
     id: String,
 ) {
     let (mut sink, mut stream) = socket.split();
-    // 终端侧结束的原因。`None` 表示是浏览器先走的（关标签页、断网），
+    // 终端侧结束的原因与退出状态。`None` 表示是浏览器先走的（关标签页、断网），
     // 那种情况下终端还活着，不该给它发 exit。
-    let mut closed: Option<CloseReason> = None;
+    let mut closed: Option<(CloseReason, Option<TermExit>)> = None;
 
     loop {
         tokio::select! {
@@ -94,8 +95,8 @@ async fn serve(
                         break; // 浏览器已经不在了
                     }
                 }
-                Some(AttachEvent::Closed(reason)) => {
-                    closed = Some(reason);
+                Some(AttachEvent::Closed { reason, exit }) => {
+                    closed = Some((reason, exit));
                     break;
                 }
                 // 通道关了而没收到 Closed：`AttachEvent::Closed` 是尽力而为的
@@ -126,9 +127,10 @@ async fn serve(
     }
 
     // 终端真的没了才发 exit；只是换了个 WS（Replaced）或本端被判死（Stalled）不发。
-    if let Some(reason) = closed.filter(|r| r.is_terminal_gone()) {
-        let frame = serde_json::json!({ "t": "exit", "reason": reason.as_str() });
-        let _ = sink.send(Message::Text(frame.to_string().into())).await;
+    if let Some((reason, exit)) = closed.filter(|(r, _)| r.is_terminal_gone()) {
+        let _ = sink
+            .send(Message::Text(exit_frame(reason, exit).into()))
+            .await;
     }
     let _ = sink.close().await;
     // attachment 在这里 drop → 解除附着。终端本身继续跑（除非它自己没了），
@@ -149,6 +151,23 @@ async fn handle_control(registry: &TerminalRegistry, session_hash: &str, id: &st
         }
         Err(e) => tracing::debug!(id, error = %e, "无法解析的终端控制帧"),
     }
+}
+
+/// 组装 `{"t":"exit"}` 帧（`roadmap/03-terminal.md` §6.3）。
+///
+/// `code` / `signal` 只在 worker 真取到了退出状态时出现。取不到就不带——
+/// 编一个 `code: 0` 顶替会让一个假值看起来像真的。
+fn exit_frame(reason: CloseReason, exit: Option<TermExit>) -> String {
+    let mut frame = serde_json::json!({ "t": "exit", "reason": reason.as_str() });
+    if let Some(e) = exit {
+        if let Some(code) = e.code {
+            frame["code"] = code.into();
+        }
+        if let Some(signal) = e.signal {
+            frame["signal"] = signal.into();
+        }
+    }
+    frame.to_string()
 }
 
 #[cfg(test)]
@@ -192,5 +211,39 @@ mod tests {
         ] {
             assert!(r.is_terminal_gone(), "{} 应当意味着终端已经没了", r.as_str());
         }
+    }
+
+    #[test]
+    fn exit_帧带真实退出状态或不带() {
+        let f = exit_frame(
+            CloseReason::Exited,
+            Some(TermExit {
+                code: Some(0),
+                signal: None,
+            }),
+        );
+        let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+        assert_eq!(v["t"], "exit");
+        assert_eq!(v["reason"], "exited");
+        assert_eq!(v["code"], 0);
+        assert!(v.get("signal").is_none(), "没有的字段不该出现：{f}");
+
+        let f = exit_frame(
+            CloseReason::Deleted,
+            Some(TermExit {
+                code: None,
+                signal: Some(1),
+            }),
+        );
+        let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+        assert_eq!(v["signal"], 1);
+        assert!(v.get("code").is_none());
+
+        // 取不到状态时绝不能出现一个编造的 code。
+        let f = exit_frame(CloseReason::Failed, None);
+        let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+        assert_eq!(v["reason"], "failed");
+        assert!(v.get("code").is_none());
+        assert!(v.get("signal").is_none());
     }
 }

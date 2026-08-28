@@ -72,6 +72,10 @@ pub fn collect_system_info() -> SystemInfo {
         filesystems: storage::read_filesystems(),
         uptime_secs: (ts - boot_ts).max(0) as u64,
         boot_ts,
+        // GPU / 网卡拓扑走 IOKit / getifaddrs，P0 不做（macOS 只是开发平台，
+        // 面板的资源组在 Linux 上验证即可）。如实留空，不是缺陷。
+        gpus: Vec::new(),
+        networks: Vec::new(),
     }
 }
 
@@ -164,6 +168,12 @@ fn read_cpu_info() -> CpuInfo {
         numa_nodes: None,
         mhz,
         quota_cores: None,
+        // Apple Silicon 的封装拓扑要走 IOKit（大小核簇），P0 退化为单封装含全部核。
+        packages: vec![strixmaid_types::system::CpuPackage {
+            id: 0,
+            logical_cores: (0..sysctl_scalar::<i32>("hw.logicalcpu").unwrap_or(1).max(1) as u32)
+                .collect(),
+        }],
     }
 }
 

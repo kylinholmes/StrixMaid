@@ -154,13 +154,21 @@ vendor `@xterm/xterm` 5.x 的 `xterm.js` 与 `xterm.css`，以及 `@xterm/addon-
 
 ## 7. 验收标准
 
-> **实施状态（2026-08-28）**：主体已完成，但下列验收项**尚未满足**，详见
-> [`docs/HANDOFF.md`](../HANDOFF.md)：
+> **实施状态（2026-08-28，第二轮）**：主体完成，此前欠的两项验收已补：
 >
-> - `{"t":"exit"}` 目前不带 `code`（退出码在 worker 里，没有通道送到主进程），故 6.3 未过；
-> - 空闲 / shell 退出 / 登出这三种关闭**没有审计记录**（它们发生在 core 内部），故本节最后一条未过；
+> - **退出码（6.3）**：`term.close` 改为返回 `TermCloseResult { exit }`。退出状态由
+>   worker 的收尸任务带回；shell 自行退出时条目标记 `closed` 后在表里短暂保留
+>   （30 秒），等主进程随 EOF 补发的 `term.close` 来取。`{"t":"exit"}` 帧带真实的
+>   `code` / `signal`；取不到状态就不带字段，不编造 `code: 0`。
+> - **非 REST 关闭的审计（本节最后一条）**：`TerminalRegistry` 增加
+>   `TerminalObserver` 钩子，每次真正执行的关闭恰好回调一次；server 侧
+>   `auth::audit::TerminalAudit` 据此写 `terminal.close` 记录（actor 为开终端时定格
+>   的登录用户）。`deleted` 由 `DELETE` 处理器记录（带来源地址），观察者跳过它。
+>
+> **尚未满足**的两项，均为环境所限，见 [`docs/HANDOFF.md`](../HANDOFF.md)：
+>
 > - `/debug` 终端面板**从未在浏览器中运行过**；
-> - `user` 指定其他用户的 setuid 路径**从未运行过**（开发机非 root），6.6 待 Linux+root 补测。
+> - `user` 指定其他用户的 setuid 路径**从未运行过**（开发机无 root），6.6 待 Linux+root 补测。
 
 
 - 6.2–6.5 通过；

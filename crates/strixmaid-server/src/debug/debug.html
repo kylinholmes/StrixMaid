@@ -1,0 +1,1222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StrixMaid /debug</title>
+<!-- uPlot：同源、gzip、无外部请求。见 src/debug/README.md -->
+<link rel="stylesheet" href="/debug/uplot.css">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel2: #f0f2f5; --border: #d7dbe0;
+    --fg: #1a1d21; --muted: #6b7280; --accent: #2563eb; --accent-fg: #ffffff;
+    --ok: #15803d; --warn: #b45309; --crit: #b91c1c; --info: #2563eb;
+    --code-bg: #f0f2f5; --danger: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #30363d;
+      --fg: #e6edf3; --muted: #8b949e; --accent: #388bfd; --accent-fg: #ffffff;
+      --ok: #3fb950; --warn: #d29922; --crit: #f85149; --info: #58a6ff;
+      --code-bg: #0b0e13; --danger: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px; line-height: 1.5;
+  }
+  a { color: var(--accent); }
+  header#topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  }
+  header#topbar .brand { font-weight: 700; }
+  header#topbar nav { display: flex; flex-wrap: wrap; gap: 8px; }
+  header#topbar nav a { text-decoration: none; padding: 2px 6px; border-radius: 4px; }
+  header#topbar nav a:hover { background: var(--panel2); }
+  #authState { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  main { padding: 14px; max-width: 1200px; margin: 0 auto; }
+  section.panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 16px;
+  }
+  section.panel > h2 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  section.panel > h2 .ep { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  label.field { display: inline-flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+  input, select, textarea, button {
+    font-family: inherit; font-size: 12px; color: var(--fg);
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 4px 7px;
+  }
+  input, select { min-height: 28px; }
+  textarea { width: 100%; resize: vertical; }
+  button { cursor: pointer; background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { background: var(--panel2); position: sticky; top: 0; cursor: default; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--accent); }
+  tbody tr:hover { background: var(--panel2); }
+  tr.clickable { cursor: pointer; }
+  tr.detailrow > td { background: var(--code-bg); white-space: normal; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; }
+  details.raw { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
+  details.raw > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+  details.raw pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; margin-top: 6px; max-height: 320px; overflow: auto; font-size: 11.5px;
+  }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { word-break: break-word; }
+  .err { background: color-mix(in srgb, var(--crit) 12%, var(--panel)); border: 1px solid var(--crit);
+         color: var(--fg); border-radius: 6px; padding: 8px; margin: 6px 0; }
+  .err pre { font-size: 11.5px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; border: 1px solid var(--border); }
+  .sev-ok { color: var(--ok); border-color: var(--ok); }
+  .sev-info { color: var(--info); border-color: var(--info); }
+  .sev-warning { color: var(--warn); border-color: var(--warn); }
+  .sev-critical { color: var(--crit); border-color: var(--crit); }
+  .pill-active, .state-active, .state-running { color: var(--ok); }
+  .pill-failed, .state-failed { color: var(--crit); }
+  .pill-inactive, .state-inactive, .state-sleeping { color: var(--muted); }
+  .muted { color: var(--muted); }
+  .charts { display: grid; gap: 14px; }
+  .chartwrap { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+  .live-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .note { font-size: 11px; color: var(--muted); margin: 4px 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+  .grow { flex: 1 1 240px; }
+  .flag-on { color: var(--ok); } .flag-off { color: var(--crit); } .flag-null { color: var(--muted); }
+  .prompt-info { color: var(--muted); } .prompt-error { color: var(--crit); }
+  .uplot { font-family: inherit; }
+  .status-line { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header id="topbar">
+  <span class="brand">StrixMaid <span class="muted">/debug</span></span>
+  <nav>
+    <a href="#panel-auth">认证</a>
+    <a href="#panel-caps">能力</a>
+    <a href="#panel-system">系统</a>
+    <a href="#panel-metrics">指标</a>
+    <a href="#panel-processes">进程</a>
+    <a href="#panel-services">服务</a>
+    <a href="#panel-logs">日志</a>
+    <a href="#panel-audit">审计</a>
+    <a href="#panel-ws">WS</a>
+  </nav>
+  <span id="authState"><span class="muted">未登录</span></span>
+</header>
+
+<main>
+  <!-- ============================ 认证 ============================ -->
+  <section class="panel" id="panel-auth">
+    <h2>认证 <span class="ep">POST /auth/start · /auth/respond · /auth/elevate/* · /auth/logout · GET /auth/session</span></h2>
+    <div class="note">§5.2 challenge-response。token 存 sessionStorage（关标签页即失效），后续所有请求带 Authorization: Bearer。未登录时其余面板照常可试，接上认证后会返回 401——那正是要看到的。</div>
+    <div id="auth-loggedout">
+      <div class="controls">
+        <label class="field">用户名<input id="auth-username" placeholder="alice"></label>
+        <button id="auth-start-btn">开始登录</button>
+      </div>
+      <div id="auth-prompts"></div>
+    </div>
+    <div id="auth-loggedin" style="display:none">
+      <div class="kv" id="auth-user-kv"></div>
+      <div class="controls" style="margin-top:8px">
+        <button id="auth-session-btn" class="secondary">刷新会话信息</button>
+        <button id="auth-elevate-btn" class="secondary">提权</button>
+        <button id="auth-logout-btn" class="danger">登出</button>
+      </div>
+      <div id="elevate-prompts"></div>
+    </div>
+    <details class="raw"><summary>原始响应</summary><pre id="auth-raw">（尚无请求）</pre></details>
+  </section>
+
+  <!-- ====================== 健康与能力 ====================== -->
+  <section class="panel" id="panel-caps">
+    <h2>健康与能力 <span class="ep">GET /health · /capabilities</span></h2>
+    <div class="controls">
+      <button id="caps-refresh">刷新</button>
+    </div>
+    <div class="row">
+      <div class="grow">
+        <h3 style="font-size:13px;margin:6px 0">/health</h3>
+        <div id="health-body" class="muted">未加载</div>
+        <details class="raw"><summary>原始响应</summary><pre id="health-raw">（尚无请求）</pre></details>
+      </div>
+      <div class="grow">
+        <h3 style="font-size:13px;margin:6px 0">/capabilities · system 层</h3>
+        <div id="caps-system-body" class="muted">未加载</div>
+        <h3 style="font-size:13px;margin:6px 0">user 层</h3>
+        <div id="caps-user-body" class="muted">未加载</div>
+        <details class="raw"><summary>原始响应</summary><pre id="caps-raw">（尚无请求）</pre></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 系统 ============================ -->
+  <section class="panel" id="panel-system">
+    <h2>系统 <span class="ep">GET /system/info · /system/health · /system/time</span></h2>
+    <div class="controls"><button id="system-refresh">刷新全部</button></div>
+    <div class="row">
+      <div class="grow">
+        <h3 style="font-size:13px;margin:6px 0">/system/info</h3>
+        <div id="sysinfo-body" class="muted">未加载</div>
+        <details class="raw"><summary>原始响应</summary><pre id="sysinfo-raw">（尚无请求）</pre></details>
+      </div>
+      <div class="grow">
+        <h3 style="font-size:13px;margin:6px 0">/system/health</h3>
+        <div id="syshealth-body" class="muted">未加载</div>
+        <details class="raw"><summary>原始响应</summary><pre id="syshealth-raw">（尚无请求）</pre></details>
+        <h3 style="font-size:13px;margin:6px 0">/system/time</h3>
+        <div id="systime-body" class="muted">未加载</div>
+        <details class="raw"><summary>原始响应</summary><pre id="systime-raw">（尚无请求）</pre></details>
+      </div>
+    </div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;color:var(--danger);font-weight:600">危险操作（写）</summary>
+      <div class="note">这些是 §9.1 的写操作，需管理访问，未提权会返回 elevation_required。</div>
+      <div class="row" style="margin-top:6px">
+        <div class="grow">
+          <div class="controls">
+            <label class="field">hostname<input id="set-hostname" placeholder="web-02"></label>
+            <label class="field">pretty_hostname<input id="set-pretty" placeholder="(可选)"></label>
+            <button id="set-hostname-btn" class="secondary">PUT /system/hostname</button>
+          </div>
+          <div class="controls">
+            <label class="field">timezone<input id="set-tz" placeholder="Asia/Shanghai"></label>
+            <button id="set-tz-btn" class="secondary">PUT /system/timezone</button>
+          </div>
+        </div>
+        <div class="grow">
+          <div class="controls">
+            <label class="field">action
+              <select id="power-action"><option value="reboot">reboot</option><option value="poweroff">poweroff</option></select>
+            </label>
+            <button id="power-btn" class="danger">POST /system/power</button>
+          </div>
+          <div class="note">poweroff / reboot 会二次确认。</div>
+        </div>
+      </div>
+      <details class="raw"><summary>原始响应</summary><pre id="syswrite-raw">（尚无请求）</pre></details>
+    </details>
+  </section>
+
+  <!-- ============================ 指标 ============================ -->
+  <section class="panel" id="panel-metrics">
+    <h2>指标 <span class="ep">GET /metrics/series · /metrics/query · /metrics/current · WS metrics.live</span></h2>
+    <div class="note">§7.5 展示形式：每个 series 一张 uPlot 图，min–max 半透明区间带 + avg 实线 + med 虚线。avg 与 med 的分离程度即负载偏斜度。</div>
+    <div class="controls">
+      <button id="series-load">加载 series 列表</button>
+      <label class="field">范围
+        <select id="metrics-range">
+          <option value="3600">1h</option>
+          <option value="21600">6h</option>
+          <option value="86400" selected>1d</option>
+          <option value="604800">7d</option>
+          <option value="2592000">30d</option>
+        </select>
+      </label>
+      <label class="field">step(s)<input id="metrics-step" type="number" value="60" style="width:90px"></label>
+      <button id="metrics-query-btn">查询并绘图</button>
+      <button id="metrics-current-btn" class="secondary">/metrics/current 快照</button>
+    </div>
+    <div id="series-list" class="tablewrap" style="max-height:200px;overflow:auto;display:none"></div>
+    <details class="raw"><summary>原始响应 · /metrics/series</summary><pre id="series-raw">（尚无请求）</pre></details>
+    <div id="metrics-charts" class="charts"></div>
+    <details class="raw"><summary>原始响应 · /metrics/query</summary><pre id="metrics-query-raw">（尚无请求）</pre></details>
+    <h3 style="font-size:13px;margin:10px 0 4px">/metrics/current</h3>
+    <div id="metrics-current-body" class="muted">未加载</div>
+    <details class="raw"><summary>原始响应 · /metrics/current</summary><pre id="metrics-current-raw">（尚无请求）</pre></details>
+    <h3 style="font-size:13px;margin:14px 0 4px">实时（WS metrics.live，保留最近 300 点）</h3>
+    <div class="controls">
+      <label class="field"><input type="checkbox" id="live-toggle"> 开启实时</label>
+      <label class="field">CPU metric<input id="live-cpu-metric" value="cpu.usage" style="width:140px"></label>
+      <label class="field">内存 metric<input id="live-mem-metric" value="mem.available" style="width:140px"></label>
+      <span class="status-line" id="live-status">未连接</span>
+    </div>
+    <div class="live-charts">
+      <div class="chartwrap"><div id="live-cpu-chart"></div></div>
+      <div class="chartwrap"><div id="live-mem-chart"></div></div>
+    </div>
+  </section>
+
+  <!-- ============================ 进程 ============================ -->
+  <section class="panel" id="panel-processes">
+    <h2>进程 <span class="ep">GET /processes · /processes/{pid} · POST /processes/{pid}/signal</span></h2>
+    <div class="controls">
+      <button id="proc-load">加载</button>
+      <label class="field">搜索 q<input id="proc-q" placeholder="nginx"></label>
+      <label class="field">user<input id="proc-user" placeholder="(可选)"></label>
+      <label class="field"><input type="checkbox" id="proc-tree"> tree</label>
+      <span class="note">点列头前端排序；点行展开详情。</span>
+    </div>
+    <div id="proc-table" class="tablewrap"></div>
+    <details class="raw"><summary>原始响应</summary><pre id="proc-raw">（尚无请求）</pre></details>
+  </section>
+
+  <!-- ============================ 服务 ============================ -->
+  <section class="panel" id="panel-services">
+    <h2>服务 <span class="ep">GET /services · /services/{unit}[/file|/deps] · POST /services/{unit}/action</span></h2>
+    <div class="controls">
+      <button id="svc-load">加载</button>
+      <label class="field">type<input id="svc-type" placeholder="service" style="width:90px"></label>
+      <label class="field">state
+        <select id="svc-state"><option value="">(全部)</option><option>active</option><option>inactive</option><option>failed</option><option>activating</option><option>deactivating</option></select>
+      </label>
+      <label class="field">enabled
+        <select id="svc-enabled"><option value="">(全部)</option><option value="true">true</option><option value="false">false</option></select>
+      </label>
+      <label class="field">scope
+        <select id="svc-scope"><option value="system">system</option><option value="user">user</option></select>
+      </label>
+      <label class="field">搜索 q<input id="svc-q" placeholder="nginx"></label>
+    </div>
+    <div id="svc-table" class="tablewrap"></div>
+    <details class="raw"><summary>原始响应</summary><pre id="svc-raw">（尚无请求）</pre></details>
+  </section>
+
+  <!-- ============================ 日志 ============================ -->
+  <section class="panel" id="panel-logs">
+    <h2>日志 <span class="ep">GET /logs · /logs/entry/{cursor} · /logs/boots · WS logs.follow</span></h2>
+    <div class="controls">
+      <label class="field">priority
+        <select id="log-priority"><option value="">(全部)</option><option>emerg</option><option>alert</option><option>crit</option><option>err</option><option>warning</option><option>notice</option><option>info</option><option>debug</option></select>
+      </label>
+      <label class="field">unit<input id="log-unit" placeholder="nginx.service"></label>
+      <label class="field">boot<input id="log-boot" placeholder="0 / -1 / boot_id" style="width:90px"></label>
+      <label class="field">q<input id="log-q" placeholder="全文"></label>
+      <label class="field">since(unix)<input id="log-since" type="number" style="width:120px"></label>
+      <label class="field">until(unix)<input id="log-until" type="number" style="width:120px"></label>
+      <label class="field">limit<input id="log-limit" type="number" value="100" style="width:80px"></label>
+      <button id="log-query-btn">查询</button>
+      <button id="log-boots-btn" class="secondary">/logs/boots</button>
+    </div>
+    <div class="controls">
+      <button id="log-prev-btn" class="secondary" disabled>← 更新 (prev_cursor)</button>
+      <button id="log-next-btn" class="secondary" disabled>更旧 (next_cursor) →</button>
+      <label class="field"><input type="checkbox" id="log-follow"> follow (WS)</label>
+      <button id="log-follow-pause" class="secondary" disabled>暂停</button>
+      <span class="status-line" id="log-follow-status"></span>
+    </div>
+    <div id="log-list"></div>
+    <details class="raw"><summary>原始响应 · /logs</summary><pre id="log-raw">（尚无请求）</pre></details>
+    <details class="raw"><summary>原始响应 · /logs/boots · /logs/entry</summary><pre id="log-aux-raw">（尚无请求）</pre></details>
+  </section>
+
+  <!-- ============================ 审计 ============================ -->
+  <section class="panel" id="panel-audit">
+    <h2>审计 <span class="ep">GET /audit（需管理访问）</span></h2>
+    <div class="controls">
+      <button id="audit-load">加载</button>
+      <label class="field">username<input id="audit-user" placeholder="(可选)"></label>
+      <label class="field">action 前缀<input id="audit-action" placeholder="service."></label>
+      <label class="field">result
+        <select id="audit-result"><option value="">(全部)</option><option>ok</option><option>denied</option><option>error</option></select>
+      </label>
+      <label class="field">limit<input id="audit-limit" type="number" value="100" style="width:80px"></label>
+      <button id="audit-more-btn" class="secondary" disabled>更旧 (before_id) →</button>
+    </div>
+    <div id="audit-table" class="tablewrap"></div>
+    <details class="raw"><summary>原始响应</summary><pre id="audit-raw">（尚无请求）</pre></details>
+  </section>
+
+  <!-- ============================ WS 控制台 ============================ -->
+  <section class="panel" id="panel-ws">
+    <h2>WS 控制台 <span class="ep">WS /ws · envelope {v,t,ch,id,d}</span></h2>
+    <div class="note">§9.2 envelope。自增 id、sub/unsub、ping 保活、断线 3s 重连并重新订阅、err 帧显示。用来调协议本身。</div>
+    <div class="controls">
+      <button id="ws-connect-btn">连接</button>
+      <button id="ws-disconnect-btn" class="secondary">断开</button>
+      <span class="status-line" id="ws-status">未连接</span>
+    </div>
+    <div class="controls">
+      <label class="field">频道
+        <select id="ws-channel"><option>metrics.live</option><option>logs.follow</option><option>services.changed</option><option>system.health</option><option>processes.live</option></select>
+      </label>
+      <button id="ws-sub-btn" class="secondary">sub</button>
+      <button id="ws-unsub-btn" class="secondary">unsub</button>
+      <button id="ws-ping-btn" class="secondary">ping</button>
+    </div>
+    <div class="row">
+      <div class="grow">
+        <div class="note">手写 envelope 后「发送」（会自动补 v=1，未填 id 时补自增 id）：</div>
+        <textarea id="ws-raw-input" rows="4">{"t":"sub","ch":"metrics.live","d":null}</textarea>
+        <div class="controls"><button id="ws-send-btn">发送</button><button id="ws-clear-btn" class="secondary">清空日志</button></div>
+      </div>
+      <div class="grow">
+        <div class="note">收到/发出的帧（最新在上，保留最近 200 条）：</div>
+        <pre id="ws-log" style="background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:340px;overflow:auto">（未连接）</pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/debug/uplot.js"></script>
+<script>
+"use strict";
+(function () {
+  // ============================ 共享工具 ============================
+  const API = "/api/v1";
+  const TOKEN_KEY = "strixmaid_token";
+  const $ = (id) => document.getElementById(id);
+  const has = (v) => v !== undefined && v !== null;
+
+  function getToken() { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+  function setToken(t) { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
+  function clearToken() { try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function fmtTs(ts) {
+    if (!has(ts)) return "—";
+    const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleString() + " (" + ts + ")";
+  }
+  function fmtTsMs(ts, us) {
+    const d = new Date(ts * 1000);
+    const ms = has(us) ? String(Math.floor(us / 1000)).padStart(3, "0") : "000";
+    return d.toLocaleString() + "." + ms;
+  }
+  function fmtBytes(n) {
+    if (!has(n)) return "—";
+    const u = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let i = 0, v = Number(n);
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(2)) + " " + u[i];
+  }
+  function fmtNum(v) { return typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(3)) : String(v); }
+
+  // 统一 fetch：带 token、序列化 query/body、抓取原始文本。永不抛（每个面板独立容错）。
+  async function api(method, path, opts) {
+    opts = opts || {};
+    let url = API + path;
+    if (opts.query) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(opts.query)) {
+        if (has(v) && v !== "") qs.append(k, v);
+      }
+      const s = qs.toString();
+      if (s) url += "?" + s;
+    }
+    const headers = {};
+    const t = getToken();
+    if (t) headers["Authorization"] = "Bearer " + t;
+    const fetchOpts = { method, headers };
+    if (has(opts.body)) {
+      headers["Content-Type"] = "application/json";
+      fetchOpts.body = JSON.stringify(opts.body);
+    }
+    const res = { method, url, status: 0, ok: false, text: "", data: null, netError: null };
+    try {
+      const r = await fetch(url, fetchOpts);
+      res.status = r.status;
+      res.ok = r.ok;
+      res.text = await r.text();
+      try { res.data = res.text ? JSON.parse(res.text) : null; } catch (e) { res.data = null; }
+    } catch (e) {
+      res.netError = String(e);
+    }
+    return res;
+  }
+
+  // 渲染「原始响应」折叠区内容
+  function showRaw(preEl, res) {
+    if (!preEl) return;
+    let s = res.method + " " + res.url + "\n";
+    if (res.netError) { preEl.textContent = s + "网络错误: " + res.netError; return; }
+    s += "状态: " + res.status + "\n\n";
+    let body = res.text;
+    try { if (res.data !== null) body = JSON.stringify(res.data, null, 2); } catch (e) {}
+    preEl.textContent = s + (body || "(空响应体)");
+  }
+  // 错误块（非 2xx / 网络错误）。返回 true 表示确实是错误。
+  function renderError(container, res) {
+    if (res.netError) {
+      container.innerHTML = '<div class="err">网络错误：' + esc(res.netError) + "</div>";
+      return true;
+    }
+    if (!res.ok) {
+      let msg = res.text;
+      try { msg = JSON.stringify(res.data, null, 2); } catch (e) {}
+      container.innerHTML = '<div class="err"><b>HTTP ' + res.status + "</b><pre>" + esc(msg) + "</pre></div>";
+      return true;
+    }
+    return false;
+  }
+  function kvTable(obj) {
+    let h = '<div class="kv">';
+    for (const [k, v] of Object.entries(obj)) {
+      h += '<div class="k">' + esc(k) + '</div><div class="v">' + esc(has(v) ? v : "—") + "</div>";
+    }
+    return h + "</div>";
+  }
+  function flag(v) {
+    if (v === true) return '<span class="flag-on">true</span>';
+    if (v === false) return '<span class="flag-off">false</span>';
+    return '<span class="flag-null">null</span>';
+  }
+
+  // ============================ 认证 ============================
+  // §5.2 challenge-response。login 与 elevate 复用同一流程，只是 URL 前缀不同。
+  function renderPrompts(container, prompts, onSubmit) {
+    container.innerHTML = "";
+    const inputs = {};
+    (prompts || []).forEach((p) => {
+      const wrap = document.createElement("div");
+      wrap.style.margin = "6px 0";
+      if (p.style === "info" || p.style === "error") {
+        wrap.innerHTML = '<span class="prompt-' + esc(p.style) + '">' + esc(p.text) + "</span>";
+      } else {
+        const type = p.style === "prompt" ? "password" : "text";
+        wrap.innerHTML = '<label class="field">' + esc(p.text) +
+          '<input type="' + type + '" data-pid="' + p.id + '" autocomplete="off"></label>';
+      }
+      container.appendChild(wrap);
+      const inp = wrap.querySelector("input");
+      if (inp) { inputs[p.id] = inp; }
+    });
+    const needInput = (prompts || []).some((p) => p.style === "prompt" || p.style === "prompt_echo");
+    const btn = document.createElement("button");
+    btn.textContent = needInput ? "提交" : "继续";
+    btn.onclick = () => {
+      const responses = [];
+      for (const [pid, inp] of Object.entries(inputs)) {
+        responses.push({ id: Number(pid), value: inp.value });
+      }
+      onSubmit(responses);
+    };
+    container.appendChild(btn);
+    const first = Object.values(inputs)[0];
+    if (first) first.focus();
+  }
+
+  async function runAuthFlow(prefix, username, promptsContainer, onComplete) {
+    // prefix: "/auth" 或 "/auth/elevate"
+    const start = await api("POST", prefix + "/start", { body: { username } });
+    showRaw($("auth-raw"), start);
+    if (renderError(promptsContainer, start)) return;
+    let session = start.data && start.data.session;
+    const step = (prompts) => {
+      renderPrompts(promptsContainer, prompts, async (responses) => {
+        const resp = await api("POST", prefix + "/respond", { body: { session, responses } });
+        showRaw($("auth-raw"), resp);
+        if (renderError(promptsContainer, resp)) return;
+        const out = resp.data || {};
+        if (out.status === "complete") {
+          if (out.token) setToken(out.token);
+          promptsContainer.innerHTML = '<span class="flag-on">✔ ' + (prefix.includes("elevate") ? "提权完成" : "登录完成") + "</span>";
+          onComplete(out);
+        } else if (out.status === "more") {
+          session = out.session || session;
+          step(out.prompts);
+        } else {
+          promptsContainer.innerHTML = '<div class="err">未知的 status：' + esc(JSON.stringify(out)) + "</div>";
+        }
+      });
+    };
+    step(start.data && start.data.prompts);
+  }
+
+  function setAuthUser(user) {
+    // user: AuthUser 或 SessionInfo（字段兼容取用）
+    const name = user.username || user.name || "?";
+    $("authState").innerHTML = '<span class="flag-on">已登录: ' + esc(name) +
+      (user.elevated ? ' <span class="badge sev-warning">elevated</span>' : "") + "</span>";
+    $("auth-loggedout").style.display = "none";
+    $("auth-loggedin").style.display = "";
+    const kv = {
+      uid: user.uid, gid: has(user.gid) ? user.gid : "—",
+      username: name, groups: (user.groups || []).join(", "),
+      elevated: has(user.elevated) ? user.elevated : "—",
+    };
+    if (has(user.authed_ts)) kv.authed_ts = fmtTs(user.authed_ts);
+    if (has(user.node)) kv.node = user.node;
+    $("auth-user-kv").innerHTML = "";
+    for (const [k, v] of Object.entries(kv)) {
+      $("auth-user-kv").insertAdjacentHTML("beforeend",
+        '<div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + "</div>");
+    }
+  }
+  function setLoggedOut() {
+    clearToken();
+    $("authState").innerHTML = '<span class="muted">未登录</span>';
+    $("auth-loggedin").style.display = "none";
+    $("auth-loggedout").style.display = "";
+    $("auth-prompts").innerHTML = "";
+    $("elevate-prompts").innerHTML = "";
+  }
+
+  $("auth-start-btn").onclick = () => {
+    const u = $("auth-username").value.trim();
+    if (!u) { $("auth-prompts").innerHTML = '<div class="err">请输入用户名</div>'; return; }
+    runAuthFlow("/auth", u, $("auth-prompts"), (out) => { if (out.user) setAuthUser(out.user); else refreshSession(); });
+  };
+  $("auth-elevate-btn").onclick = () => {
+    const u = ($("auth-username").value.trim()) ||
+      ($("authState").textContent.replace(/^已登录:\s*/, "").split(" ")[0]) || "";
+    runAuthFlow("/auth/elevate", u, $("elevate-prompts"), () => refreshSession());
+  };
+  $("auth-logout-btn").onclick = async () => {
+    const res = await api("POST", "/auth/logout", { body: {} });
+    showRaw($("auth-raw"), res);
+    setLoggedOut();
+  };
+  $("auth-session-btn").onclick = () => refreshSession();
+  async function refreshSession() {
+    const res = await api("GET", "/auth/session");
+    showRaw($("auth-raw"), res);
+    if (res.ok && res.data) { setAuthUser(res.data); $("auth-username").value = res.data.username || ""; }
+    else if (res.status === 401) setLoggedOut();
+  }
+
+  // ====================== 健康与能力 ======================
+  async function loadHealthCaps() {
+    const h = await api("GET", "/health");
+    showRaw($("health-raw"), h);
+    if (!renderError($("health-body"), h)) $("health-body").innerHTML = kvTable(h.data || {});
+
+    const c = await api("GET", "/capabilities");
+    showRaw($("caps-raw"), c);
+    if (renderError($("caps-system-body"), c)) { $("caps-user-body").innerHTML = ""; return; }
+    const d = c.data || {};
+    const sys = d.system || {};
+    let sh = '<div class="kv">';
+    for (const [k, v] of Object.entries(sys)) sh += '<div class="k">' + esc(k) + '</div><div class="v">' + flag(v) + "</div>";
+    $("caps-system-body").innerHTML = sh + "</div>";
+    if (!has(d.user)) {
+      $("caps-user-body").innerHTML = '<span class="muted">user 为 null —— <b>未认证</b>（本端点未认证也返回 200，只带 system 层）。</span>';
+    } else {
+      let uh = '<div class="kv">';
+      for (const [k, v] of Object.entries(d.user)) {
+        uh += '<div class="k">' + esc(k) + '</div><div class="v">' + (typeof v === "boolean" ? flag(v) : esc(Array.isArray(v) ? v.join(", ") : v)) + "</div>";
+      }
+      $("caps-user-body").innerHTML = uh + "</div>";
+    }
+  }
+  $("caps-refresh").onclick = loadHealthCaps;
+
+  // ============================ 系统 ============================
+  function renderDeep(obj) {
+    // 顶层标量进 kv 表；对象/数组进可折叠 pre。
+    let h = '<div class="kv">';
+    const nested = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== null && typeof v === "object") { nested.push([k, v]); }
+      else { h += '<div class="k">' + esc(k) + '</div><div class="v">' + esc(has(v) ? v : "—") + "</div>"; }
+    }
+    h += "</div>";
+    for (const [k, v] of nested) {
+      h += '<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--muted)">' + esc(k) +
+        (Array.isArray(v) ? " [" + v.length + "]" : "") + '</summary><pre style="background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:4px;max-height:260px;overflow:auto">' +
+        esc(JSON.stringify(v, null, 2)) + "</pre></details>";
+    }
+    return h;
+  }
+  async function loadSystem() {
+    const info = await api("GET", "/system/info");
+    showRaw($("sysinfo-raw"), info);
+    if (!renderError($("sysinfo-body"), info)) $("sysinfo-body").innerHTML = renderDeep(info.data || {});
+
+    const health = await api("GET", "/system/health");
+    showRaw($("syshealth-raw"), health);
+    if (!renderError($("syshealth-body"), health)) {
+      const d = health.data || {};
+      let h = '总体：<span class="badge sev-' + esc(d.status) + '">' + esc(d.status) + "</span>";
+      h += ' <span class="muted">@ ' + fmtTs(d.ts) + "</span>";
+      if ((d.items || []).length) {
+        h += '<div class="tablewrap" style="margin-top:6px"><table><thead><tr><th>severity</th><th>id</th><th>title</th><th>target</th><th>detail</th></tr></thead><tbody>';
+        d.items.forEach((it) => {
+          h += "<tr><td><span class='badge sev-" + esc(it.severity) + "'>" + esc(it.severity) + "</span></td><td>" +
+            esc(it.id) + "</td><td>" + esc(it.title) + "</td><td>" + esc(it.target || "—") + "</td><td>" + esc(it.detail || "—") + "</td></tr>";
+        });
+        h += "</tbody></table></div>";
+      } else h += '<div class="note">items 为空 —— 一切正常（不是「没检查」）。</div>';
+      if ((d.skipped || []).length) h += '<div class="note">skipped（能力缺失未检查）：' + esc(d.skipped.join(", ")) + "</div>";
+      $("syshealth-body").innerHTML = h;
+    }
+
+    const time = await api("GET", "/system/time");
+    showRaw($("systime-raw"), time);
+    if (!renderError($("systime-body"), time)) {
+      const d = time.data || {};
+      const drift = has(d.ts) ? Math.round(Date.now() / 1000 - d.ts) : null;
+      $("systime-body").innerHTML = kvTable({
+        ts: fmtTs(d.ts), timezone: d.timezone, utc_offset_secs: d.utc_offset_secs,
+        ntp_enabled: d.ntp_enabled, ntp_synchronized: d.ntp_synchronized, ntp_service: d.ntp_service,
+        rtc_local: d.rtc_local, "本地时钟偏差(s)": drift,
+      });
+    }
+  }
+  $("system-refresh").onclick = loadSystem;
+  $("set-hostname-btn").onclick = async () => {
+    const body = { hostname: $("set-hostname").value.trim() };
+    const p = $("set-pretty").value.trim(); if (p) body.pretty_hostname = p;
+    const res = await api("PUT", "/system/hostname", { body });
+    showRaw($("syswrite-raw"), res);
+  };
+  $("set-tz-btn").onclick = async () => {
+    const res = await api("PUT", "/system/timezone", { body: { timezone: $("set-tz").value.trim() } });
+    showRaw($("syswrite-raw"), res);
+  };
+  $("power-btn").onclick = async () => {
+    const action = $("power-action").value;
+    if (!confirm("确认对本机执行 " + action + " ？")) return;
+    if (action === "poweroff" && !confirm("再次确认：poweroff 会让本机失联！")) return;
+    const res = await api("POST", "/system/power", { body: { action } });
+    showRaw($("syswrite-raw"), res);
+  };
+
+  // ============================ 指标 ============================
+  let seriesMeta = [];       // /metrics/series 结果
+  const metricCharts = [];   // {u, wrap, height}
+
+  function isDark() { return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches; }
+  function chartColors() {
+    return isDark()
+      ? { axis: "#8b949e", grid: "rgba(139,148,158,0.15)", avg: "#58a6ff", med: "#f0883e", band: "rgba(88,166,255,0.16)", edge: "rgba(88,166,255,0.35)" }
+      : { axis: "#6b7280", grid: "rgba(107,114,128,0.15)", avg: "#2563eb", med: "#c2410c", band: "rgba(37,99,235,0.14)", edge: "rgba(37,99,235,0.35)" };
+  }
+
+  // 把一条 MetricSeries 的 points 转成 uPlot 数据，按 step 检测空洞并插 null（§7.5：有洞应断线）。
+  function pointsToData(points, step) {
+    const xs = [], mins = [], maxs = [], avgs = [], meds = [];
+    let prev = null;
+    (points || []).forEach((p) => {
+      if (prev !== null && step && p.ts - prev > step * 1.5) {
+        xs.push(prev + step); mins.push(null); maxs.push(null); avgs.push(null); meds.push(null);
+      }
+      xs.push(p.ts);
+      mins.push(p.min); maxs.push(p.max);
+      avgs.push(p.cnt > 0 ? p.sum / p.cnt : null);
+      meds.push(p.med);
+      prev = p.ts;
+    });
+    return [xs, mins, maxs, avgs, meds];
+  }
+
+  function makeBandChart(container, title, data, unit) {
+    if (typeof uPlot === "undefined") { container.innerHTML = '<div class="err">uPlot 未加载</div>'; return; }
+    const c = chartColors();
+    const width = Math.max(260, container.clientWidth || 600);
+    const height = 220;
+    const opts = {
+      title: title + (unit ? " (" + unit + ")" : ""),
+      width, height,
+      scales: { x: { time: true } },
+      axes: [
+        { stroke: c.axis, grid: { stroke: c.grid }, ticks: { stroke: c.grid } },
+        { stroke: c.axis, grid: { stroke: c.grid }, ticks: { stroke: c.grid } },
+      ],
+      series: [
+        {},
+        { label: "min", stroke: c.edge, width: 0.5, points: { show: false } },
+        { label: "max", stroke: c.edge, width: 0.5, points: { show: false } },
+        { label: "avg", stroke: c.avg, width: 2, points: { show: false } },
+        { label: "med", stroke: c.med, width: 1.5, dash: [7, 4], points: { show: false } },
+      ],
+      // §7.5 / uPlot bands：在 max(2) 与 min(1) 之间填半透明区间带。
+      bands: [{ series: [2, 1], fill: c.band }],
+    };
+    const u = new uPlot(opts, data, container);
+    metricCharts.push({ u, wrap: container, height });
+  }
+
+  async function loadSeries() {
+    const res = await api("GET", "/metrics/series");
+    showRaw($("series-raw"), res);
+    const box = $("series-list");
+    box.style.display = "";
+    if (renderError(box, res)) return;
+    // 假设返回 SeriesMeta[]；也兼容 {series:[...]} 包裹。
+    const arr = Array.isArray(res.data) ? res.data : (res.data && res.data.series) || [];
+    seriesMeta = arr;
+    if (!arr.length) { box.innerHTML = '<div class="note" style="padding:8px">无 series</div>'; return; }
+    let h = "<table><thead><tr><th>✓</th><th>id</th><th>metric</th><th>labels</th><th>unit</th><th>node</th></tr></thead><tbody>";
+    arr.forEach((s) => {
+      h += '<tr><td><input type="checkbox" class="series-cb" value="' + esc(s.id) + '"></td><td>' + esc(s.id) +
+        "</td><td>" + esc(s.metric) + "</td><td>" + esc(s.labels || "") + "</td><td>" + esc(s.unit || "—") +
+        "</td><td>" + esc(s.node) + "</td></tr>";
+    });
+    box.innerHTML = h + "</tbody></table>";
+  }
+  $("series-load").onclick = loadSeries;
+
+  async function queryMetrics() {
+    const checked = Array.from(document.querySelectorAll(".series-cb:checked")).map((cb) => cb.value);
+    const chartsEl = $("metrics-charts");
+    metricCharts.forEach((mc) => { try { mc.u.destroy(); } catch (e) {} });
+    metricCharts.length = 0;
+    chartsEl.innerHTML = "";
+    if (!checked.length) { chartsEl.innerHTML = '<div class="note">先在上方勾选 series（或先「加载 series 列表」）。</div>'; return; }
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - Number($("metrics-range").value);
+    const step = Number($("metrics-step").value) || 60;
+    const res = await api("GET", "/metrics/query", { query: { series: checked.join(","), from, to, step } });
+    showRaw($("metrics-query-raw"), res);
+    if (renderError(chartsEl, res)) return;
+    const d = res.data || {};
+    const header = document.createElement("div");
+    header.className = "note";
+    header.innerHTML = "选中层：<b>" + esc(d.layer) + "</b> · step=" + esc(d.step) + "s · from=" + fmtTs(d.from) + " · to=" + fmtTs(d.to) +
+      " · " + ((d.series || []).length) + " 条曲线";
+    chartsEl.appendChild(header);
+    (d.series || []).forEach((s) => {
+      const wrap = document.createElement("div");
+      wrap.className = "chartwrap";
+      chartsEl.appendChild(wrap);
+      const title = s.meta.metric + (s.meta.labels ? "{" + s.meta.labels + "}" : "");
+      makeBandChart(wrap, title, pointsToData(s.points, d.step), s.meta.unit);
+    });
+    if (!(d.series || []).length) chartsEl.appendChild(Object.assign(document.createElement("div"), { className: "note", textContent: "无数据（库中查无所选 series）" }));
+  }
+  $("metrics-query-btn").onclick = queryMetrics;
+
+  async function loadCurrent() {
+    const res = await api("GET", "/metrics/current");
+    showRaw($("metrics-current-raw"), res);
+    const body = $("metrics-current-body");
+    if (renderError(body, res)) return;
+    const d = res.data || {};
+    let h = '<div class="note">@ ' + fmtTs(d.ts) + "</div><div class='tablewrap'><table><thead><tr><th>metric</th><th>labels</th><th>value</th><th>unit</th></tr></thead><tbody>";
+    (d.values || []).forEach((v) => {
+      h += "<tr><td>" + esc(v.metric) + "</td><td>" + esc(v.labels || "") + "</td><td>" + fmtNum(v.value) + "</td><td>" + esc(v.unit || "—") + "</td></tr>";
+    });
+    body.innerHTML = h + "</tbody></table></div>";
+  }
+  $("metrics-current-btn").onclick = loadCurrent;
+
+  window.addEventListener("resize", () => {
+    metricCharts.forEach((mc) => { try { mc.u.setSize({ width: Math.max(260, mc.wrap.clientWidth), height: mc.height }); } catch (e) {} });
+  });
+
+  // ---- 实时 live 图（rolling 300） ----
+  const LIVE_MAX = 300;
+  const liveCpu = { x: [], y: [], u: null };
+  const liveMem = { x: [], y: [], u: null };
+  function makeLiveChart(container, label, unit) {
+    if (typeof uPlot === "undefined") return null;
+    const c = chartColors();
+    const opts = {
+      title: label, width: Math.max(260, container.clientWidth || 300), height: 180,
+      scales: { x: { time: true } },
+      axes: [
+        { stroke: c.axis, grid: { stroke: c.grid }, ticks: { stroke: c.grid } },
+        { stroke: c.axis, grid: { stroke: c.grid }, ticks: { stroke: c.grid } },
+      ],
+      series: [{}, { label: unit || "value", stroke: c.avg, width: 1.5, points: { show: false } }],
+    };
+    return new uPlot(opts, [[], []], container);
+  }
+  function pushLive(store, ts, val) {
+    store.x.push(ts); store.y.push(val);
+    while (store.x.length > LIVE_MAX) { store.x.shift(); store.y.shift(); }
+    if (store.u) store.u.setData([store.x, store.y]);
+  }
+  function onLiveSnapshot(snap) {
+    const ts = snap.ts || Math.floor(Date.now() / 1000);
+    const cpuM = $("live-cpu-metric").value.trim();
+    const memM = $("live-mem-metric").value.trim();
+    (snap.values || []).forEach((v) => {
+      if (v.metric === cpuM) pushLive(liveCpu, ts, v.value);
+      if (v.metric === memM) pushLive(liveMem, ts, v.value);
+    });
+  }
+  $("live-toggle").onchange = (e) => {
+    if (e.target.checked) {
+      if (!liveCpu.u) liveCpu.u = makeLiveChart($("live-cpu-chart"), "实时 CPU", "%");
+      if (!liveMem.u) liveMem.u = makeLiveChart($("live-mem-chart"), "实时内存", "value");
+      wsClient.connect();
+      wsClient.sub("metrics.live", null, (env) => onLiveSnapshot(env.d || {}));
+      $("live-status").textContent = "已订阅 metrics.live";
+    } else {
+      wsClient.unsub("metrics.live");
+      $("live-status").textContent = "已退订";
+    }
+  };
+
+  // ============================ 进程 ============================
+  let procRows = [];
+  let procSort = { key: "cpu_percent", dir: "desc" };
+  const PROC_COLS = [
+    ["pid", "pid"], ["ppid", "ppid"], ["name", "name"], ["user", "user"], ["state", "state"],
+    ["cpu_percent", "cpu%"], ["rss_bytes", "rss"], ["mem_percent", "mem%"], ["threads", "thr"], ["nice", "nice"],
+  ];
+  function sortProc() {
+    const k = procSort.key, dir = procSort.dir === "asc" ? 1 : -1;
+    procRows.sort((a, b) => {
+      let va = a[k], vb = b[k];
+      if (typeof va === "string" || typeof vb === "string") { va = va || ""; vb = vb || ""; return dir * String(va).localeCompare(String(vb)); }
+      return dir * ((va || 0) - (vb || 0));
+    });
+  }
+  function renderProc() {
+    sortProc();
+    let h = "<table><thead><tr>";
+    PROC_COLS.forEach(([key, lbl]) => {
+      const arrow = procSort.key === key ? (procSort.dir === "asc" ? " ▲" : " ▼") : "";
+      h += '<th class="sortable" data-key="' + key + '">' + esc(lbl) + arrow + "</th>";
+    });
+    h += "<th>cmdline</th></tr></thead><tbody>";
+    procRows.forEach((p) => {
+      h += '<tr class="clickable" data-pid="' + p.pid + '"><td>' + p.pid + "</td><td>" + p.ppid + "</td><td>" + esc(p.name) +
+        "</td><td>" + esc(p.user || "—") + '</td><td class="state-' + esc(p.state) + '">' + esc(p.state) + "</td><td>" +
+        fmtNum(p.cpu_percent) + "</td><td>" + fmtBytes(p.rss_bytes) + "</td><td>" + fmtNum(p.mem_percent) + "</td><td>" +
+        p.threads + "</td><td>" + p.nice + '</td><td class="muted">' + esc((p.cmdline || "").slice(0, 80)) + "</td></tr>";
+    });
+    h += "</tbody></table>";
+    const box = $("proc-table");
+    box.innerHTML = h;
+    box.querySelectorAll("th.sortable").forEach((th) => {
+      th.onclick = () => {
+        const key = th.dataset.key;
+        if (procSort.key === key) procSort.dir = procSort.dir === "asc" ? "desc" : "asc";
+        else { procSort.key = key; procSort.dir = "desc"; }
+        renderProc();
+      };
+    });
+    box.querySelectorAll("tr.clickable").forEach((tr) => { tr.onclick = () => toggleProcDetail(tr, Number(tr.dataset.pid)); });
+  }
+  async function toggleProcDetail(tr, pid) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains("detailrow")) { next.remove(); return; }
+    const res = await api("GET", "/processes/" + pid);
+    showRaw($("proc-raw"), res);
+    const row = document.createElement("tr");
+    row.className = "detailrow";
+    const td = document.createElement("td");
+    td.colSpan = PROC_COLS.length + 1;
+    if (res.netError || !res.ok) {
+      td.innerHTML = '<div class="err"><pre>' + esc(res.text || res.netError) + "</pre></div>";
+    } else {
+      const d = res.data || {};
+      td.innerHTML = renderDeep(d) +
+        '<div class="controls" style="margin-top:8px">' +
+        '<label class="field">信号<select class="sig-sel"><option>TERM</option><option>KILL</option><option>HUP</option></select></label>' +
+        '<button class="sig-btn danger" data-pid="' + pid + '">发送信号</button></div>';
+    }
+    row.appendChild(td);
+    tr.after(row);
+    const btn = td.querySelector(".sig-btn");
+    if (btn) btn.onclick = async () => {
+      const sig = td.querySelector(".sig-sel").value;
+      if (!confirm("对 pid " + pid + " 发送 SIG" + sig + " ？")) return;
+      if (sig === "KILL" && !confirm("再次确认：SIGKILL 不给进程清理机会！")) return;
+      const r = await api("POST", "/processes/" + pid + "/signal", { body: { signal: sig } });
+      showRaw($("proc-raw"), r);
+      alert("HTTP " + r.status + "\n" + (r.text || ""));
+    };
+  }
+  async function loadProc() {
+    const q = { q: $("proc-q").value.trim(), user: $("proc-user").value.trim() };
+    if ($("proc-tree").checked) q.tree = "true";
+    const res = await api("GET", "/processes", { query: q });
+    showRaw($("proc-raw"), res);
+    if (renderError($("proc-table"), res)) return;
+    procRows = Array.isArray(res.data) ? res.data : (res.data && res.data.processes) || [];
+    renderProc();
+  }
+  $("proc-load").onclick = loadProc;
+
+  // ============================ 服务 ============================
+  let svcRows = [];
+  async function loadSvc() {
+    const q = {
+      type: $("svc-type").value.trim(), state: $("svc-state").value, enabled: $("svc-enabled").value,
+      q: $("svc-q").value.trim(), scope: $("svc-scope").value,
+    };
+    const res = await api("GET", "/services", { query: q });
+    showRaw($("svc-raw"), res);
+    if (renderError($("svc-table"), res)) return;
+    svcRows = Array.isArray(res.data) ? res.data : (res.data && res.data.units) || [];
+    let h = "<table><thead><tr><th>name</th><th>type</th><th>load</th><th>active</th><th>sub</th><th>enable</th><th>scope</th><th>description</th></tr></thead><tbody>";
+    svcRows.forEach((u) => {
+      h += '<tr class="clickable" data-unit="' + esc(u.name) + '" data-scope="' + esc(u.scope) + '"><td>' + esc(u.name) + "</td><td>" + esc(u.unit_type) +
+        "</td><td>" + esc(u.load_state) + '</td><td class="state-' + esc(u.active_state) + '">' + esc(u.active_state) + "</td><td>" + esc(u.sub_state) +
+        "</td><td>" + esc(u.enable_state || "—") + "</td><td>" + esc(u.scope) + '</td><td class="muted">' + esc((u.description || "").slice(0, 60)) + "</td></tr>";
+    });
+    const box = $("svc-table");
+    box.innerHTML = h + "</tbody></table>";
+    box.querySelectorAll("tr.clickable").forEach((tr) => { tr.onclick = () => toggleSvcDetail(tr, tr.dataset.unit, tr.dataset.scope); });
+  }
+  async function toggleSvcDetail(tr, unit, scope) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains("detailrow")) { next.remove(); return; }
+    const enc = encodeURIComponent(unit);
+    const detail = await api("GET", "/services/" + enc, { query: { scope } });
+    showRaw($("svc-raw"), detail);
+    const row = document.createElement("tr");
+    row.className = "detailrow";
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    let inner = "";
+    if (detail.netError || !detail.ok) inner += '<div class="err"><pre>' + esc(detail.text || detail.netError) + "</pre></div>";
+    else inner += renderDeep(detail.data || {});
+    // 操作按钮
+    inner += '<div class="controls" style="margin-top:8px">';
+    ["start", "stop", "restart", "reload", "enable", "disable"].forEach((a) => {
+      const cls = (a === "stop" || a === "disable") ? "danger" : "secondary";
+      inner += '<button class="svc-act ' + cls + '" data-act="' + a + '">' + a + "</button>";
+    });
+    inner += "</div>";
+    inner += '<div class="controls"><button class="svc-file secondary">unit 文件原文</button><button class="svc-deps secondary">依赖 (deps)</button></div>';
+    inner += '<div class="svc-aux"></div>';
+    td.innerHTML = inner;
+    row.appendChild(td);
+    tr.after(row);
+    td.querySelectorAll(".svc-act").forEach((b) => {
+      b.onclick = async () => {
+        const action = b.dataset.act;
+        if ((action === "stop" || action === "restart" || action === "disable") && !confirm("对 " + unit + " 执行 " + action + " ？")) return;
+        const r = await api("POST", "/services/" + enc + "/action", { query: { scope }, body: { action } });
+        showRaw($("svc-raw"), r);
+        td.querySelector(".svc-aux").innerHTML = '<pre style="background:var(--code-bg);border:1px solid var(--border);padding:8px;border-radius:6px;margin-top:6px">HTTP ' + r.status + "\n" + esc(r.text || "") + "</pre>";
+      };
+    });
+    td.querySelector(".svc-file").onclick = async () => {
+      const r = await api("GET", "/services/" + enc + "/file", { query: { scope } });
+      showRaw($("svc-raw"), r);
+      const aux = td.querySelector(".svc-aux");
+      if (r.netError || !r.ok) { aux.innerHTML = '<div class="err"><pre>' + esc(r.text || r.netError) + "</pre></div>"; return; }
+      const d = r.data || {};
+      let x = "";
+      const frags = [];
+      if (d.fragment) frags.push(d.fragment);
+      (d.drop_ins || []).forEach((f) => frags.push(f));
+      frags.forEach((f) => { x += '<div class="note">' + esc(f.path) + '</div><pre style="background:var(--code-bg);border:1px solid var(--border);padding:8px;border-radius:6px;max-height:300px;overflow:auto">' + esc(f.content) + "</pre>"; });
+      aux.innerHTML = x || '<div class="note">无文件内容</div>';
+    };
+    td.querySelector(".svc-deps").onclick = async () => {
+      const r = await api("GET", "/services/" + enc + "/deps", { query: { scope } });
+      showRaw($("svc-raw"), r);
+      const aux = td.querySelector(".svc-aux");
+      if (r.netError || !r.ok) { aux.innerHTML = '<div class="err"><pre>' + esc(r.text || r.netError) + "</pre></div>"; return; }
+      aux.innerHTML = '<pre style="background:var(--code-bg);border:1px solid var(--border);padding:8px;border-radius:6px;max-height:300px;overflow:auto">' + esc(JSON.stringify(r.data, null, 2)) + "</pre>";
+    };
+  }
+  $("svc-load").onclick = loadSvc;
+
+  // ============================ 日志 ============================
+  const PRIO_CLASS = { emerg: "sev-critical", alert: "sev-critical", crit: "sev-critical", err: "sev-critical", warning: "sev-warning", notice: "sev-info", info: "", debug: "muted" };
+  let logCursors = { next: null, prev: null };
+  function logBaseQuery() {
+    return {
+      priority: $("log-priority").value, unit: $("log-unit").value.trim(), boot: $("log-boot").value.trim(),
+      q: $("log-q").value.trim(), since: $("log-since").value, until: $("log-until").value,
+      limit: $("log-limit").value,
+    };
+  }
+  function renderLogEntries(entries) {
+    let h = '<div class="tablewrap"><table><thead><tr><th>time</th><th>prio</th><th>unit</th><th>ident</th><th>pid</th><th>message</th></tr></thead><tbody>';
+    (entries || []).forEach((e) => {
+      const cls = PRIO_CLASS[e.priority] || "";
+      h += '<tr class="clickable" data-cursor="' + esc(encodeURIComponent(e.cursor)) + '"><td>' + esc(fmtTsMs(e.ts, e.us)) +
+        '</td><td class="' + cls + '">' + esc(e.priority) + "</td><td>" + esc(e.unit || "—") + "</td><td>" + esc(e.identifier || "—") +
+        "</td><td>" + esc(e.pid || "—") + '</td><td class="' + cls + '">' + esc(e.message) + "</td></tr>";
+    });
+    h += "</tbody></table></div>";
+    const box = $("log-list");
+    box.innerHTML = h;
+    box.querySelectorAll("tr.clickable").forEach((tr) => { tr.onclick = () => toggleLogDetail(tr, decodeURIComponent(tr.dataset.cursor)); });
+  }
+  async function toggleLogDetail(tr, cursor) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains("detailrow")) { next.remove(); return; }
+    const r = await api("GET", "/logs/entry/" + encodeURIComponent(cursor));
+    showRaw($("log-aux-raw"), r);
+    const row = document.createElement("tr"); row.className = "detailrow";
+    const td = document.createElement("td"); td.colSpan = 6;
+    if (r.netError || !r.ok) td.innerHTML = '<div class="err"><pre>' + esc(r.text || r.netError) + "</pre></div>";
+    else td.innerHTML = '<pre style="max-height:340px;overflow:auto">' + esc(JSON.stringify(r.data, null, 2)) + "</pre>";
+    row.appendChild(td); tr.after(row);
+  }
+  async function queryLogs(cursor) {
+    const q = logBaseQuery();
+    if (cursor) q.cursor = cursor;
+    const res = await api("GET", "/logs", { query: q });
+    showRaw($("log-raw"), res);
+    if (renderError($("log-list"), res)) return;
+    const d = res.data || {};
+    renderLogEntries(d.entries);
+    logCursors = { next: d.next_cursor || null, prev: d.prev_cursor || null };
+    $("log-next-btn").disabled = !logCursors.next;
+    $("log-prev-btn").disabled = !logCursors.prev;
+  }
+  $("log-query-btn").onclick = () => queryLogs(null);
+  $("log-next-btn").onclick = () => queryLogs(logCursors.next);
+  $("log-prev-btn").onclick = () => queryLogs(logCursors.prev);
+  $("log-boots-btn").onclick = async () => {
+    const r = await api("GET", "/logs/boots");
+    showRaw($("log-aux-raw"), r);
+    if (renderError($("log-list"), r)) return;
+    const arr = Array.isArray(r.data) ? r.data : (r.data && r.data.boots) || [];
+    let h = '<div class="tablewrap"><table><thead><tr><th>index</th><th>boot_id</th><th>first</th><th>last</th></tr></thead><tbody>';
+    arr.forEach((b) => { h += "<tr><td>" + esc(b.index) + "</td><td>" + esc(b.boot_id) + "</td><td>" + esc(fmtTs(b.first_ts)) + "</td><td>" + esc(fmtTs(b.last_ts)) + "</td></tr>"; });
+    $("log-list").innerHTML = h + "</tbody></table></div>";
+  };
+
+  // follow：WS logs.follow，带暂停
+  let logFollowPaused = false;
+  const followBuffer = [];
+  $("log-follow").onchange = (e) => {
+    if (e.target.checked) {
+      wsClient.connect();
+      const params = logBaseQuery();
+      delete params.cursor; delete params.limit;
+      wsClient.sub("logs.follow", params, (env) => {
+        if (logFollowPaused) return;
+        const batch = Array.isArray(env.d) ? env.d : (env.d && env.d.entries) || (env.d ? [env.d] : []);
+        batch.forEach((x) => followBuffer.unshift(x));
+        while (followBuffer.length > 500) followBuffer.pop();
+        renderLogEntries(followBuffer);
+      });
+      $("log-follow-pause").disabled = false;
+      $("log-follow-status").textContent = "following…";
+    } else {
+      wsClient.unsub("logs.follow");
+      $("log-follow-pause").disabled = true;
+      $("log-follow-status").textContent = "已停止 follow";
+    }
+  };
+  $("log-follow-pause").onclick = () => {
+    logFollowPaused = !logFollowPaused;
+    $("log-follow-pause").textContent = logFollowPaused ? "继续" : "暂停";
+    $("log-follow-status").textContent = logFollowPaused ? "已暂停" : "following…";
+  };
+
+  // ============================ 审计 ============================
+  let auditBeforeId = null;
+  async function loadAudit(before) {
+    const q = {
+      username: $("audit-user").value.trim(), action: $("audit-action").value.trim(),
+      result: $("audit-result").value, limit: $("audit-limit").value,
+    };
+    if (before) q.before_id = before;
+    const res = await api("GET", "/audit", { query: q });
+    showRaw($("audit-raw"), res);
+    if (renderError($("audit-table"), res)) return;
+    const d = res.data || {};
+    const arr = d.entries || [];
+    let h = "<table><thead><tr><th>id</th><th>ts</th><th>user</th><th>elev</th><th>action</th><th>target</th><th>result</th><th>detail</th></tr></thead><tbody>";
+    arr.forEach((a) => {
+      const rc = a.result === "denied" ? "sev-warning" : a.result === "error" ? "sev-critical" : "sev-ok";
+      h += "<tr><td>" + esc(a.id) + "</td><td>" + esc(fmtTs(a.ts)) + "</td><td>" + esc(a.username) + "</td><td>" + (a.elevated ? "✔" : "") +
+        "</td><td>" + esc(a.action) + "</td><td>" + esc(a.target || "—") + '</td><td><span class="badge ' + rc + '">' + esc(a.result) + "</span></td><td class='muted'>" + esc(a.detail || "—") + "</td></tr>";
+    });
+    $("audit-table").innerHTML = h + "</tbody></table>";
+    auditBeforeId = d.next_before_id || null;
+    $("audit-more-btn").disabled = !auditBeforeId;
+  }
+  $("audit-load").onclick = () => loadAudit(null);
+  $("audit-more-btn").onclick = () => loadAudit(auditBeforeId);
+
+  // ============================ WS 客户端 ============================
+  // §9.2 envelope {v,t,ch,id,d}。自增 id、sub/unsub、ping 保活、断线 3s 重连并重新订阅。
+  const wsClient = {
+    sock: null, nextId: 1, subs: new Map(), pingTimer: null, reconnectTimer: null, wantOpen: false, lastRx: 0,
+    url() { return (location.protocol === "https:" ? "wss" : "ws") + "://" + location.host + "/ws"; },
+    connect() {
+      this.wantOpen = true;
+      if (this.sock && (this.sock.readyState === 0 || this.sock.readyState === 1)) return;
+      const u = this.url();
+      const tok = getToken();
+      // WS 握手没法带 Authorization 头，token 走子协议：Sec-WebSocket-Protocol: bearer, <token>
+      // 服务端会回 "bearer" 子协议；未登录时不带协议，握手会被 401 拒绝并显示在下方。
+      wsLog("[connect] " + u + (tok ? " (bearer 子协议)" : " (未登录)"));
+      setWsStatus("连接中…");
+      let sock;
+      try { sock = tok ? new WebSocket(u, ["bearer", tok]) : new WebSocket(u); }
+      catch (e) { wsLog("[error] " + e); scheduleReconnect(this); return; }
+      this.sock = sock;
+      sock.onopen = () => {
+        setWsStatus("已连接");
+        wsLog("[open]");
+        // 重新订阅
+        this.subs.forEach((v, ch) => this._send({ t: "sub", ch, d: v.params }));
+        // 保活只为穿过反代/LB 的空闲超时（nginx 默认 60s）。有数据流动时不需要，
+        // 所以只在连续 45s 没收到任何帧时才 ping 一次；订阅了 metrics.live 时基本不会触发。
+        this.lastRx = Date.now();
+        this.pingTimer = setInterval(() => {
+          if (Date.now() - this.lastRx > 45000) { this._send({ t: "ping" }); this.lastRx = Date.now(); }
+        }, 15000);
+      };
+      sock.onmessage = (ev) => {
+        wsLog("← " + ev.data);
+        let env; try { env = JSON.parse(ev.data); } catch (e) { return; }
+        if (env.t === "err") { wsLog("[ERR frame] " + JSON.stringify(env.d)); }
+        this.lastRx = Date.now();
+        if (env.t === "ping") { this._send({ t: "ping", id: env.id }); return; }
+        if (env.t === "data" && env.ch && this.subs.has(env.ch)) {
+          const cb = this.subs.get(env.ch).onData; if (cb) try { cb(env); } catch (e) { wsLog("[handler error] " + e); }
+        }
+      };
+      sock.onclose = () => {
+        setWsStatus("已断开");
+        wsLog("[close]");
+        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+        if (this.wantOpen) scheduleReconnect(this);
+      };
+      sock.onerror = () => { wsLog("[socket error]"); };
+    },
+    disconnect() {
+      this.wantOpen = false;
+      if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+      if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+      if (this.sock) { try { this.sock.close(); } catch (e) {} }
+      setWsStatus("未连接");
+    },
+    _send(partial) {
+      const env = Object.assign({ v: 1 }, partial);
+      if ((env.t === "sub" || env.t === "unsub" || env.t === "req") && !has(env.id)) env.id = this.nextId++;
+      if (!this.sock || this.sock.readyState !== 1) { wsLog("[send skipped, not open] " + JSON.stringify(env)); return env; }
+      this.sock.send(JSON.stringify(env));
+      wsLog("→ " + JSON.stringify(env));
+      return env;
+    },
+    sub(ch, params, onData) { this.subs.set(ch, { params: params || null, onData }); if (this.sock && this.sock.readyState === 1) this._send({ t: "sub", ch, d: params || null }); },
+    unsub(ch) { this.subs.delete(ch); this._send({ t: "unsub", ch }); },
+  };
+  function scheduleReconnect(c) {
+    if (c.reconnectTimer) return;
+    c.reconnectTimer = setTimeout(() => { c.reconnectTimer = null; if (c.wantOpen) c.connect(); }, 3000);
+    wsLog("[reconnect in 3s]");
+  }
+  function setWsStatus(s) { const e = $("ws-status"); if (e) e.textContent = s; }
+  const wsLogLines = [];
+  function wsLog(line) {
+    const t = new Date().toLocaleTimeString();
+    wsLogLines.unshift("[" + t + "] " + line);
+    while (wsLogLines.length > 200) wsLogLines.pop();
+    const el = $("ws-log"); if (el) el.textContent = wsLogLines.join("\n");
+  }
+  $("ws-connect-btn").onclick = () => wsClient.connect();
+  $("ws-disconnect-btn").onclick = () => wsClient.disconnect();
+  $("ws-sub-btn").onclick = () => { wsClient.connect(); wsClient.sub($("ws-channel").value, null, (env) => {}); };
+  $("ws-unsub-btn").onclick = () => wsClient.unsub($("ws-channel").value);
+  $("ws-ping-btn").onclick = () => { wsClient.connect(); wsClient._send({ t: "ping" }); };
+  $("ws-send-btn").onclick = () => {
+    wsClient.connect();
+    let obj;
+    try { obj = JSON.parse($("ws-raw-input").value); } catch (e) { wsLog("[bad json] " + e); return; }
+    wsClient._send(obj);
+  };
+  $("ws-clear-btn").onclick = () => { wsLogLines.length = 0; $("ws-log").textContent = "（已清空）"; };
+
+  // ============================ 启动 ============================
+  loadHealthCaps();
+  if (getToken()) refreshSession();
+})();
+</script>
+</body>
+</html>

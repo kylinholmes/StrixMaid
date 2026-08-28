@@ -13,7 +13,7 @@ figment = { version = "0.10.19", features = ["toml", "env"] }
 futures = "0.3.34"
 hex = "0.4.3"
 libc = "0.2.189"
-nix = { version = "0.31.3", features = ["socket", "uio", "process", "user", "fs", "sched", "signal", "poll"] }
+nix = { version = "0.31.3", features = ["socket", "uio", "process", "user", "fs", "sched", "signal", "poll", "net"] }
 portable-pty = "0.9.0"
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }

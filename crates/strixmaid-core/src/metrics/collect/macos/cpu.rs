@@ -4,8 +4,9 @@
 //!
 //! `/proc/stat` 给 8 态，mach 只给 **user / system / idle / nice** 四态
 //! （`CPU_STATE_MAX == 4`）：没有 iowait、irq、softirq、steal。这不是采集方式的取舍，
-//! XNU 内核就没有分别统计这几类时间。因此本采集器**只产出这四态加 usage**，
-//! `cpu.iowait` / `cpu.irq` / `cpu.softirq` / `cpu.steal` 在 macOS 上不存在。
+//! XNU 内核就没有分别统计这几类时间。叠加 roadmap/08 §4.2 的裁剪后，本采集器
+//! 只产出 `cpu.usage` / `cpu.system` 与每核 `cpu.core.usage`；
+//! `cpu.iowait` / `cpu.irq` / `cpu.steal` 在 macOS 上不存在。
 //!
 //! 连带影响 usage 的定义：Linux 是 `100 − idle − iowait`，这里是 `100 − idle`。
 //! 两者在各自平台上都表示「非空闲时间占比」，语义一致。
@@ -153,8 +154,6 @@ pub fn read_processor_info() -> Option<CpuStat> {
 /// CPU 采集器。
 pub struct CpuCollector {
     prev: Option<CpuStat>,
-    /// 每核是否也产出全部状态；关掉后每核只剩 `cpu.core.usage`（design.md §7.2）。
-    per_core_states: bool,
 }
 
 impl Default for CpuCollector {
@@ -165,17 +164,7 @@ impl Default for CpuCollector {
 
 impl CpuCollector {
     pub fn new() -> Self {
-        CpuCollector {
-            prev: None,
-            per_core_states: true,
-        }
-    }
-
-    /// 是否为每个核产出全部状态。
-    #[must_use]
-    pub fn per_core_states(mut self, on: bool) -> Self {
-        self.per_core_states = on;
-        self
+        CpuCollector { prev: None }
     }
 
     /// 喂入一次采样，产出与上一轮的差分样本；第一轮返回空。
@@ -185,10 +174,7 @@ impl CpuCollector {
             if let Some(p) = percent_between(&prev.total, &stat.total) {
                 out.extend([
                     Sample::new(cat::CPU_USAGE, p.usage),
-                    Sample::new(cat::CPU_USER, p.user),
-                    Sample::new(cat::CPU_NICE, p.nice),
                     Sample::new(cat::CPU_SYSTEM, p.system),
-                    Sample::new(cat::CPU_IDLE, p.idle),
                 ]);
             }
             for (pos, (idx, cur)) in stat.cores.iter().enumerate() {
@@ -203,17 +189,12 @@ impl CpuCollector {
                 let Some(p) = percent_between(prev_times, cur) else {
                     continue;
                 };
-                let core = idx.to_string();
-                let s = |metric, v| Sample::labeled(metric, label::CORE, core.clone(), v);
-                out.push(s(cat::CPU_CORE_USAGE, p.usage));
-                if self.per_core_states {
-                    out.extend([
-                        s(cat::CPU_CORE_USER, p.user),
-                        s(cat::CPU_CORE_NICE, p.nice),
-                        s(cat::CPU_CORE_SYSTEM, p.system),
-                        s(cat::CPU_CORE_IDLE, p.idle),
-                    ]);
-                }
+                out.push(Sample::labeled(
+                    cat::CPU_CORE_USAGE,
+                    label::CORE,
+                    idx.to_string(),
+                    p.usage,
+                ));
             }
         }
         self.prev = Some(stat);
@@ -278,10 +259,10 @@ mod tests {
         let a = CpuStat::from_cores(vec![(0, ticks(100, 100, 700, 100))]);
         let b = CpuStat::from_cores(vec![(0, ticks(300, 200, 1400, 100))]);
         let mut c = CpuCollector::new();
-        assert!(c.ingest(a.clone()).is_empty(), "第一轮无基线");
-        // 总 5 + 每核 5
-        let out = c.ingest(b.clone());
-        assert_eq!(out.len(), 5 + 5);
+        assert!(c.ingest(a).is_empty(), "第一轮无基线");
+        // 总 2 + 每核 usage × 1（roadmap/08 §4.2）
+        let out = c.ingest(b);
+        assert_eq!(out.len(), 2 + 1);
         let core0 = out
             .iter()
             .find(|s| {
@@ -289,15 +270,11 @@ mod tests {
             })
             .expect("cpu0 的 usage");
         assert!((core0.value - 30.0).abs() < 1e-9);
-
-        let mut lean = CpuCollector::new().per_core_states(false);
-        lean.ingest(a);
-        assert_eq!(lean.ingest(b).len(), 5 + 1);
     }
 
     #[test]
     fn 核数变化时按编号匹配() {
-        let mut c = CpuCollector::new().per_core_states(false);
+        let mut c = CpuCollector::new();
         c.ingest(CpuStat::from_cores(vec![
             (0, ticks(0, 0, 100, 0)),
             (1, ticks(0, 0, 100, 0)),
@@ -328,11 +305,7 @@ mod tests {
                 .map(|s| s.value)
                 .expect(m)
         };
-        let sum: f64 = [cat::CPU_USER, cat::CPU_NICE, cat::CPU_SYSTEM, cat::CPU_IDLE]
-            .iter()
-            .map(|m| get(m))
-            .sum();
-        assert!((sum - 100.0).abs() < 0.5, "四态之和 ≈ 100，实际 {sum}");
+        assert!(get(cat::CPU_USAGE) + 1e-6 >= get(cat::CPU_SYSTEM));
         for s in &out {
             assert!(
                 (0.0..=100.0).contains(&s.value),
@@ -345,13 +318,8 @@ mod tests {
             out.iter().any(|s| s.metric == cat::CPU_CORE_USAGE),
             "至少一个核"
         );
-        // macOS 没有这四态，绝不能凭空产出
-        for absent in [
-            cat::CPU_IOWAIT,
-            cat::CPU_IRQ,
-            cat::CPU_SOFTIRQ,
-            cat::CPU_STEAL,
-        ] {
+        // macOS 没有这几态，绝不能凭空产出
+        for absent in [cat::CPU_IOWAIT, cat::CPU_IRQ, cat::CPU_STEAL] {
             assert!(
                 !out.iter().any(|s| s.metric == absent),
                 "{absent} 在 macOS 上不该存在"

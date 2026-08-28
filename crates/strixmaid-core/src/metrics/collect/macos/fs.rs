@@ -1,4 +1,5 @@
-//! 文件系统：`getfsstat(2)` → 每挂载点的空间与 inode。
+//! 文件系统：`getfsstat(2)` → 每挂载点的空间用量（`fs.used` / `fs.total` 两条，
+//! roadmap/08 §4.2：使用率由前端做除法，inode 走健康检查而非曲线）。
 //!
 //! 取数在 [`crate::platform::macos::mounts`]，本文件只决定**哪些挂载点值得画成曲线**
 //! 以及怎么摊成样本。用量口径（`used = total − free`、`usage% = used / (used + avail)`）
@@ -58,15 +59,8 @@ impl FsCollector {
             }
             let mount = sanitize_label(&m.mount_point);
             let s = |metric, v| Sample::labeled(metric, label::MOUNT, mount.clone(), v);
-            out.push(s(cat::FS_TOTAL, m.total as f64));
             out.push(s(cat::FS_USED, m.used() as f64));
-            out.push(s(cat::FS_USAGE, m.usage_percent()));
-            // APFS 的 inode 数是动态的，报 0 说明该文件系统不统计 inode，
-            // 此时两条曲线都没有意义。
-            if let Some(used) = m.inodes_used() {
-                out.push(s(cat::FS_INODES_TOTAL, m.inodes_total as f64));
-                out.push(s(cat::FS_INODES_USED, used as f64));
-            }
+            out.push(s(cat::FS_TOTAL, m.total as f64));
         }
         out
     }
@@ -121,27 +115,24 @@ mod tests {
             mount("/empty", "apfs", 0, 0, 0),
         ];
         let out = FsCollector::samples(&all);
-        // 只剩 / 的三条（inodes_total 为 0，不产出 inode 曲线）
-        assert_eq!(out.len(), 3);
+        // 只剩 / 的两条（used / total）
+        assert_eq!(out.len(), 2);
         assert!(
             out.iter()
                 .all(|s| s.labels == vec![(label::MOUNT, "/".to_string())])
         );
-        let usage = out.iter().find(|s| s.metric == cat::FS_USAGE).unwrap();
-        assert!((usage.value - 200.0 / 3.0).abs() < 1e-9);
+        let used = out.iter().find(|s| s.metric == cat::FS_USED).unwrap();
+        assert_eq!(used.value, 60.0);
 
+        // inode 属健康检查而非曲线（roadmap/08 §4.4），即便有数据也不产出。
         let with_inodes = Mount {
             inodes_total: 1000,
             inodes_free: 900,
             ..mount("/", "apfs", 100, 40, 30)
         };
         let out = FsCollector::samples(&[with_inodes]);
-        assert_eq!(out.len(), 5);
-        let used = out
-            .iter()
-            .find(|s| s.metric == cat::FS_INODES_USED)
-            .unwrap();
-        assert_eq!(used.value, 100.0);
+        assert_eq!(out.len(), 2);
+        assert!(!out.iter().any(|s| s.metric.starts_with("fs.inodes")));
     }
 
     #[test]
@@ -153,15 +144,8 @@ mod tests {
             .filter(|s| s.labels == vec![(label::MOUNT, "/".to_string())])
             .collect();
         assert!(!root.is_empty(), "必须采到根文件系统");
-        let usage = root
-            .iter()
-            .find(|s| s.metric == cat::FS_USAGE)
-            .expect("fs.usage");
-        assert!(
-            (0.0..=100.0).contains(&usage.value),
-            "使用率越界：{}",
-            usage.value
-        );
+        let get = |m: &str| root.iter().find(|s| s.metric == m).map(|s| s.value).expect(m);
+        assert!(get(cat::FS_USED) <= get(cat::FS_TOTAL));
         for s in &out {
             assert!(
                 s.value.is_finite() && s.value >= 0.0,

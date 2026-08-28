@@ -79,9 +79,13 @@ pub struct DirListing {
     /// 被列出的目录的规范化绝对路径。
     #[schema(example = "/etc")]
     pub path: String,
-    /// 目录项。排序由前端决定，服务端不保证顺序。
+    /// 目录项。服务端已按「目录在前，其余按名称」排序；前端可以再排。
     #[serde(default)]
     pub entries: Vec<DirEntryInfo>,
+    /// `lstat` 失败而被跳过的条目数（无权限、`/proc` 里的竞态消失）。
+    /// 为 0 表示全部列出。
+    #[serde(default)]
+    pub skipped: u32,
 }
 
 /// `GET /api/v1/files/content` 的响应体。
@@ -94,10 +98,14 @@ pub struct FileContent {
     pub size_bytes: u64,
     /// 文件内容。
     ///
-    /// 只支持 UTF-8 文本；二进制文件返回 [`crate::ErrorCode::InvalidRequest`]
-    /// （P0 不做下载与十六进制视图）。
+    /// 只支持文本；二进制文件（前 8 KiB 含 NUL 字节）返回
+    /// [`crate::ErrorCode::InvalidRequest`]（P0 不做下载与十六进制视图）。
     pub content: String,
-    /// 内容是否被截断。超过服务端上限（建议 1 MiB）时为 `true`，
-    /// 此时 `content` 只是文件开头的一部分。
+    /// 内容是否被截断。**当前恒为 `false`**：超过大小上限（5 MiB）的文件直接
+    /// 返回 [`crate::ErrorCode::InvalidRequest`] 而不是截断——半个文件比报错更
+    /// 误导。字段保留给后续的分段读取。
     pub truncated: bool,
+    /// 内容里是否有无效 UTF-8 序列被替换成 U+FFFD。为 `true` 时不宜原样写回。
+    #[serde(default)]
+    pub lossy: bool,
 }

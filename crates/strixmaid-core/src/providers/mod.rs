@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 
+pub mod fs;
 pub mod log;
 pub mod process;
 pub mod service;

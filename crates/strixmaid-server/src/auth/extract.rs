@@ -44,7 +44,7 @@ pub fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
 /// 否则浏览器会中止握手（见 `ws::handler`）。
 pub const WS_BEARER_PROTOCOL: &str = "bearer";
 
-fn bearer_from_ws_protocol(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer_from_ws_protocol(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get("sec-websocket-protocol")?.to_str().ok()?;
     let mut parts = raw.split(',').map(str::trim).filter(|s| !s.is_empty());
     let scheme = parts.next()?;

@@ -12,9 +12,11 @@
 pub mod audit;
 pub mod auth;
 pub mod capabilities;
+pub mod files;
 pub mod health;
 pub mod logs;
 pub mod metrics;
+pub mod nodes;
 pub mod processes;
 pub mod services;
 pub mod system;
@@ -50,6 +52,8 @@ use crate::state::AppState;
         (name = "logs", description = "journald 日志查询与 boot 列表"),
         (name = "processes", description = "进程列表、详情、信号与 renice"),
         (name = "metrics", description = "指标：可用序列、自动选层查询与实时快照"),
+        (name = "files", description = "只读文件浏览（在登录用户的 worker 内执行）"),
+        (name = "nodes", description = "多节点：登记、列表与在线状态（写操作需管理访问）"),
     ),
 )]
 pub struct ApiDoc;
@@ -67,6 +71,8 @@ pub struct ApiStates {
     pub audit: Arc<audit::AuditState>,
     pub metrics: Arc<metrics::MetricsState>,
     pub terminals: terminals::TerminalState,
+    pub files: files::FilesState,
+    pub nodes: nodes::NodesState,
 }
 
 /// `/api/v1` 下的全部路由。各子 router 自带状态，因此返回无状态的 `OpenApiRouter<()>`。
@@ -85,7 +91,9 @@ pub fn api_v1(s: ApiStates) -> OpenApiRouter<()> {
         .merge(logs::router(s.auth.clone()))
         .merge(metrics::router(s.metrics))
         .merge(audit::router(s.audit))
-        .merge(terminals::router(s.terminals));
+        .merge(terminals::router(s.terminals))
+        .merge(files::router(s.files))
+        .merge(nodes::router(s.nodes));
     let protected = protect_openapi(protected, s.auth);
 
     public.merge(soft).merge(protected)

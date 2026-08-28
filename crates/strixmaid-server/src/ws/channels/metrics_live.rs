@@ -1,6 +1,8 @@
 //! `metrics.live`：每轮采集推一帧 [`MetricSnapshot`]（design.md §9.2）。
 //!
-//! - `sub` 的 `d`：可为空；或 `{"prefixes": ["cpu.", "mem."]}` 只要指标名前缀匹配的值；
+//! - `sub` 的 `d`：可为空；或 `{"prefixes": ["cpu.", "mem."], "node": "web-01"}`——
+//!   `prefixes` 只要指标名前缀匹配的值；`node` 缺省为本机，指向 Agent 节点时
+//!   转发该节点最近的 `agent.snapshot`（roadmap/05 §3.3）；
 //! - `data` 的 `d`：[`MetricSnapshot`]；
 //! - 订阅成功后**立即**推一帧当前快照（若已有），客户端不用干等一个采集周期；
 //! - `req`：返回当前快照（同 `GET /api/v1/metrics/current`）。
@@ -16,6 +18,7 @@ use strixmaid_types::ApiError;
 use strixmaid_types::metrics::MetricSnapshot;
 use strixmaid_types::ws::WsChannel;
 
+use crate::ws::agent::AgentRegistry;
 use crate::ws::hub::{ChannelEvent, ChannelSource, ChannelStream, SubscribeContext, broadcast_stream};
 
 /// 订阅参数。
@@ -25,17 +28,32 @@ struct Params {
     /// 指标名前缀过滤；空表示全部。
     #[serde(default)]
     prefixes: Vec<String>,
+    /// 节点 id，缺省本机。
+    #[serde(default)]
+    node: Option<String>,
 }
 
 /// `metrics.live` 频道源。
 pub struct MetricsLive {
     engine: MetricsEngine,
+    /// 非 local 节点的快照来源。
+    agents: Option<Arc<AgentRegistry>>,
 }
 
 impl MetricsLive {
     /// 绑定到一个引擎。
     pub fn new(engine: MetricsEngine) -> Self {
-        MetricsLive { engine }
+        MetricsLive {
+            engine,
+            agents: None,
+        }
+    }
+
+    /// 接上 Agent 注册表。
+    #[must_use]
+    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+        self.agents = Some(agents);
+        self
     }
 }
 
@@ -76,6 +94,21 @@ impl ChannelSource for MetricsLive {
             })?,
         };
         let prefixes = Arc::new(params.prefixes);
+
+        // 非本机节点：转发该节点的 agent.snapshot（roadmap/05 §3.3）。
+        let own = self.engine.config().node.as_str();
+        if let Some(node) = params.node.as_deref().filter(|n| *n != own) {
+            let Some(agents) = &self.agents else {
+                return Err(ApiError::invalid_request("本实例未启用 Agent 汇聚"));
+            };
+            let Some((latest, rx)) = agents.subscribe(node) else {
+                return Err(ApiError::not_found(format!("节点 {node} 未连接过")));
+            };
+            let initial = latest.and_then(|s| project(&prefixes, &s)).map(ChannelEvent::Data);
+            let p = Arc::clone(&prefixes);
+            let live = broadcast_stream(rx, move |snap: Arc<MetricSnapshot>| project(&p, &snap));
+            return Ok(stream::iter(initial).chain(live).boxed());
+        }
 
         // 先把手头的快照推出去（启动后第一轮之前是空的，此时不推）。
         let current = self.engine.snapshot();

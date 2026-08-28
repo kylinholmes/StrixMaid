@@ -263,6 +263,10 @@ pub struct SessionInfo {
     pub groups: Vec<String>,
     /// 是否已启用管理访问（admin worker 已就绪）。
     pub elevated: bool,
+    /// `pam_open_session` 是否成功——决定用户级 unit（`systemctl --user`）是否可用
+    /// （design.md §5.4）。前端据此启用 / 隐藏 `scope=user`；也是 07 §1.2 #3 的验收点。
+    #[serde(default)]
+    pub session_opened: bool,
     /// 提权发生的时刻；`elevated == false` 时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevated_ts: Option<i64>,

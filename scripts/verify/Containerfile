@@ -1,0 +1,46 @@
+# 07 验证工装的 systemd 基础镜像（roadmap/07 §1.1「容器」路径）。
+#
+#   podman build --build-arg BASE=ubuntu:24.04 -t strix-verify:ubuntu -f scripts/verify/Containerfile .
+#   podman build --build-arg BASE=rockylinux:9  -t strix-verify:rocky  -f scripts/verify/Containerfile .
+#
+# 一份 Containerfile 兼顾 apt 与 dnf：装 systemd + polkit + PAM + sudo + 验证工具，
+# 建两个用户 alice（普通）与 bob（sudo/wheel），并放一个可安全重启的测试 unit。
+# 需要能访问软件源；国内可用镜像见 README。密码在 run-in-podman.sh 里运行时设置。
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+# systemd 作为 init（--systemd=always 时 podman 会正确接管）。
+ENV container=podman
+STOPSIGNAL SIGRTMIN+3
+
+RUN set -eux; \
+    if command -v apt-get >/dev/null; then \
+        export DEBIAN_FRONTEND=noninteractive; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            systemd systemd-sysv dbus libpam-modules libpam-runtime \
+            policykit-1 sudo curl jq sqlite3 procps iproute2 hostname passwd bash ca-certificates || \
+        apt-get install -y --no-install-recommends \
+            systemd systemd-sysv dbus libpam-modules libpam-runtime \
+            polkitd sudo curl jq sqlite3 procps iproute2 hostname passwd bash ca-certificates; \
+        apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    else \
+        dnf -y install \
+            systemd polkit sudo curl jq sqlite procps-ng iproute hostname passwd bash; \
+        dnf clean all; \
+    fi; \
+    useradd -m -s /bin/bash alice; \
+    useradd -m -s /bin/bash bob; \
+    ( getent group sudo  >/dev/null && usermod -aG sudo  bob ) || true; \
+    ( getent group wheel >/dev/null && usermod -aG wheel bob ) || true
+
+# 一个只睡觉的测试 unit：#13 的 restart 打在它身上，不碰真实服务。
+RUN printf '%s\n' \
+    '[Unit]' 'Description=StrixMaid verify dummy' \
+    '[Service]' 'Type=simple' 'ExecStart=/bin/sleep infinity' 'Restart=always' \
+    '[Install]' 'WantedBy=multi-user.target' \
+    > /etc/systemd/system/strixtest.service; \
+    systemctl enable strixtest.service
+
+# 不启用 strixmaid：由 install.sh 装、驱动脚本按需启动。
+CMD ["/sbin/init"]

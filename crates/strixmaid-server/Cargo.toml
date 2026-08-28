@@ -12,7 +12,10 @@ name = "strixmaid"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["ui"]
+# 嵌入 web/dist 前端并提供 SPA 回退（§2.1）。关闭（--no-default-features）
+# 产出无 UI 的精简变体：全部非 /api、/ws 路径返回 404 JSON。
+ui = []
 # 在 release 构建中也暴露 OpenAPI 文档端点（/api/v1/openapi.json 与 /api/docs）。
 # debug 构建无条件暴露，无需此 feature；见 src/apidoc.rs。
 #
@@ -30,6 +33,7 @@ axum = { version = "0.8.9", features = ["ws", "macros"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 futures = "0.3.34"
 mime_guess = "2.0.5"
+rand = "0.10.2"
 rust-embed = "8.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -43,3 +47,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-scalar = { version = "0.3.0", features = ["axum"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.30.0"

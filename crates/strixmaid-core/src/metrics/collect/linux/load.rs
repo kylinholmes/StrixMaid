@@ -3,6 +3,10 @@
 //! 格式：`load1 load5 load15 running/total last_pid`。第四列的两个数分别是
 //! 可运行的调度实体数与系统内调度实体（线程）总数，不是「进程数」——
 //! 但这就是 `/proc/loadavg` 能给出的、也是 top/uptime 展示的数。
+//!
+//! `load.5m` / `load.15m` 不入库（roadmap/08 §4.3）：它们本来就是 `load.1m` 的
+//! 移动平均——内核替我们平滑，是因为 `uptime` 没有历史；而我们存着五层完整
+//! 曲线，趋势直接看图。[`parse_loadavg`] 仍解析全部三个值，裁剪只在产出处。
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -71,8 +75,6 @@ impl Collector for LoadCollector {
         })?;
         Ok(vec![
             Sample::new(cat::LOAD_1M, l.load1),
-            Sample::new(cat::LOAD_5M, l.load5),
-            Sample::new(cat::LOAD_15M, l.load15),
             Sample::new(cat::PROCS_RUNNING, l.running as f64),
             Sample::new(cat::PROCS_TOTAL, l.total as f64),
         ])
@@ -99,7 +101,7 @@ mod tests {
         let out = LoadCollector::new()
             .collect(Instant::now())
             .expect("读 /proc/loadavg");
-        assert_eq!(out.len(), 5);
+        assert_eq!(out.len(), 3);
         for s in &out {
             assert!(s.value >= 0.0, "{} = {}", s.metric, s.value);
         }

@@ -132,8 +132,18 @@ pub async fn create_terminal(
             tracing::debug!(error = %e.message, "开终端前置检查失败");
         });
 
+    // 观察者审计要用的 actor 身份，在开的这一刻定格（登出时会话可能已查无此人）。
+    let owner = strixmaid_core::terminal::TerminalOwner {
+        username: session.user.username.clone(),
+        uid: session.user.uid,
+        elevated: session.elevated,
+    };
     let result = match worker {
-        Ok(w) => st.registry.open(&session.token_hash, &w, params).await,
+        Ok(w) => {
+            st.registry
+                .open(&session.token_hash, owner, &w, params)
+                .await
+        }
         Err(e) => Err(e),
     };
 

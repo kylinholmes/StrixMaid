@@ -20,10 +20,13 @@ use crate::metrics::catalog as cat;
 const PRESSURE_DIR: &str = "/proc/pressure";
 
 /// 资源 → (文件名, some 指标, full 指标)。
-const RESOURCES: [(&str, &str, &str); 3] = [
-    ("cpu", cat::PSI_CPU_SOME, cat::PSI_CPU_FULL),
-    ("memory", cat::PSI_MEMORY_SOME, cat::PSI_MEMORY_FULL),
-    ("io", cat::PSI_IO_SOME, cat::PSI_IO_FULL),
+///
+/// cpu 的 full 为 `None`：内核在整机层面对 cpu 的 `full` 没有定义，那一行恒为 0，
+/// 存它等于存一条恒零曲线（roadmap/08 §4.3）。
+const RESOURCES: [(&str, &str, Option<&str>); 3] = [
+    ("cpu", cat::PSI_CPU_SOME, None),
+    ("memory", cat::PSI_MEMORY_SOME, Some(cat::PSI_MEMORY_FULL)),
+    ("io", cat::PSI_IO_SOME, Some(cat::PSI_IO_FULL)),
 ];
 
 /// 一行压力数据。
@@ -123,8 +126,9 @@ impl Collector for PsiCollector {
                 let metric = if line.full {
                     *full_metric
                 } else {
-                    *some_metric
+                    Some(*some_metric)
                 };
+                let Some(metric) = metric else { continue };
                 out.push(Sample::new(metric, line.avg10.clamp(0.0, 100.0)));
             }
         }
@@ -175,5 +179,7 @@ mod tests {
         if std::path::Path::new("/proc/pressure/io").exists() {
             assert!(out.iter().any(|s| s.metric == cat::PSI_IO_SOME));
         }
+        // 整机层面的 cpu full 恒为 0，已从常量表裁掉，绝不能再产出。
+        assert!(!out.iter().any(|s| s.metric == "psi.cpu.full"));
     }
 }

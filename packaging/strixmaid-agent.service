@@ -1,0 +1,20 @@
+[Unit]
+Description=StrixMaid agent
+Documentation=https://github.com/kylinholmes/Strix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/strixmaid-agent
+Restart=on-failure
+RestartSec=2
+StateDirectory=strixmaid-agent
+Environment=RUST_LOG=info
+KillMode=control-group
+TimeoutStopSec=20
+# Agent 只读采集，不需要 root；但读全量 /proc 与 /sys 的部分项时权限更全。
+# 需要收紧时可加 DynamicUser=yes 并接受部分指标缺失。
+
+[Install]
+WantedBy=multi-user.target

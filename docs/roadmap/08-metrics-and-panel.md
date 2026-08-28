@@ -1,5 +1,40 @@
 # 08 指标裁剪与性能面板
 
+> **实施状态（2026-08-28）**：**§4 采集侧已完成**——`CATALOG` 34 项（含 `panel`
+> 字段与快照测试）、四个合并项（`cpu.irq` / `mem.cached` / `disk.iops` /
+> `net.errors`）在采集器内做加法并有算术测试、`metrics.per_core_detail` 配置项
+> 已删除、`migrations/0002_metrics_trim.sql` 按 §4.3 名单清理老库（幂等有测试）、
+> Linux 新增 sysfs GPU 采集器（`collect/linux/gpu.rs`）、macOS 采集器同步裁剪；
+> §4.4 的 `disk.inodes` 健康项在实施前已存在于 `providers/system/health.rs`。
+>
+> §12 的决策记录：**Q1 按 (c) 实施**——sysfs 能读到 `gpu_busy_percent` 的卡才采，
+> NVIDIA 如实缺席。不选 (a) 的原因：helper 是**每会话一个**的 PAM 组件，而指标
+> 引擎常驻、与登录无关，照 (a) 实现则没人登录就没有 GPU 指标（此前记录在
+> `HANDOFF.md` §6）；接 NVML 的正确形态是 daemon 拉起的独立长命采集进程，
+> 属进程拓扑改动，留待面板里程碑一并决策。Q2 删（已删）；Q3 合并（已合并）；
+> Q4 不加。
+>
+> **§5 静态拓扑四项已实施（2026-08-28）**：`FilesystemInfo.backing_dev`
+> （mountinfo major:minor → `/sys/dev/block` → 整盘，靠 `partition` 文件判定，
+> 正确处理 dm-*/md*）、`CpuInfo.packages`（`topology/physical_package_id`）、
+> `SystemInfo.gpus`（枚举 `/sys/class/drm/card*`，任何驱动的卡都列出，`GpuSource`
+> 指明指标可用性——amdgpu=Sysfs、NVIDIA/Intel集显/BMC=Unavailable）、
+> `SystemInfo.networks`（`/sys/class/net` + getifaddrs，排除 lo/veth）。本机
+> （双路 EPYC + mgag200 BMC + Mellanox 25G）实测全部正确。§5.5 的磁盘类型 /
+> SMART 本就已存在(`rotational`/`smart_healthy`),未新增。
+>
+> **§6–§8 面板：接了一版实时的到 `/debug` 门控的 `/perf`（2026-08-28）**——由
+> `08-metrics-and-panel.mockup.html` 实时化而来:渲染层逐字保留,数据层换成接
+> `/system/info`(拓扑) + `/metrics/current`(实时,每 2s) + `/metrics/query`(band 历史) +
+> `psi.*`(真值),并按 §6.7 修正(成员格不画 PSI 压力带,`psiIoOf` 恒 0)。复用
+> `/debug` 的会话(sessionStorage `strix_token`)。**渲染未在浏览器验证**(开发机无
+> 浏览器、也无登录密码);服务端 200、CSP 自包含、JS 语法与取数形状已验。它是
+> 「跑起来看效果 + 将来前端照抄」的实时蓝本,不是最终产品 UI(前端框架由项目
+> 负责人定,见下)。
+>
+> **仍未实施**：正式前端(框架待定)、design.md §6 能力清单的 GPU 项、
+> macOS 的 IOKit GPU / 网卡拓扑(dev-only,Linux 上验证即可,macOS 返回空)。
+
 ## 1. 目标
 
 两件事，必须一起做，分开做任何一半都会退化：

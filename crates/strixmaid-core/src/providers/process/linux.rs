@@ -39,6 +39,12 @@ pub struct Backend {
     boot_time: u64,
 }
 
+impl Default for Backend {
+    fn default() -> Self {
+        Backend::new()
+    }
+}
+
 impl Backend {
     pub fn new() -> Self {
         Backend {

@@ -1,6 +1,11 @@
 # StrixMaid 现状与 MVP 目标的差距
 
-> 编写日期：2026-08-27。对应代码状态：Phase 0–3 接线完成，`cargo test --workspace` 273 通过，clippy 零 warning，共 28,147 行 Rust。
+> 编写日期：2026-08-27，末次更新 2026-08-28。
+> **2026-08-28 现状**：roadmap 01–06 完成、07 验证工装完成（未在 root 实跑）、08 采集侧 + §5 拓扑完成；
+> `cargo test --workspace` **463 通过**、clippy 零 warning（含无 UI 变体）；改动约 70 文件**未提交**。
+> 逐里程碑状态见下表 §3；**给接手 AI 的总交接见 [`HANDOFF-2026-08-28.md`](./HANDOFF-2026-08-28.md)**。
+>
+> 原始编写日期：2026-08-27。对应代码状态：Phase 0–3 接线完成，`cargo test --workspace` 273 通过，clippy 零 warning，共 28,147 行 Rust。
 > 目标定义见 `design.md`（§13 实现顺序、§14 不做清单）与 `cockpit-feature-inventory.md`（P0 判定）。
 > 后续工作的详细方案见 `roadmap/` 目录，本文只回答「差什么、为什么、先做哪个」。
 
@@ -65,11 +70,11 @@ PAM 登录的用户重输密码即可获得 root worker。
 |---|---|---|---|
 | ~~1~~ | ~~请求经 worker 执行~~ | **已完成**（2026-08-28），见 §2 与 `01` §9 | `01-worker-execution.md` |
 | ~~2~~ | ~~审计日志~~ | **已完成**（2026-08-28）：写入点设在 `exec` 的调用出口与认证路由，`GET /audit` 需管理访问，保留期每小时清理，`/debug` 有审计面板 | `02-audit.md` §8 |
-| 3 | 终端 | 未开始。types 已有 `CreateTerminalReq` / `TerminalInfo` / `ResizeReq` | `03-terminal.md` |
-| 4 | 文件管理壳：`GET /files`、`GET /files/content` | types 已有 `DirListing` / `FileContent`；无 provider、无路由 | `04-files-and-ws-channels.md` |
-| 5 | WS 频道 `system.health`、`processes.live` | hub 与注册接口就绪，源未实现 | `04-files-and-ws-channels.md` |
-| 6 | `strixmaid-agent`：推送、断连补发、Server 端汇聚 | `crates/strixmaid-agent/src/main.rs` 为 3 行占位 | `05-agent.md` |
-| 7 | 打包：musl 静态构建、`strixmaid.service`、pam.d 安装、`ui` feature | musl target 已安装但无构建配置；pam.d 模板已有（`strixmaid-helper/pam.d/`）但无安装步骤；`ui` feature 未实现，前端始终嵌入 | `06-packaging.md` |
+| ~~3~~ | ~~终端~~ | **主体已完成**（2026-08-28）：PTY 在 worker 内，附着 / 回看 / resize / 空闲回收齐备；`{"t":"exit"}` 帧带真实退出码；空闲、shell 自退、登出三种关闭经观察者写审计。剩余为浏览器实测与 root 环境验收，见 `HANDOFF.md` | `03-terminal.md` |
+| ~~4~~ | ~~文件管理壳~~ | **已完成**（2026-08-28）：fs provider 在 user worker 内执行，`allowed_roots` 随调用下发，两个只读路由 + `/debug` 文件面板 | `04-files-and-ws-channels.md` |
+| ~~5~~ | ~~WS 频道 `system.health`、`processes.live`~~ | **已完成**（2026-08-28）：health 主进程 30s 重算并并入 failed units、变更才广播；processes.live 经会话 worker 的流式 RPC | `04-files-and-ws-channels.md` |
+| ~~6~~ | ~~`strixmaid-agent`~~ | **已完成**（2026-08-28）：本地采集落盘 + WS 推送 + `(ts,series)` 键集补发 + `/ws/agent` 汇聚与 `/nodes` 管理；TLS 留待 06，见 `05-agent.md` 头部状态块 | `05-agent.md` |
+| ~~7~~ | ~~打包~~ | **仓库侧已完成**（2026-08-28）：`.cargo` 配置、`ui` feature、service/install.sh/package.sh、CI（musl 构建与体积断言在 CI 跑——本机无 musl 工具链），见 `06-packaging.md` 头部状态块 | `06-packaging.md` |
 | ~~1a~~ | ~~提权授权检查~~ | **已完成**（2026-08-28）：`session.elevate_groups` 配置项，helper 内权威判断 + `elevate_start` 提前拒绝 + `can_elevate` 同源，见 §2.1 | `01-worker-execution.md` §4.8 |
 | ~~8~~ | ~~`scope=user` 跨用户~~ | **随 #1 一并解决**：worker 以登录用户身份运行，`scope=user` 连的就是它自己的 session bus，不需要额外机制 | `01-worker-execution.md` §4.2 |
 | ~~9~~ | ~~capability `user` 层的实测探测~~ | **已完成**：`caps.probe_user` 在 user worker 内实测，结果覆盖推导值，按「会话+提权状态」缓存 60 秒 | `01-worker-execution.md` §4.6 |
@@ -101,7 +106,16 @@ PAM 登录的用户重输密码即可获得 root worker。
 
 进程列表 3036 个进程 156 ms、unit 列表 711 个 610 ms 均为 debug 构建的数字。
 
-验证方案见 `roadmap/07-verification.md`。
+验证方案见 `roadmap/07-verification.md`；可自动化的部分已做成工装 `scripts/verify/`（一键 podman + systemd 容器跑 §1.2 / §5 / 05 §5.2，尚未在真实 root 环境执行）。
+
+## 4a. 剩余 gap 一览（2026-08-28，给接手者）
+
+**后端 P0 无已知缺口。** 剩下两件都非本机能做的编码：
+
+1. **07 验证实跑**（最高优先，决定上线信心）——授权脊椎从没在 root 下跑过。工装 `scripts/verify/` 已备，换 root 的 VM/容器一条命令跑，回填 §07 结果列。
+2. **正式前端**（产品可用性）——框架待项目负责人定（别擅自选栈）。后端接口齐全；`/debug` 有原生实时性能面板可参考；样稿 `roadmap/08 §6–§8` + `.mockup.html` 是设计真相。`/perf` 页是一次实时化尝试但**浏览器里空白、未修**，建议照样稿在正式框架重写。
+
+已界定**不做**（design.md §14）：TLS（反代）、告警、虚拟机/SELinux/高级存储/插件、NVIDIA 利用率（Q1(c)）、非 Linux 作管理端。
 
 ## 5. 明确不在 MVP 范围的项
 

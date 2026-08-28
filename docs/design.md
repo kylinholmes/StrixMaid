@@ -181,22 +181,26 @@ GET /api/v1/capabilities
 
 ## 7. 指标：采集、聚合、存储
 
-> **本节有一份修订提案，尚未实施**：[`roadmap/08-metrics-and-panel.md`](./roadmap/08-metrics-and-panel.md)。
-> 提案把 7.1 的采集项从 58 种裁到 34 种（含新增的 GPU 四条），并按任务管理器的密度重做面板。
+> 本节对应 [`roadmap/08-metrics-and-panel.md`](./roadmap/08-metrics-and-panel.md)。
+> 其**采集侧已实施**（2026-08-28）：7.1 的采集项从 58 种裁到 34 种（含新增的
+> GPU 四条），实施状态与决策记录见该文件开头。面板重做与静态拓扑部分仍为提案。
 > 7.2 的分层聚合、7.3 的 median 选型、7.5 的 band 展示形式**不受影响**。
-> 提案落地前，本节仍是基线。
 
 ### 7.1 采集项（P0）
 
+共 34 项（`roadmap/08` §4.2 的口径，权威定义在 `metrics/catalog.rs` 的 `CATALOG`）。
+裁剪的三条规则：派生量不存、同向计数器合成一条异常信号、慢变量进健康检查。
+
 | 类别 | 内容 |
 |---|---|
-| CPU | 总 + 每核：user / nice / system / idle / iowait / irq / softirq / steal |
-| 内存 | Total / Available / Free / Buffers / Cached / Dirty / Swap |
-| 负载 | 1 / 5 / 15、运行队列长度、进程总数 |
-| **PSI** | `/proc/pressure/{cpu,memory,io}` —— 差异化项，见下 |
-| 磁盘 | 每设备：read/write bytes、IOPS、util%、await |
-| 文件系统 | 每挂载点：使用量 / 总量 / inode |
-| 网络 | 每接口：rx/tx bytes、packets、errors、drops |
+| CPU | 总量：usage / system / iowait / irq（含软中断）/ steal；每核仅 `cpu.core.usage` |
+| GPU | 每卡：usage / mem_used / mem_total / temp（Linux sysfs，`gpu_busy_percent` 可读才采；NVIDIA 见 roadmap/08 §12 Q1） |
+| 内存 | total / used / available / cached（含 Buffers）/ swap_total / swap_used |
+| 负载 | `load.1m`、运行队列长度、进程总数（5m / 15m 是 1m 的移动平均，不入库） |
+| **PSI** | `/proc/pressure/{cpu,memory,io}` 的 avg10 —— 差异化项，见下；cpu 无 full（整机层面恒 0） |
+| 磁盘 | 每设备：read/write bytes、iops（读写合计）、util%、await |
+| 文件系统 | 每挂载点：used / total（使用率由前端做除法；inode 走健康检查 `disk.inodes`） |
+| 网络 | 每接口：rx/tx bytes、errors（收发错误 + 丢包合计） |
 
 **PSI 是关键差异化。** `/proc/pressure/*` 直接给出「系统有多少时间因等内存 / 等 IO 而停滞」。CPU 20% 但 `io.pressure` 60% 的机器体感是卡死的，而所有传统面板（含 Cockpit）都会显示「一切正常」。采集成本仅为读三个小文件。
 
@@ -206,7 +210,7 @@ GET /api/v1/capabilities
 
 内存环形缓冲：默认 2s 采集，保留 1 小时，采集间隔可配 1–60s。
 
-**每核状态默认不展开**（`metrics.per_core_detail = false`）：每核只保留 `cpu.core.usage` 一条曲线。128 核机器实测：展开后每核 9 条 series，环形缓冲 36.5MB；不展开约 7MB。面板上几乎没人看第 97 核的 softirq 历史，排查单核 steal/softirq 时再打开。
+**每核只有 `cpu.core.usage` 一条曲线**。原先按需展开全部 8 态的 `metrics.per_core_detail` 配置项已随 roadmap/08 的裁剪删除——面板上没人看第 97 核的 softirq 历史，那个粒度的排查该上 perf；128 核机器的每核 series 数因此恒为 128。
 
 落盘为五层，每个桶存 **cnt / min / max / sum / med** 五个字段：
 
@@ -259,7 +263,7 @@ med = MEDIAN(med)       子桶中位数的中位数，近似，见 7.3
 
 ### 7.4 数据量
 
-一台 16 核 / 4 盘 / 2 网卡的机器约 200 个 series：Less 约 35MB，Normal 约 100MB（含索引）。多节点线性叠加。仅提供 Less 与 Normal 两套预设。
+一台 16 核 / 4 盘 / 2 网卡 / 3 挂载点 / 1 GPU 的机器约 71 个 series（roadmap/08 §4.5）：Less 约 12MB，Normal 约 35MB（含索引）。多节点线性叠加。仅提供 Less 与 Normal 两套预设。
 
 ### 7.5 展示形式
 

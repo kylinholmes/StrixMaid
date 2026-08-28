@@ -197,6 +197,20 @@ impl Store {
         Ok(rows.iter().map(row_to_node).collect())
     }
 
+    /// 按 token hash 查 Agent 节点（`/ws/agent` 的鉴权路径，roadmap/05 §3.2）。
+    ///
+    /// 只匹配 `kind = agent` 的行：`local` 没有 token，也绝不该被一个 token 命中。
+    pub async fn node_by_token_hash(&self, token_hash: &str) -> Result<Option<NodeRecord>> {
+        let sql = format!(
+            "SELECT {NODE_COLUMNS} FROM nodes WHERE token_hash = ? AND kind = 'agent'"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(token_hash)
+            .fetch_optional(self.read_pool())
+            .await?;
+        Ok(row.as_ref().map(row_to_node))
+    }
+
     /// 更新节点心跳时间。
     pub async fn touch_node(&self, id: &str, ts: i64) -> Result<bool> {
         let affected = sqlx::query("UPDATE nodes SET last_seen = ? WHERE id = ?")

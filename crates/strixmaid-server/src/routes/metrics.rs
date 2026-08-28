@@ -11,24 +11,40 @@ use axum::Json;
 use axum::extract::{Query, State};
 use strixmaid_core::metrics::MetricsEngine;
 use strixmaid_types::ApiError;
+use axum::extract::Query as AxumQuery;
 use strixmaid_types::metrics::{
-    MetricQuery, MetricQueryResp, MetricSnapshot, SeriesListQuery, SeriesMeta,
+    MetricQuery, MetricQueryResp, MetricSnapshot, SeriesListQuery, SeriesMeta, SnapshotQuery,
 };
+
+use crate::ws::agent::AgentRegistry;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::error::ApiResult;
 
-/// 指标路由的状态：一个引擎句柄。
+/// 指标路由的状态：引擎句柄，外加（可选的）Agent 注册表。
 #[derive(Clone)]
 pub struct MetricsState {
     engine: MetricsEngine,
+    /// `?node=` 指向非 local 节点时，`/metrics/current` 从这里取该节点最近
+    /// 一帧 `agent.snapshot`（roadmap/05 §3.3）。
+    agents: Option<Arc<AgentRegistry>>,
 }
 
 impl MetricsState {
     /// 包一层。
     pub fn new(engine: MetricsEngine) -> Self {
-        MetricsState { engine }
+        MetricsState {
+            engine,
+            agents: None,
+        }
+    }
+
+    /// 接上 Agent 注册表。
+    #[must_use]
+    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+        self.agents = Some(agents);
+        self
     }
 }
 
@@ -102,19 +118,38 @@ pub async fn query(
 /// 实时快照
 ///
 /// 最近一轮采集的全部瞬时值，与 WS `metrics.live` 频道推送的 payload 相同。
-/// 进程刚启动、第一轮尚未完成时 `values` 为空。
+/// 进程刚启动、第一轮尚未完成时 `values` 为空。`?node=` 指向 Agent 节点时
+/// 返回该节点最近一帧 `agent.snapshot`。
 #[utoipa::path(
     get,
     path = "/metrics/current",
     tag = "metrics",
+    params(SnapshotQuery),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "最新一轮快照", body = MetricSnapshot),
         (status = 401, description = "未认证", body = ApiError),
+        (status = 404, description = "节点未连接过或尚无快照", body = ApiError),
     ),
 )]
-pub async fn current(State(state): State<Arc<MetricsState>>) -> Json<MetricSnapshot> {
-    Json((*state.engine.snapshot()).clone())
+pub async fn current(
+    State(state): State<Arc<MetricsState>>,
+    AxumQuery(q): AxumQuery<SnapshotQuery>,
+) -> ApiResult<Json<MetricSnapshot>> {
+    let own = state.engine.config().node.as_str();
+    match q.node.as_deref().filter(|n| *n != own) {
+        None => Ok(Json((*state.engine.snapshot()).clone())),
+        Some(node) => {
+            let snap = state
+                .agents
+                .as_ref()
+                .and_then(|a| a.latest(node))
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("节点 {node} 未连接过或尚无快照"))
+                })?;
+            Ok(Json((*snap).clone()))
+        }
+    }
 }
 
 #[cfg(test)]

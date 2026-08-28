@@ -29,6 +29,7 @@
 //! （drop 时自动擦除）、**故意不实现 `Serialize` / `Clone`**、`Debug` 手写脱敏。
 //! 详见 `docs/design.md` §5.3 与 [`auth`] 模块文档。
 
+pub mod agent;
 pub mod audit;
 pub mod auth;
 pub mod capability;

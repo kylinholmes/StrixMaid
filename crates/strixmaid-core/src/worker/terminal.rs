@@ -50,7 +50,8 @@ use portable_pty::{MasterPty, PtySize, native_pty_system};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use strixmaid_types::rpc::{
-    self, TermCloseParams, TermOpenParams, TermOpenResult, TermResizeParams,
+    self, TermCloseParams, TermCloseResult, TermExit, TermOpenParams, TermOpenResult,
+    TermResizeParams,
 };
 use strixmaid_types::{ApiError, ApiResult};
 use tokio::io::unix::AsyncFd;
@@ -77,6 +78,13 @@ const PUMP_BUF: usize = 16 * 1024;
 /// `term.close` 里等 shell 咽气的宽限期，超时就 `SIGKILL`。
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
+/// shell 自行退出后，条目带着退出状态在表里保留多久，等主进程的 `term.close` 来取。
+///
+/// 主进程在 socketpair 读到 EOF 后总会补一次 `term.close`（`terminal/mod.rs` 的
+/// `shutdown`），正常情况下几毫秒内就来取走了；这个上限只兜「主进程一直不来」的
+/// 异常路径，防止条目在表里永久滞留。
+const REAPED_LINGER: Duration = Duration::from_secs(30);
+
 // ===========================================================================
 // 终端表
 // ===========================================================================
@@ -91,8 +99,9 @@ struct Terminal {
     master: Box<dyn MasterPty + Send>,
     /// 两个方向的泵。
     pumps: Vec<JoinHandle<()>>,
-    /// 收尸任务。`term.close` 会 `take` 走它并等它结束，以此确认 shell 真的没了。
-    reaper: Option<JoinHandle<()>>,
+    /// 收尸任务，结束时给出 shell 的退出状态。`term.close` 会 `take` 走它并等它
+    /// 结束——既确认 shell 真的没了，也取回退出状态。
+    reaper: Option<JoinHandle<Option<TermExit>>>,
     /// 已经在 `close` 里处理过（信号发过、尸也收过）。
     ///
     /// 它存在只为一件事：**避免对回收后的 pid 再发一次信号**。pid 是会被系统
@@ -127,14 +136,30 @@ impl Drop for Terminal {
 /// 调用方都能对本机任意进程发 SIGHUP**——worker 是以登录用户身份跑的，
 /// 这等于白送一个「杀死该用户全部进程」的接口。查表把作用域限制成
 /// 「本 worker 亲手开过的终端」。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TerminalTable {
     inner: Arc<Mutex<HashMap<u32, Terminal>>>,
+    /// 见 [`REAPED_LINGER`]。做成字段只为让测试能把它缩短到毫秒级。
+    linger: Duration,
+}
+
+impl Default for TerminalTable {
+    fn default() -> Self {
+        Self::with_linger(REAPED_LINGER)
+    }
 }
 
 impl TerminalTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 指定收尸后的保留时长（仅测试需要缩短它）。
+    fn with_linger(linger: Duration) -> Self {
+        TerminalTable {
+            inner: Arc::default(),
+            linger,
+        }
     }
 
     /// 当前登记的终端数。
@@ -244,7 +269,7 @@ impl TerminalTable {
         // dispatcher 析构时表就不会被 drop，`Terminal::drop` 里的 SIGHUP 也就
         // 永远不会发——worker 退出后 shell 变孤儿。
         let weak = Arc::downgrade(&self.inner);
-        let reaper = tokio::spawn(reap(weak, pid));
+        let reaper = tokio::spawn(reap(weak, pid, self.linger));
 
         let result = TermOpenResult {
             pid: pid.as_raw() as u32,
@@ -294,29 +319,42 @@ impl TerminalTable {
     }
 
     /// 关一个终端：对进程组发 `SIGHUP`，等它咽气，回收 PTY 与两个泵。
-    pub async fn close(&self, params: TermCloseParams) -> ApiResult<()> {
+    ///
+    /// 返回 shell 的退出状态（若能取到）。shell 已自行退出时（条目被收尸任务
+    /// 标记为 `closed` 后保留在表里），**不再发任何信号**——pid 可能已被系统
+    /// 重用——只取走退出状态并清掉条目。
+    pub async fn close(&self, params: TermCloseParams) -> ApiResult<TermCloseResult> {
         // **先摘表再等**。反过来（持锁等收尸）必然死锁：收尸任务结束时要拿同一把锁
-        // 去清理自己的条目。
+        // 去标记自己的条目。
         let mut term = {
             let mut table = self.inner.lock().await;
             table.remove(&params.pid).ok_or_else(|| unknown(params.pid))?
         };
+        let already_reaped = term.closed;
         term.closed = true;
 
-        if let Err(e) = killpg(term.pid, Signal::SIGHUP) {
+        if !already_reaped
+            && let Err(e) = killpg(term.pid, Signal::SIGHUP)
+        {
             tracing::debug!(pid = params.pid, error = %e, "SIGHUP 未送达，进程可能已退出");
         }
+        let mut exit = None;
         if let Some(mut reaper) = term.reaper.take() {
             // 等到「尸也收了」为止，而不只是「信号发出去了」。没收尸的进程仍然
             // 是个僵尸，`kill(pid, 0)` 依旧返回成功，主进程会以为终端还在。
-            if tokio::time::timeout(CLOSE_GRACE, &mut reaper).await.is_err() {
-                tracing::warn!(pid = params.pid, "SIGHUP 后仍未退出，改用 SIGKILL");
-                let _ = killpg(term.pid, Signal::SIGKILL);
-                let _ = tokio::time::timeout(CLOSE_GRACE, &mut reaper).await;
+            match tokio::time::timeout(CLOSE_GRACE, &mut reaper).await {
+                Ok(res) => exit = res.ok().flatten(),
+                Err(_) => {
+                    tracing::warn!(pid = params.pid, "SIGHUP 后仍未退出，改用 SIGKILL");
+                    let _ = killpg(term.pid, Signal::SIGKILL);
+                    if let Ok(res) = tokio::time::timeout(CLOSE_GRACE, &mut reaper).await {
+                        exit = res.ok().flatten();
+                    }
+                }
             }
         }
-        tracing::info!(pid = params.pid, "终端已关");
-        Ok(())
+        tracing::info!(pid = params.pid, exit = ?exit, "终端已关");
+        Ok(TermCloseResult { exit })
     }
 }
 
@@ -324,11 +362,19 @@ fn unknown(pid: u32) -> ApiError {
     ApiError::not_found(format!("本 worker 没有 pid 为 {pid} 的终端"))
 }
 
-/// 等 shell 退出并回收它，然后把条目从表里摘掉。
+/// 等 shell 退出并回收它，返回退出状态。
 ///
 /// 必须有人 `waitpid`：worker 是长命进程，不收尸就会攒一堆僵尸，而且
 /// 僵尸占着 pid，`kill(pid, 0)` 仍然成功，主进程判断不出终端已经没了。
-async fn reap(table: Weak<Mutex<HashMap<u32, Terminal>>>, pid: Pid) {
+///
+/// 收尸后条目**不立即出表**：标记 `closed` 后保留至多 `linger`，等主进程随
+/// EOF 补发的 `term.close` 来取退出状态（`roadmap/03-terminal.md` §6.3）。
+/// 保留期内 `closed = true` 保证不会再有任何信号打到这个 pid 上。
+async fn reap(
+    table: Weak<Mutex<HashMap<u32, Terminal>>>,
+    pid: Pid,
+    linger: Duration,
+) -> Option<TermExit> {
     // `waitpid` 是阻塞调用，放进阻塞线程池，别占住 runtime 的工作线程。
     let status = tokio::task::spawn_blocking(move || {
         loop {
@@ -341,22 +387,64 @@ async fn reap(table: Weak<Mutex<HashMap<u32, Terminal>>>, pid: Pid) {
     })
     .await;
 
-    match status {
+    let exit = match status {
         Ok(Ok(st)) => {
             if let nix::sys::wait::WaitStatus::Exited(_, code) = st {
                 tracing::info!(pid = %pid, code, reason = describe_exit(code), "shell 退出");
             } else {
                 tracing::info!(pid = %pid, status = ?st, "shell 退出");
             }
+            term_exit_of(st)
         }
-        Ok(Err(e)) => tracing::warn!(pid = %pid, error = %e, "回收 shell 失败"),
-        Err(e) => tracing::warn!(pid = %pid, error = %e, "收尸任务异常"),
-    }
+        Ok(Err(e)) => {
+            tracing::warn!(pid = %pid, error = %e, "回收 shell 失败");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(pid = %pid, error = %e, "收尸任务异常");
+            None
+        }
+    };
 
-    let Some(table) = table.upgrade() else { return };
-    if let Some(mut term) = table.lock().await.remove(&(pid.as_raw() as u32)) {
-        // 进程已经回收，pid 随时可能被系统重用——绝不能再往它身上发信号。
-        term.closed = true;
+    let pid_key = pid.as_raw() as u32;
+    if let Some(table) = table.upgrade() {
+        let mut lingering = false;
+        if let Some(term) = table.lock().await.get_mut(&pid_key) {
+            // 进程已经回收，pid 随时可能被系统重用——绝不能再往它身上发信号。
+            term.closed = true;
+            lingering = true;
+        }
+        if lingering {
+            // 条目的正常出口是 `term.close` 来取；这里只兜主进程一直不来的异常
+            // 路径。只清 `closed` 的条目：万一这个 pid 已被一个新终端占用
+            // （新条目 `closed = false`），不能把人家误删。
+            let weak = Arc::downgrade(&table);
+            tokio::spawn(async move {
+                tokio::time::sleep(linger).await;
+                let Some(table) = weak.upgrade() else { return };
+                let mut guard = table.lock().await;
+                if guard.get(&pid_key).is_some_and(|t| t.closed) {
+                    guard.remove(&pid_key);
+                    tracing::debug!(pid = pid_key, "退出状态无人来取，条目过期清除");
+                }
+            });
+        }
+    }
+    exit
+}
+
+/// 把 `WaitStatus` 折成跨进程可传的退出状态。
+fn term_exit_of(st: nix::sys::wait::WaitStatus) -> Option<TermExit> {
+    match st {
+        nix::sys::wait::WaitStatus::Exited(_, code) => Some(TermExit {
+            code: Some(code),
+            signal: None,
+        }),
+        nix::sys::wait::WaitStatus::Signaled(_, sig, _) => Some(TermExit {
+            code: None,
+            signal: Some(sig as i32),
+        }),
+        _ => None,
     }
 }
 
@@ -728,8 +816,8 @@ pub fn register(d: &mut Dispatcher) -> TerminalTable {
     d.register_fn(rpc::TERM_CLOSE, move |v| {
         let t = t.clone();
         async move {
-            t.close(decode(rpc::TERM_CLOSE, v)?).await?;
-            encode(())
+            let result = t.close(decode(rpc::TERM_CLOSE, v)?).await?;
+            encode(result)
         }
     });
 
@@ -961,10 +1049,11 @@ mod tests {
         assert_eq!(err.code, strixmaid_types::ErrorCode::NotFound);
     }
 
-    /// shell 自己退出（`exit`）时也要被收掉：条目自动出表，进程不留僵尸。
+    /// shell 自己退出（`exit`）后：进程不留僵尸；条目带着退出状态保留一段时间
+    /// 等 `term.close` 来取，无人来取则在保留期后自动出表。
     #[tokio::test]
-    async fn shell_自行退出后条目被自动清理() {
-        let table = TerminalTable::new();
+    async fn shell_自行退出后条目在保留期后被自动清理() {
+        let table = TerminalTable::with_linger(Duration::from_millis(50));
         let (info, fd) = table.open(open_params(80, 24)).await.unwrap();
         let mut stream = attach(fd);
         stream.write_all(b"echo STRIX\"\"MAID_UP\n").await.unwrap();
@@ -977,10 +1066,58 @@ mod tests {
         while !table.is_empty().await {
             assert!(
                 std::time::Instant::now() < deadline,
-                "shell 退出后条目没有从表里清掉"
+                "保留期过后条目没有从表里清掉"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// `exit 7` 之后 `term.close` 必须取回退出码 7（`roadmap/03` §6.3 的地基）。
+    /// shell 已死、条目处于保留期，这条路径同时验证「不对已回收的 pid 发信号」
+    /// ——发了的话这里只会拿到 ESRCH 而不是状态。
+    #[tokio::test]
+    async fn 自行退出后_close_取回真实退出码() {
+        let table = TerminalTable::new();
+        let (info, fd) = table.open(open_params(80, 24)).await.unwrap();
+        let mut stream = attach(fd);
+        stream.write_all(b"echo STRIX\"\"MAID_UP\n").await.unwrap();
+        read_until(&mut stream, "STRIXMAID_UP").await;
+
+        stream.write_all(b"exit 7\n").await.unwrap();
+        wait_gone(info.pid).await;
+
+        let result = table.close(TermCloseParams { pid: info.pid }).await.unwrap();
+        assert_eq!(
+            result.exit,
+            Some(TermExit {
+                code: Some(7),
+                signal: None
+            }),
+            "退出码必须是 shell 真实的 7，不能是编造的 0"
+        );
+        assert!(table.is_empty().await);
+    }
+
+    /// 被信号杀死的 shell，`close` 报告的是信号而不是一个假的退出码。
+    #[tokio::test]
+    async fn 被信号终止时_close_报告信号() {
+        let table = TerminalTable::new();
+        let (info, fd) = table.open(open_params(80, 24)).await.unwrap();
+        let mut stream = attach(fd);
+        stream.write_all(b"echo STRIX\"\"MAID_UP\n").await.unwrap();
+        read_until(&mut stream, "STRIXMAID_UP").await;
+
+        killpg(Pid::from_raw(info.pid as i32), Signal::SIGKILL).unwrap();
+        wait_gone(info.pid).await;
+
+        let result = table.close(TermCloseParams { pid: info.pid }).await.unwrap();
+        assert_eq!(
+            result.exit,
+            Some(TermExit {
+                code: None,
+                signal: Some(libc::SIGKILL)
+            })
+        );
     }
 
     /// shell 不能继承 worker 里那些**不带 CLOEXEC** 的 fd。

@@ -9,7 +9,8 @@
 //! # 与 Linux 的差异
 //!
 //! `/proc/net/dev` 收发两个方向各有 errors 与 drops。`if_data64` 只有 `ifi_iqdrops`
-//! （接收方向的队列丢包），**没有发送方向的丢包计数**，故 `net.tx_drops` 不产出。
+//! （接收方向的队列丢包），**没有发送方向的丢包计数**，故 `net.errors`
+//! （roadmap/08 §4.2 的合并项）在 macOS 上由收发错误 + 接收丢包三个计数构成。
 //!
 //! # 过滤
 //!
@@ -131,18 +132,25 @@ impl NetCollector {
                 }
                 let Some(p) = prev.get(name) else { continue };
                 let iface = sanitize_label(name);
-                let mut push = |metric, prev_v: u64, cur_v: u64| {
-                    if let Some(v) = rate(prev_v, cur_v, secs) {
-                        out.push(Sample::labeled(metric, label::IFACE, iface.clone(), v));
-                    }
-                };
-                push(cat::NET_RX_BYTES, p.rx_bytes, cur.rx_bytes);
-                push(cat::NET_TX_BYTES, p.tx_bytes, cur.tx_bytes);
-                push(cat::NET_RX_PACKETS, p.rx_packets, cur.rx_packets);
-                push(cat::NET_TX_PACKETS, p.tx_packets, cur.tx_packets);
-                push(cat::NET_RX_ERRORS, p.rx_errors, cur.rx_errors);
-                push(cat::NET_TX_ERRORS, p.tx_errors, cur.tx_errors);
-                push(cat::NET_RX_DROPS, p.rx_drops, cur.rx_drops);
+                let rx = rate(p.rx_bytes, cur.rx_bytes, secs);
+                let tx = rate(p.tx_bytes, cur.tx_bytes, secs);
+                // 合并项（roadmap/08 §4.2）；if_data64 没有发送方向的丢包计数。
+                let errors = [
+                    (p.rx_errors, cur.rx_errors),
+                    (p.tx_errors, cur.tx_errors),
+                    (p.rx_drops, cur.rx_drops),
+                ]
+                .iter()
+                .map(|(a, b)| rate(*a, *b, secs))
+                .try_fold(0.0, |acc, r| r.map(|v| acc + v));
+                // 任一计数器回退说明接口被重建，整组跳过。
+                if let (Some(rx), Some(tx), Some(errors)) = (rx, tx, errors) {
+                    out.extend([
+                        Sample::labeled(cat::NET_RX_BYTES, label::IFACE, iface.clone(), rx),
+                        Sample::labeled(cat::NET_TX_BYTES, label::IFACE, iface.clone(), tx),
+                        Sample::labeled(cat::NET_ERRORS, label::IFACE, iface, errors),
+                    ]);
+                }
             }
         }
         self.prev = Some((now, snapshot));
@@ -197,12 +205,15 @@ mod tests {
             "第一轮无基线"
         );
         let out = c.ingest(t1, snap("en0", 3000, 2000));
+        assert_eq!(out.len(), 3);
         let rx = out.iter().find(|s| s.metric == cat::NET_RX_BYTES).unwrap();
         assert_eq!(rx.value, 1000.0, "2000 字节 / 2 秒");
         assert_eq!(rx.labels, vec![(label::IFACE, "en0".to_string())]);
         // tx 没变，速率为 0 但仍然产出（0 是有效观测值，不是缺失）
         let tx = out.iter().find(|s| s.metric == cat::NET_TX_BYTES).unwrap();
         assert_eq!(tx.value, 0.0);
+        let errs = out.iter().find(|s| s.metric == cat::NET_ERRORS).unwrap();
+        assert_eq!(errs.value, 0.0);
     }
 
     #[test]
@@ -239,8 +250,14 @@ mod tests {
             assert_eq!(s.labels[0].0, label::IFACE);
             assert!(!s.labels[0].1.starts_with("lo"), "回环不该出现");
         }
-        // if_data64 没有发送方向的丢包计数
-        assert!(!out.iter().any(|s| s.metric == cat::NET_TX_DROPS));
+        // 裁剪后只有三条网络指标
+        for s in &out {
+            assert!(
+                [cat::NET_RX_BYTES, cat::NET_TX_BYTES, cat::NET_ERRORS].contains(&s.metric),
+                "{} 不该产出",
+                s.metric
+            );
+        }
     }
 
     #[test]

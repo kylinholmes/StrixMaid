@@ -46,6 +46,20 @@ impl MetricRow {
     }
 }
 
+/// 一行桶数据连同其 series 元数据，供 Agent 导出（[`Store::export_after`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRow {
+    /// 指标名。
+    pub metric: String,
+    /// 规范化标签串。
+    pub labels: String,
+    /// 单位。
+    pub unit: Option<String>,
+    /// 桶数据；`row.series_id` 是**本地**的 series id，键集分页用，
+    /// 不应发给对端（对端按 `metric + labels` 重新映射）。
+    pub row: MetricRow,
+}
+
 /// 单次查询返回的点数上限。超过就自动升到更粗的分层。
 ///
 /// design.md §7.5 用 uPlot 画图，几万点也不掉帧；这里限制的是 HTTP 响应体大小，
@@ -408,6 +422,73 @@ impl Store {
         })
     }
 
+    /// 某节点在某层的最大 `ts`；该节点无数据时 `None`。
+    ///
+    /// Agent 重连时 Server 以此构造 `agent.resume.since_ts`（roadmap/05 §3.2）。
+    pub async fn tier_max_ts(&self, layer: MetricLayer, node: &str) -> Result<Option<i64>> {
+        let spec = TierSpec::require(layer)?;
+        let sql = format!(
+            "SELECT MAX(m.ts) AS ts FROM {table} m JOIN series s ON s.id = m.series_id WHERE s.node = ?",
+            table = spec.table()
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(node)
+            .fetch_one(self.read_pool())
+            .await?;
+        Ok(row.get::<Option<i64>, _>("ts"))
+    }
+
+    /// 按 `(ts, series_id)` 键集分页导出一层的行，连同 series 元数据。
+    ///
+    /// 严格取 `(ts, series_id) > (after_ts, after_series)` 的行，按同序返回，
+    /// 至多 `limit` 行。Agent 端的推送与补发都走它：要从 `ts >= T` 开始就传
+    /// `(T - 1, i64::MAX)`。键集而不是 `ts >` 单键，是因为同一个 `ts` 的行数
+    /// 可能超过一批的大小（series 很多时），单键分页会在批边界丢行或死循环。
+    pub async fn export_after(
+        &self,
+        layer: MetricLayer,
+        after_ts: i64,
+        after_series: i64,
+        limit: i64,
+    ) -> Result<Vec<ExportRow>> {
+        let spec = TierSpec::require(layer)?;
+        let sql = format!(
+            r#"
+            SELECT s.metric, s.labels, s.unit,
+                   m.series_id, m.ts, m.cnt, m."min", m."max", m."sum", m.med
+            FROM {table} m JOIN series s ON s.id = m.series_id
+            WHERE m.ts > ? OR (m.ts = ? AND m.series_id > ?)
+            ORDER BY m.ts, m.series_id
+            LIMIT ?
+            "#,
+            table = spec.table()
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(after_ts)
+            .bind(after_ts)
+            .bind(after_series)
+            .bind(limit.max(0))
+            .fetch_all(self.read_pool())
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| ExportRow {
+                metric: row.get("metric"),
+                labels: row.get("labels"),
+                unit: row.get("unit"),
+                row: MetricRow {
+                    series_id: row.get("series_id"),
+                    ts: row.get("ts"),
+                    cnt: row.get("cnt"),
+                    min: row.get("min"),
+                    max: row.get("max"),
+                    sum: row.get("sum"),
+                    med: row.get("med"),
+                },
+            })
+            .collect())
+    }
+
     /// 某条 series 在某层的桶数量，用于测试与容量统计。
     pub async fn count_tier(&self, layer: MetricLayer, series_id: i64) -> Result<i64> {
         let spec = TierSpec::require(layer)?;
@@ -420,5 +501,230 @@ impl Store {
         .await?
         .get("n");
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod trim_migration_tests {
+    use sqlx::Row as _;
+
+    use super::Store;
+
+    /// `0002_metrics_trim.sql` 的原文。测试直接重放它：sqlx 的迁移在 open 时只跑
+    /// 一次，无法对「迁移前就存在的老 series」建立前置状态，这里手工造出该状态
+    /// 再执行同一份 SQL，顺带验证幂等（roadmap/08 §10）。
+    const TRIM_SQL: &str = include_str!("../../migrations/0002_metrics_trim.sql");
+
+    async fn insert_series(store: &Store, metric: &str) -> i64 {
+        sqlx::query("INSERT INTO series (node, metric, labels) VALUES ('local', ?, '') RETURNING id")
+            .bind(metric)
+            .fetch_one(store.write_pool())
+            .await
+            .unwrap()
+            .get("id")
+    }
+
+    async fn count(store: &Store, sql: &str) -> i64 {
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+            .fetch_one(store.write_pool())
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    #[tokio::test]
+    async fn 裁剪迁移删除老_series_及其桶数据_且幂等() {
+        let store = Store::open_in_memory().await.unwrap();
+        // 模拟迁移前的老库：一条被裁的 series（cpu.idle）与一条保留的（cpu.usage），
+        // 各带一行 m_1m 桶数据。
+        let retired = insert_series(&store, "cpu.idle").await;
+        let kept = insert_series(&store, "cpu.usage").await;
+        for id in [retired, kept] {
+            sqlx::query(
+                r#"INSERT INTO m_1m (series_id, ts, cnt, "min", "max", "sum", med)
+                   VALUES (?, 60, 1, 1.0, 1.0, 1.0, 1.0)"#,
+            )
+            .bind(id)
+            .execute(store.write_pool())
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(TRIM_SQL).execute(store.write_pool()).await.unwrap();
+
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM series").await, 1);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM series WHERE metric = 'cpu.idle'").await,
+            0,
+            "被裁名单中的 series 必须删除"
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM m_1m").await,
+            1,
+            "外键级联必须把老 series 的桶数据一并清掉"
+        );
+
+        // 幂等：再执行一遍，行数不变。
+        sqlx::raw_sql(TRIM_SQL).execute(store.write_pool()).await.unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM series").await, 1);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM m_1m").await, 1);
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use crate::store::{MetricLayer, MetricRow, Store};
+
+    fn row(series_id: i64, ts: i64) -> MetricRow {
+        MetricRow {
+            series_id,
+            ts,
+            cnt: 1,
+            min: 1.0,
+            max: 1.0,
+            sum: 1.0,
+            med: 1.0,
+        }
+    }
+
+    async fn series(store: &Store, n: usize) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for i in 0..n {
+            ids.push(
+                store
+                    .get_or_create_series("local", &format!("t.m{i}"), &[], Some("count"))
+                    .await
+                    .unwrap(),
+            );
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn 键集分页不重不漏_同_ts_跨批也正确() {
+        let store = Store::open_in_memory().await.unwrap();
+        let ids = series(&store, 3).await;
+        // 3 series × 4 个 ts = 12 行；每批 4 行，批边界必然落在同一个 ts 中间。
+        let mut rows = Vec::new();
+        for ts in [60, 120, 180, 240] {
+            for id in &ids {
+                rows.push(row(*id, ts));
+            }
+        }
+        store.insert_1m(&rows).await.unwrap();
+
+        let mut got = Vec::new();
+        let (mut ts, mut sid) = (-1i64, i64::MAX);
+        loop {
+            let batch = store
+                .export_after(MetricLayer::M1m, ts, sid, 4)
+                .await
+                .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            let last = batch.last().unwrap().row;
+            (ts, sid) = (last.ts, last.series_id);
+            got.extend(batch.into_iter().map(|e| (e.row.ts, e.row.series_id)));
+        }
+        assert_eq!(got.len(), 12, "不重不漏");
+        let mut expect: Vec<(i64, i64)> = Vec::new();
+        for ts in [60, 120, 180, 240] {
+            let mut s = ids.clone();
+            s.sort_unstable();
+            for id in s {
+                expect.push((ts, id));
+            }
+        }
+        assert_eq!(got, expect, "按 (ts, series_id) 全序返回");
+    }
+
+    #[tokio::test]
+    async fn 一万行按一千切十批_最后一批不足时如实() {
+        let store = Store::open_in_memory().await.unwrap();
+        let ids = series(&store, 1).await;
+        let rows: Vec<MetricRow> = (0..10_500).map(|i| row(ids[0], 60 * (i + 1))).collect();
+        // insert_1m 单事务逐行，10500 行一次写入太慢；分块。
+        for chunk in rows.chunks(2000) {
+            store.insert_1m(chunk).await.unwrap();
+        }
+        let mut batches = Vec::new();
+        let (mut ts, mut sid) = (-1i64, i64::MAX);
+        loop {
+            let batch = store
+                .export_after(MetricLayer::M1m, ts, sid, 1000)
+                .await
+                .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            let last = batch.last().unwrap().row;
+            (ts, sid) = (last.ts, last.series_id);
+            batches.push(batch.len());
+        }
+        assert_eq!(batches.len(), 11);
+        assert!(batches[..10].iter().all(|n| *n == 1000));
+        assert_eq!(batches[10], 500, "最后一批不足 1000 时如实返回");
+    }
+
+    #[tokio::test]
+    async fn 起点语义与元数据() {
+        let store = Store::open_in_memory().await.unwrap();
+        let id = store
+            .get_or_create_series("local", "cpu.usage", &[("core", "1")], Some("percent"))
+            .await
+            .unwrap();
+        store
+            .insert_1m(&[row(id, 60), row(id, 120)])
+            .await
+            .unwrap();
+
+        // 从 ts >= 60 开始：传 (59, MAX)。
+        let all = store
+            .export_after(MetricLayer::M1m, 59, i64::MAX, 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].metric, "cpu.usage");
+        assert_eq!(all[0].labels, "core=1");
+        assert_eq!(all[0].unit.as_deref(), Some("percent"));
+
+        // (60, MAX) 是严格键集：ts == 60 被跳过。
+        let after = store
+            .export_after(MetricLayer::M1m, 60, i64::MAX, 100)
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].row.ts, 120);
+    }
+
+    #[tokio::test]
+    async fn 按节点取最大_ts() {
+        let store = Store::open_in_memory().await.unwrap();
+        assert_eq!(
+            store.tier_max_ts(MetricLayer::M1m, "web-01").await.unwrap(),
+            None
+        );
+        let local = store
+            .get_or_create_series("local", "cpu.usage", &[], None)
+            .await
+            .unwrap();
+        let remote = store
+            .get_or_create_series("web-01", "cpu.usage", &[], None)
+            .await
+            .unwrap();
+        store
+            .insert_1m(&[row(local, 300), row(remote, 120), row(remote, 180)])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.tier_max_ts(MetricLayer::M1m, "web-01").await.unwrap(),
+            Some(180),
+            "只看该节点自己的行"
+        );
+        assert_eq!(
+            store.tier_max_ts(MetricLayer::M1m, "local").await.unwrap(),
+            Some(300)
+        );
     }
 }

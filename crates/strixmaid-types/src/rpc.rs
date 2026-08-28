@@ -48,7 +48,8 @@ pub const PROC_DETAIL: &str = "proc.detail";
 pub const PROC_SIGNAL: &str = "proc.signal";
 /// 调整优先级（写*）。参数 [`ReniceParams`]。
 pub const PROC_RENICE: &str = "proc.renice";
-/// 进程实时流（订阅）。参数 [`crate::process::ProcessListQuery`] 加 `interval_secs`。
+/// 进程实时流（订阅）。参数 [`ProcLiveParams`]，
+/// 帧为 [`crate::process::ProcessSummary`] 数组（全量替换）。
 pub const PROC_LIVE: &str = "proc.live";
 
 /// unit 列表（读）。参数 [`crate::service::UnitListQuery`]。
@@ -74,6 +75,11 @@ pub const LOG_FOLLOW: &str = "log.follow";
 /// user 层能力实测（读）。参数无，结果 [`crate::capability::UserProbe`]。
 pub const CAPS_PROBE_USER: &str = "caps.probe_user";
 
+/// 列目录（读，roadmap/04 §A）。参数 [`FsParams`]，结果 [`crate::file::DirListing`]。
+pub const FS_LIST: &str = "fs.list";
+/// 读文本文件（读）。参数 [`FsParams`]，结果 [`crate::file::FileContent`]。
+pub const FS_READ: &str = "fs.read";
+
 /// 开一个 PTY（`roadmap/03-terminal.md` §4.5）。
 ///
 /// 参数 [`TermOpenParams`]，结果 [`TermOpenResult`]，**并附带 1 个 fd**——
@@ -84,7 +90,8 @@ pub const TERM_OPEN: &str = "term.open";
 /// 改 PTY 窗口大小。参数 [`TermResizeParams`]，无结果。
 pub const TERM_RESIZE: &str = "term.resize";
 
-/// 关掉一个 PTY：`SIGHUP` 进程组并回收。参数 [`TermCloseParams`]，无结果。
+/// 关掉一个 PTY：`SIGHUP` 进程组并回收。参数 [`TermCloseParams`]，
+/// 结果 [`TermCloseResult`]——其中带 shell 的退出状态（若能取到）。
 pub const TERM_CLOSE: &str = "term.close";
 
 // ===========================================================================
@@ -147,6 +154,29 @@ pub struct TermCloseParams {
     pub pid: u32,
 }
 
+/// shell 的退出状态（`roadmap/03-terminal.md` §6.3）。
+///
+/// 两个字段互斥：正常退出只有 `code`，被信号终止只有 `signal`。都为 `None`
+/// 意味着 worker 没能取到状态（收尸超时、waitpid 出错），调用方不得编造一个
+/// 假值顶替——`0` 看起来像真的，但它是错的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermExit {
+    /// 正常退出时的退出码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// 被信号终止时的信号编号（如 `SIGHUP` = 1、`SIGKILL` = 9）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+}
+
+/// `term.close` 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermCloseResult {
+    /// shell 的退出状态；`None` 表示没能取到。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<TermExit>,
+}
+
 /// 只带一个 pid 的参数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PidParams {
@@ -188,6 +218,52 @@ pub struct CursorParams {
     pub cursor: String,
 }
 
+/// `fs.list` / `fs.read` 的参数（roadmap/04 §A.3）。
+///
+/// `allowed_roots` 是主进程的 `files.allowed_roots` 配置，**随调用下发**。
+/// 方案文件推荐一次性的 `ToWorker::Configure` 帧，这里选择随调用传：为一个
+/// 策略值给 IPC 协议加一种帧、给分发表加一份可变状态，代价大于每次多传几十
+/// 字节——文件浏览是人手速驱动的低频调用。它也不是安全边界（真正的裁决是
+/// worker uid 下的文件权限），只是「界面该看哪里」的部署策略。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsParams {
+    /// 绝对路径，worker 侧做规范化与 roots 校验。
+    pub path: String,
+    /// 允许浏览的根路径列表。空列表 = 一律拒绝。
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+}
+
+/// `proc.live` 的订阅参数（roadmap/04 §B.3）。
+///
+/// 边界值由**主进程侧**（`ws/channels/processes_live.rs`）校验并回填缺省——
+/// 那里才能带着订阅方的 `id` 回一帧 `err`；worker 对收到的值只做使用不做复核。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProcLiveParams {
+    /// 列表的筛选与排序，与 `GET /processes` 相同。
+    #[serde(flatten)]
+    pub query: crate::process::ProcessListQuery,
+    /// 推送间隔（秒），允许 [`PROC_LIVE_MIN_INTERVAL_SECS`] –
+    /// [`PROC_LIVE_MAX_INTERVAL_SECS`]，缺省 [`PROC_LIVE_DEFAULT_INTERVAL_SECS`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    /// 每帧最多多少个进程，上限 [`PROC_LIVE_MAX_LIMIT`]，缺省
+    /// [`PROC_LIVE_DEFAULT_LIMIT`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// `proc.live` 的间隔下限（秒）。
+pub const PROC_LIVE_MIN_INTERVAL_SECS: u64 = 2;
+/// `proc.live` 的间隔上限（秒）。
+pub const PROC_LIVE_MAX_INTERVAL_SECS: u64 = 10;
+/// `proc.live` 的缺省间隔（秒）。
+pub const PROC_LIVE_DEFAULT_INTERVAL_SECS: u64 = 3;
+/// `proc.live` 每帧进程数上限。
+pub const PROC_LIVE_MAX_LIMIT: usize = 500;
+/// `proc.live` 每帧进程数缺省值。
+pub const PROC_LIVE_DEFAULT_LIMIT: usize = 100;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +283,9 @@ mod tests {
             assert!(m.starts_with("log."), "{m}");
         }
         assert!(CAPS_PROBE_USER.starts_with("caps."));
+        for m in [FS_LIST, FS_READ] {
+            assert!(m.starts_with("fs."), "{m}");
+        }
     }
 
     #[test]
@@ -233,6 +312,8 @@ mod tests {
             LOG_BOOTS,
             LOG_FOLLOW,
             CAPS_PROBE_USER,
+            FS_LIST,
+            FS_READ,
             TERM_OPEN,
             TERM_RESIZE,
             TERM_CLOSE,

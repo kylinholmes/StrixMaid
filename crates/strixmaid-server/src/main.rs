@@ -28,7 +28,7 @@ use clap::Parser as _;
 use strixmaid_core::config::{Config, cli_layer};
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command, GlobalArgs, WorkerArgs};
+use crate::cli::{Cli, Command, ConfigAction, GlobalArgs, WorkerArgs};
 use crate::state::AppState;
 
 #[tokio::main]
@@ -41,9 +41,26 @@ async fn main() -> anyhow::Result<()> {
         return run_worker(&cli.global, args).await;
     }
 
+    // `config example` 只打印文本，不加载配置（roadmap/06 §3.4）。
+    if let Some(Command::Config { action }) = &cli.command {
+        match action {
+            ConfigAction::Example => {
+                print!("{}", Config::example_toml());
+                return Ok(());
+            }
+        }
+    }
+
     // 先加载配置再起 tracing —— 日志级别本身来自配置。
     // 这段时间里的错误由 main 的 Err 返回值打到 stderr，不会丢。
     let config = load_config(&cli.global)?;
+
+    // `--check-config`：加载 + 校验（load_config 内完成）即是全部工作。
+    if cli.check_config {
+        println!("配置有效（{}）", config.listen);
+        return Ok(());
+    }
+
     init_tracing(&config, cli.global.log_level.is_some())?;
 
     serve(config).await
@@ -128,6 +145,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // 一个没有主人的登录 shell。装在这里而不是构造时传入，是因为两者互不依赖。
     let terminals = TerminalRegistry::new(config.terminal.clone());
     sessions.set_terminal_registry(terminals.clone());
+    // 非 REST 的关闭（空闲、shell 自退、登出）经观察者写审计（roadmap/03 §7）。
+    terminals.set_observer(Arc::new(auth::audit::TerminalAudit::new(
+        store.clone(),
+        strixmaid_core::session::LOCAL_NODE_ID,
+    )));
     // 空闲终端回收。周期取 30 秒：空闲上限默认 30 分钟，这个粒度足够，
     // 又不至于让一个开着 root shell 的终端在超时后还多活很久。
     let terminal_sweeper = {
@@ -174,9 +196,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
     tracing::info!(caps = ?report.system, "system 能力");
 
+    // ---- Agent 汇聚（roadmap/05）----
+    let agents = ws::agent::AgentRegistry::new();
+
     // ---- WS 控制面 ----
     let hub = Arc::new(ws::Hub::new());
-    hub.register(Arc::new(ws::channels::MetricsLive::new(engine.clone())));
+    hub.register(Arc::new(
+        ws::channels::MetricsLive::new(engine.clone()).with_agents(agents.clone()),
+    ));
     if let Some(p) = &svc {
         hub.register(Arc::new(ws::channels::ServicesChanged::new(Arc::clone(p))));
     }
@@ -185,6 +212,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // 频道可不可用取决于**那个用户的 worker** 里有没有日志后端，
     // 主进程自己的探测结果对它没有决定权。
     hub.register(Arc::new(ws::channels::LogsFollow::new(auth.clone())));
+    // `system.health`：健康是全局事实，主进程每 30 秒重算一次并把 failed units
+    // 并入（roadmap/04 §B.2）。变更才广播，任务随进程关停一起收。
+    let (system_health, health_task) = ws::channels::SystemHealth::start(
+        HostProvider::new(),
+        svc.clone(),
+        std::time::Duration::from_secs(30),
+    );
+    hub.register(Arc::new(system_health));
+    // `processes.live`：按会话投递到 user worker——CPU% 的差分基线在那里，
+    // 与 REST 的 `GET /processes` 共享（roadmap/04 §B.3）。
+    hub.register(Arc::new(ws::channels::ProcessesLive::new(auth.clone())));
 
     // ---- 路由 ----
     let states = routes::ApiStates {
@@ -195,15 +233,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.session.elevate_groups.clone(),
             auth.clone(),
         )),
-        metrics: Arc::new(routes::metrics::MetricsState::new(engine.clone())),
+        metrics: Arc::new(
+            routes::metrics::MetricsState::new(engine.clone()).with_agents(agents.clone()),
+        ),
         audit: Arc::new(routes::audit::AuditState::new(store.clone())),
         terminals: routes::terminals::TerminalState::new(
             terminals.clone(),
             auth.clone(),
             store.clone(),
         ),
+        files: routes::files::FilesState::new(auth.clone(), &config.files.allowed_roots),
+        nodes: routes::nodes::NodesState::new(store.clone(), agents.clone(), auth.clone()),
     };
-    let router = app::build(states, hub, auth);
+    let router = app::build(
+        states,
+        hub,
+        auth,
+        ws::agent::AgentSocketState {
+            store: store.clone(),
+            registry: agents.clone(),
+        },
+    );
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -224,6 +274,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     engine.stop().await;
     sweeper.abort();
     terminal_sweeper.abort();
+    health_task.abort();
     audit_pruner.abort();
     sessions.shutdown().await;
     store.close().await;
