@@ -2,7 +2,9 @@
 
 > 编写日期：2026-08-27，末次更新 2026-08-28。
 > **2026-08-28 现状**：roadmap 01–06 完成、07 验证工装完成（未在 root 实跑）、08 采集侧 + §5 拓扑完成；
-> `cargo test --workspace` **463 通过**、clippy 零 warning（含无 UI 变体）；改动约 70 文件**未提交**。
+> `cargo test --workspace` **463 通过**、clippy 零 warning（含无 UI 变体）；改动已提交为 `233ab6e`。
+> **2026-08-29**：macOS 上补跑质量门，fs provider 有 3 个用例写死 Linux 专有路径而失败，已改为
+> 运行期探测跳过；macOS 现 431 通过 / 0 失败。详见 `HANDOFF-2026-08-28.md` §0。
 > 逐里程碑状态见下表 §3；**给接手 AI 的总交接见 [`HANDOFF-2026-08-28.md`](./HANDOFF-2026-08-28.md)**。
 >
 > 原始编写日期：2026-08-27。对应代码状态：Phase 0–3 接线完成，`cargo test --workspace` 273 通过，clippy 零 warning，共 28,147 行 Rust。
