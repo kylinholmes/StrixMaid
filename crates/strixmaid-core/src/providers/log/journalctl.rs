@@ -421,7 +421,13 @@ fn map_journalctl_error(stderr: &str) -> ApiError {
         || l.contains("data from the specified boot")
     {
         ApiError::invalid_request("日志查询参数不合法").with_detail(detail)
-    } else if l.contains("permission denied") || l.contains("access denied") {
+    } else if l.contains("permission denied")
+        || l.contains("access denied")
+        // RHEL 系上非特权用户一个 journal 文件都打不开时的措辞，不含 "permission denied"。
+        // 归错了不只是错误码难看：auth::exec::escalate **只在 PermissionDenied 时才升级**，
+        // 落进 Internal 就等于把「提权本可以解决」这条路也堵死了。
+        || l.contains("insufficient permissions")
+    {
         ApiError::permission_denied("没有读取日志的权限")
             .with_detail(detail)
             .retry_elevated()
@@ -588,6 +594,21 @@ mod tests {
             ErrorCode::InvalidRequest
         );
         assert_eq!(map_journalctl_error("boom").code, ErrorCode::Internal);
+
+        // journalctl 说「权限不足」有不止一种措辞。RHEL 系上非特权用户一个 journal
+        // 文件都打不开时说的是 "insufficient permissions"，不含 "permission denied"。
+        // roadmap/07 在 Rocky 9 上实地撞到过：它落进了兜底的 Internal，于是一个普通
+        // 用户打开日志页就得到 500。Ubuntu 上不会复现——那里 journald 的 ACL 让他
+        // 至少打得开自己的用户日志，请求正常返回 200。
+        assert_eq!(
+            map_journalctl_error("No journal files were opened due to insufficient permissions.")
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            map_journalctl_error("Permission denied").code,
+            ErrorCode::PermissionDenied
+        );
     }
 
     // ---- 以下需要真实 journalctl；不可用时静默跳过 ----

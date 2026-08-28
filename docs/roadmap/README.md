@@ -14,6 +14,7 @@
 | `06-packaging.md` | musl 静态构建、helper 的 glibc 构建、`strixmaid.service`、pam.d 安装、`ui` feature、发布产物 | 无 | 中 |
 | `07-verification.md` | root 环境、浏览器、长时间运行、release 性能的验证清单与预期结果 | 06 | — |
 | `08-metrics-and-panel.md` | 采集项从 58 种裁到 34 种（含新增 GPU）；按 Win10 任务管理器密度重做性能面板；资源组与聚合语义。配套可交互样稿 `08-metrics-and-panel.mockup.html` | 无 | 大 |
+| `09-ci-verification.md` | 把 07 能自动化的部分搬进 CI 的分期方案：P1 两发行版每次 PR（已实现）、P2 慢档定时、P3 长时运行、P4/P5 明确不进通用 CI | 06、07 | 中 |
 
 ## 实施约定
 
