@@ -1,0 +1,93 @@
+/* 浮层：双层阴影 + 1px line-strong 边框（spec §5.5）。
+   暗色下投影能看见，靠的是 ground 提到了 L22.4 —— 两者绑定，别调暗底。 */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  z-index: 100;
+  animation: fade var(--t-pop) ease-out;
+}
+.dialog {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+  z-index: 101;
+  animation: fade var(--t-pop) ease-out;
+}
+.head {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+}
+.body {
+  padding: 13px 14px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.65;
+}
+.body b {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-weight: 400;
+}
+.foot {
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.menu {
+  position: absolute;
+  min-width: 176px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+  z-index: 50;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  animation: fade var(--t-pop) ease-out;
+}
+.item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  cursor: pointer;
+}
+.item:last-child {
+  border-bottom: 0;
+}
+.item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+.item:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+.itemDanger {
+  color: var(--crit);
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

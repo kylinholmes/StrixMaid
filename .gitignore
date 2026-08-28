@@ -28,6 +28,8 @@
 # Added by cargo
 
 web/node_modules/
+web/*.tsbuildinfo
+web/.vite/
 
 # StrixMaid 运行时产物
 /data/

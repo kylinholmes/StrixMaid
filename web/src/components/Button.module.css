@@ -1,0 +1,65 @@
+.btn {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 6px 13px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition:
+    background-color var(--t-color),
+    border-color var(--t-color),
+    color var(--t-color);
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.btn:active:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--ground);
+}
+.primary:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+.primary:active:not(:disabled) {
+  background: var(--ink-2);
+}
+
+/* 状态色进入界面层的唯一例外（spec §2.1） */
+.danger {
+  background: var(--crit);
+  border-color: var(--crit);
+  color: var(--on-crit);
+}
+.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn:disabled {
+  color: var(--ink-3);
+  border-color: var(--line);
+  background: transparent;
+  cursor: default;
+}
+
+.sm {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.icon {
+  padding: 6px;
+}
+.icon svg {
+  display: block;
+}

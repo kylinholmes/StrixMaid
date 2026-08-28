@@ -1,0 +1,54 @@
+/*
+ * 静态 token。
+ *
+ * 中性色（ground / surface / line / ink …）**不在这里**——它们的色相由发行版派生，
+ * 由 theme/useTheme.ts 在运行时写到 :root 上。这里只放不随机器变化的东西。
+ */
+:root {
+  /* ---- 字体（spec §3.1）---- */
+  --cjk:
+    "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC",
+    "Source Han Sans SC";
+  --ui: system-ui, -apple-system, "Segoe UI", var(--cjk), sans-serif;
+  --mono: "IBM Plex Mono", var(--cjk), ui-monospace, Menlo, Consolas, monospace;
+
+  /* ---- 数据层：五资源色 + 三状态色（spec §2.4，穷举验证过 CVD，不得改动）---- */
+  --cpu: #0c97ab;
+  --gpu: #3f8632;
+  --mem: #7a5cd4;
+  --disk: #b06a22;
+  --net: #b44579;
+  --ok: #107c41;
+  --warn: #8a6100;
+  --crit: #c42b1c;
+  /* 破坏性按钮上的文字。亮色 crit 底配白字 5.66:1 */
+  --on-crit: #ffffff;
+
+  /* ---- 尺寸（spec §4）---- */
+  --row: 30px;
+  --row-toolbar: 40px;
+  --rail: 184px;
+  --rail-narrow: 44px;
+
+  /* ---- 浮层（spec §5.5）---- */
+  --shadow-pop: 0 1px 1px rgb(0 0 0 / 0.1), 0 9px 26px rgb(0 0 0 / 0.16);
+  --scrim: rgb(0 0 0 / 0.45);
+
+  /* ---- 动效（spec §7）---- */
+  --t-color: 120ms;
+  --t-pop: 90ms;
+}
+
+:root[data-mode="dark"] {
+  --cpu: #12a6ba;
+  --gpu: #4e9a3d;
+  --mem: #8a6fe0;
+  --disk: #c0762a;
+  --net: #c25086;
+  --ok: #4bb07a;
+  --warn: #d9a227;
+  --crit: #e86b60;
+  /* 暗色 crit 底配深字 6.03:1 */
+  --on-crit: #1a0e0c;
+  --shadow-pop: 0 1px 1px rgb(0 0 0 / 0.5), 0 9px 26px rgb(0 0 0 / 0.62);
+}

@@ -1,0 +1,91 @@
+/* 顺序即层级：先写基础规则，再写 .narrow 的覆盖。
+   反过来写会触发 descending specificity —— 低特异性的规则排在高特异性之后，
+   浏览器仍按特异性裁决，但读代码的人会以为后写的赢。 */
+.rail {
+  width: var(--rail);
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  padding: 6px 0;
+  overflow-y: auto;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--row);
+  padding: 0 12px;
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition:
+    background-color var(--t-color),
+    color var(--t-color);
+}
+.row:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.row[aria-current="page"] {
+  background: var(--sel);
+  color: var(--ink);
+  font-weight: 600;
+}
+.row svg {
+  flex: none;
+  display: block;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.count {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  padding: 0 5px;
+}
+.countBad {
+  color: var(--crit);
+  border-color: var(--crit);
+}
+
+/* 有能力但无权 —— 显示但禁用（spec §6）。能力不存在时应当整项不渲染，不走这里。 */
+.disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+.disabled:hover {
+  background: transparent;
+  color: var(--ink-3);
+}
+.lock {
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+/* ---- < 900px 折叠成 44px 图标条（spec §8）---- */
+.narrow {
+  width: var(--rail-narrow);
+}
+.narrow .row {
+  justify-content: center;
+  padding: 0;
+  gap: 0;
+}
+.narrow .label,
+.narrow .count,
+.narrow .lock {
+  display: none;
+}
