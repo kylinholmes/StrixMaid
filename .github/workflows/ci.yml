@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,6 +75,47 @@ jobs:
         with:
           name: strixmaid-helper-gnu228
           path: target/x86_64-unknown-linux-gnu/release/strixmaid-helper
+
+  # 组装可安装的发布物（roadmap/06 §3.5）。与 scripts/package.sh 的产物同构，
+  # 区别只在二进制来自上面两个 job 而不是本地工具链——CI 是唯一同时具备
+  # musl-tools 与 zigbuild 的环境（开发机两样都没有，见 HANDOFF-2026-08-28 §3）。
+  # 07 验证（root 容器）直接下载这个产物，无需在被测机器上编译。
+  package:
+    needs: [build-musl, build-helper]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 组装发布目录
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          out="strixmaid-$version-x86_64"
+          mkdir -p "$out/packaging/pam.d"
+          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid        "$out/"
+          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid-agent  "$out/"
+          install -m 0755 artifacts/strixmaid-helper-gnu228/strixmaid-helper "$out/"
+          install -m 0755 packaging/install.sh "$out/packaging/"
+          install -m 0644 packaging/strixmaid.service packaging/strixmaid-agent.service "$out/packaging/"
+          install -m 0644 packaging/pam.d/strixmaid.debian packaging/pam.d/strixmaid.rhel "$out/packaging/pam.d/"
+          install -m 0644 LICENSE "$out/"
+          tar -czf "$out.tar.gz" "$out"
+          ls -l "$out.tar.gz"
+      - name: 自检发布物完整（缺一个文件 install.sh 就会半路失败）
+        run: |
+          out=$(ls -d strixmaid-*-x86_64)
+          for f in strixmaid strixmaid-agent strixmaid-helper \
+                   packaging/install.sh packaging/strixmaid.service \
+                   packaging/strixmaid-agent.service \
+                   packaging/pam.d/strixmaid.debian packaging/pam.d/strixmaid.rhel; do
+            [ -e "$out/$f" ] || { echo "发布物缺 $f"; exit 1; }
+          done
+          [ -x "$out/strixmaid" ] && [ -x "$out/packaging/install.sh" ] || { echo "可执行位丢了"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strixmaid-dist-x86_64
+          path: strixmaid-*-x86_64.tar.gz
 
   size:
     needs: [build-musl, build-helper]

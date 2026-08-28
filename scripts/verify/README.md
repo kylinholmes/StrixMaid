@@ -26,6 +26,32 @@ alice / bob / 一个只睡觉的 `strixtest.service`）→ `--systemd=always` �
 带源的镜像。rootless `--systemd=always` 需要 cgroup v2（`podman info` 里
 `cgroupVersion: v2`）。
 
+## 只有 docker 的机器
+
+`run-in-docker.sh` 与上面的 podman 版等价，参数相同：
+
+```sh
+scripts/verify/run-in-docker.sh --dist strixmaid-0.1.0-x86_64 --distro ubuntu
+```
+
+差别只在起容器那一步（docker 没有 `--systemd=always`，要自己给 `--privileged`、
+tmpfs 的 `/run`、`SIGRTMIN+3`，并用 `--cgroupns=private` 而不是 host）。
+**改了一边记得改另一边**：两个脚本的其余步骤是逐条对齐的。
+
+## 发布物从哪来
+
+被测机器上**不需要**编译。开发机通常既没有 musl-tools 也没有 zigbuild
+（HANDOFF-2026-08-28 §3），CI 是唯一两样齐全的环境：`ci.yml` 的 `package` job
+把 `build-musl` 与 `build-helper` 的产物组装成与 `scripts/package.sh` 同构的
+`strixmaid-dist-x86_64` 产物，下载解压即可喂给 `--dist`。
+
+```sh
+gh run download <run-id> -n strixmaid-dist-x86_64
+tar xzf strixmaid-0.1.0-x86_64.tar.gz
+```
+
+本机有 musl-tools 时仍可用 `scripts/package.sh x86_64` 自己出包，两者产物同构。
+
 ## 手工跑（已有 VM / 已在跑的 Server）
 
 脚本不依赖工装，也能对着一个已经跑起来的 strixmaid 直接跑：
