@@ -85,16 +85,27 @@ PAM 登录的用户重输密码即可获得 root worker。
 
 以下内容有代码、有单元测试，但从未在其目标环境中运行过。它们构成当前最大的风险面。
 
-### 4.1 root 运行路径
+### 4.1 root 运行路径 —— 已实测（2026-08-29）
 
-本机无 root，以下路径一行都没有执行过：
+> 本节原文写着「以下路径一行都没有执行过」。**现在都执行过了**：在
+> `ubuntu:24.04` 与 `rockylinux:9` 两个 systemd 容器里各跑一遍
+> `scripts/verify/`，产物取自 CI。逐条结果见 `roadmap/07-verification.md` §1.2。
+> 已进 CI 每次 PR 跑（`ci.yml` 的 `verify` job）。
 
-- helper 以 root 运行时的 `initgroups` / `setgid` / `setuid` 到**其他**用户；
-- `pam_open_session` 成功路径：logind 会话创建、`XDG_RUNTIME_DIR`、用户级 systemd 实例的拉起；
-- 提权：`SpawnWorker { as_root: true }` 与 admin worker；
-- polkit 对非 root worker 的实际裁决（当前只验证了主进程非 root 时的拒绝）；
-- `pam.d/strixmaid.{debian,rhel}` 模板是否能通过各发行版的 PAM 栈；
-- 会话回收时 helper / worker 进程是否干净退出、有无残留。
+| 原「未验证」项 | 现状 |
+|---|---|
+| helper 以 root 运行时 `setgid` / `setuid` 到**其他**用户 | ✓ 两个发行版都成功（`worker 已拉起，pid=… uid=1002 as_root=false`） |
+| `pam_open_session` 成功路径、logind 会话创建 | ✓ `pam_unix(strixmaid:session): session opened`；`loginctl` 可见 |
+| 提权：`SpawnWorker { as_root: true }` 与 admin worker | ✓ `uid=0 as_root=true`；已提权会话共 2 个 helper + 2 个 worker |
+| polkit 对非 root worker 的实际裁决 | ✓ 未提权写操作被 polkit 拒（`Interactive authentication required.`），403 + `can_retry_elevated` |
+| `pam.d/strixmaid.{debian,rhel}` 过各发行版 PAM 栈 | ✓ 两份模板分别通过。**但 PAM 栈的 warning 尚未人工核对** |
+| 会话回收时进程是否干净退出 | ✓ 登出后无残留 worker，logind 会话消失；`kill -9` 重启后无残留、旧 token 401、sessions 表空 |
+| 用户级 systemd 实例（`XDG_RUNTIME_DIR`） | 部分：R 上 `scope=user` 返回 200；U 的容器里没起 `user@.service`，返回 503（设计好的一档，非缺陷）。**VM 上仍需确认** |
+
+**这一轮暴露并修复的产品缺陷**：`/logs` 在 RHEL 系上返回 500
+（`journalctl` 的 `insufficient permissions` 被归成 `internal`）。Ubuntu 上永远
+复现不了——那里 journald 的 ACL 让用户至少打得开自己的日志。修复过程中连带
+把「提权后能不能读系统日志」的语义对齐了（日志读取接入 `exec::escalate`）。
 
 ### 4.2 浏览器
 
@@ -114,7 +125,7 @@ PAM 登录的用户重输密码即可获得 root worker。
 
 **后端 P0 无已知缺口。** 剩下两件都非本机能做的编码：
 
-1. **07 验证实跑**（最高优先，决定上线信心）——授权脊椎从没在 root 下跑过。工装 `scripts/verify/` 已备，换 root 的 VM/容器一条命令跑，回填 §07 结果列。
+1. ~~**07 验证实跑**~~ —— **已完成（2026-08-29）**，见 §4.1 与 `roadmap/07-verification.md` 的结果列；已进 CI 每次 PR 跑两个发行版。剩下的是搬不进 CI 的部分：浏览器（§2）、长时运行（§3）、release 计时（§4）、300s/900s 空闲超时与 faillock，分期方案见 `roadmap/09-ci-verification.md`。
 2. **正式前端**（产品可用性）——框架待项目负责人定（别擅自选栈）。后端接口齐全；`/debug` 有原生实时性能面板可参考；样稿 `roadmap/08 §6–§8` + `.mockup.html` 是设计真相。`/perf` 页是一次实时化尝试但**浏览器里空白、未修**，建议照样稿在正式框架重写。
 
 已界定**不做**（design.md §14）：TLS（反代）、告警、虚拟机/SELinux/高级存储/插件、NVIDIA 利用率（Q1(c)）、非 Linux 作管理端。
