@@ -68,6 +68,19 @@ BASE=http://127.0.0.1:9700 BOB_PW=... \
 `login.sh` 从 `$STRIX_PASSWORD` 取密码以便无人值守——**只在一次性测试环境用**，
 真实系统请用 `scripts/dev-login.sh`（`read -s` 读密码，明文不落地）。
 
+## CI 里也跑
+
+`ci.yml` 的 `verify` job 对 ubuntu / rocky 两个发行版各跑一遍本目录的检查
+（`needs: [package]`，直接吃 `package` 出的发布物）。GitHub 的 runner 本身就是
+带 root 与 docker 的 Ubuntu VM，跑法与开发者本机一致。
+
+这么做的理由是实打实的：07 第一次真跑就掉出一个**只在 RHEL 系上出现**的缺陷——
+journalctl 的 `insufficient permissions` 被归成 `internal`，普通用户打开日志页得到
+500，而 Ubuntu 上永远返回 200。跨发行版的矩阵是唯一防得住这类回归的办法。
+
+`fail-fast: false`：一个发行版挂了要能看到另一个的结果，否则分不清是普遍问题还是
+发行版相关。搬不进 CI 的仍见下表标「人工」的那几项。
+
 ## 覆盖矩阵
 
 | 07 章节 | 项 | 状态 |

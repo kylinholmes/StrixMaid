@@ -149,6 +149,36 @@ jobs:
           name: strixmaid-dist-x86_64
           path: strixmaid-*-x86_64.tar.gz
 
+  # roadmap/07 的 root 环境验收（§1.2 / §5 / 05 §5.2）。
+  #
+  # 为什么值得每次 PR 都跑：07 第一次真跑就掉出一个**只在 RHEL 系上出现**的缺陷
+  # （journalctl 的 "insufficient permissions" 被归成 internal，普通用户打开日志页
+  # 得到 500）。它在 Ubuntu 上永远复现不了——那里 journald 的 ACL 让用户至少打得开
+  # 自己的日志。这类「换个发行版才现形」的问题，只有跑在矩阵里才防得住回归。
+  #
+  # runner 本身就是带 root 与 docker 的 Ubuntu VM，跑法与开发者本机完全一致。
+  # 不能搬进来的仍是不能搬：浏览器渲染（§2）、7 天长测（§3）、release 计时（§4）、
+  # 以及 #15/#16 的 300s/900s 空闲超时（LONG=1，另行安排定时任务，不塞进 PR）。
+  verify:
+    needs: [package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false          # 一个发行版挂了要看另一个的结果，那才知道是不是发行版相关
+      matrix:
+        distro: [ubuntu, rocky]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: strixmaid-dist-x86_64
+      - name: 解包
+        run: |
+          tar xzf strixmaid-*-x86_64.tar.gz
+          echo "DIST=$(ls -d strixmaid-*-x86_64)" >> "$GITHUB_ENV"
+      - name: 07 验收（${{ matrix.distro }}）
+        run: scripts/verify/run-in-docker.sh --dist "$DIST" --distro ${{ matrix.distro }}
+
   size:
     needs: [build-musl, build-helper]
     runs-on: ubuntu-24.04
