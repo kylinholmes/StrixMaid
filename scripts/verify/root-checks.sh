@@ -37,25 +37,31 @@ bad()  { FAIL=$((FAIL+1)); printf '  %s✗%s %s\n' "$c_r" "$c_o" "$1"; [ $# -gt 
 skip() { SKIP=$((SKIP+1)); printf '  %s—%s %s%s%s\n' "$c_d" "$c_o" "$1" "${2:+ · }" "${2:-}"; }
 sec()  { printf '\n%s── %s%s\n' "$c_d" "$1" "$c_o"; }
 
-# code METHOD PATH [curl-args...]；响应体留在 $BODY，状态码回显。
-BODY=''
+# code METHOD PATH [curl-args...]；状态码留在 $C，响应体留在 $BODY。
+#
+# **不要**写成 `C="$(code ...)"`：命令替换会开子 shell，函数里对 BODY 的赋值
+# 出不来，调用方拿到的永远是上一次的值（多半是空串），于是每个 jq 判断都失败——
+# 状态码全对、断言全红。首轮真跑就栽在这上面。两个值都由函数直接设全局。
+C=''; BODY=''
 code() {
   local m="$1" p="$2"; shift 2
   local tmp; tmp="$(mktemp)"
-  local c; c="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$m" "$@" "$BASE$p" 2>/dev/null || echo 000)"
-  BODY="$(cat "$tmp")"; rm -f "$tmp"; echo "$c"
+  C="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$m" "$@" "$BASE$p" 2>/dev/null || echo 000)"
+  BODY="$(cat "$tmp")"; rm -f "$tmp"
 }
 
 login()   { STRIX_PASSWORD="$2" "$HERE/login.sh" login "$BASE" "$1"; }
 elevate() { STRIX_PASSWORD="$2" "$HERE/login.sh" elevate "$BASE" "$1" ""; }
 
 worker_count() { pgrep -u "$1" -f 'strixmaid worker' 2>/dev/null | wc -l | tr -d ' '; }
-helper_count() { pgrep -c -x strixmaid-helper 2>/dev/null || echo 0; }
+# pgrep -c 无匹配时**既打印 0 又以非零退出**，写成 `pgrep -c ... || echo 0`
+# 会得到两行 "0\n0"，之后的 [ "$n" -le ... ] 直接报 integer expression expected。
+helper_count() { local n; n="$(pgrep -c -x strixmaid-helper 2>/dev/null)"; [ -n "$n" ] || n=0; echo "$n"; }
 
 # ===========================================================================
 sec "§1.2 未认证与 alice（普通用户）"
 
-C="$(code GET /api/v1/capabilities)"
+code GET /api/v1/capabilities
 if [ "$C" = 200 ] && [ "$(echo "$BODY" | jq -r '.system.helper')" = true ]; then
   ok "#1 /capabilities helper=true（polkit=$(echo "$BODY" | jq -r '.system.polkit')）"
 else bad "#1 /capabilities helper 应为 true" "$C $BODY"; fi
@@ -72,39 +78,65 @@ fi
 
 if [ -n "$ATOK" ]; then
   AH=(-H "Authorization: Bearer $ATOK")
-  C="$(code GET /api/v1/auth/session "${AH[@]}")"
+  code GET /api/v1/auth/session "${AH[@]}"
   [ "$(echo "$BODY" | jq -r '.session_opened')" = true ] && ok "#3 session_opened=true" \
     || skip "#3 session_opened 非 true" "同 #2 的 logind 依赖"
 
-  C="$(code GET /api/v1/capabilities "${AH[@]}")"
+  code GET /api/v1/capabilities "${AH[@]}"
   ce="$(echo "$BODY" | jq -r '.user.can_elevate') $(echo "$BODY" | jq -r '.user.elevated')"
   [ "$ce" = "false false" ] && ok "#4 alice can_elevate=false elevated=false" || bad "#4 alice 能力异常" "$BODY"
 
-  C="$(code GET '/api/v1/logs?limit=50' "${AH[@]}")"
-  [ "$C" = 200 -o "$C" = 501 ] && ok "#5 alice /logs 返回 $C（内容可见性属人工核对）" || bad "#5 /logs 异常" "$C"
+  # 读不到日志的普通用户应得到 403 + can_retry_elevated（提权确实能解决——
+  # 日志读取走 exec::escalate），而**不是 500**。RHEL 系上曾是 500：journalctl 说
+  # "insufficient permissions"，映射没认出来，落进了 internal。
+  code GET '/api/v1/logs?limit=50' "${AH[@]}"
+  case "$C" in
+    200|501) ok "#5 alice /logs 返回 $C（内容可见性属人工核对）" ;;
+    403) [ "$(echo "$BODY" | jq -r '.can_retry_elevated')" = true ] \
+           && ok "#5 alice 读不到日志 → 403 且提示可提权重试" \
+           || bad "#5 /logs 403 但没带 can_retry_elevated" "$BODY" ;;
+    *) bad "#5 /logs 异常" "$C $BODY" ;;
+  esac
 
   WPID="$(pgrep -u "$ALICE" -f 'strixmaid worker' 2>/dev/null | head -1)"
   if [ -n "$WPID" ]; then
-    C="$(code GET "/api/v1/processes/$WPID" "${AH[@]}")"
+    code GET "/api/v1/processes/$WPID" "${AH[@]}"
     [ "$(echo "$BODY" | jq -r '.uid // .user // empty')" != "" ] && ok "#6 /processes/$WPID 可取（uid/cgroup 属人工核对）" \
       || skip "#6 /processes 详情形状需人工核对" "$BODY"
   else skip "#6 拿不到 alice worker pid"; fi
 
-  C="$(code POST "/api/v1/services/$TEST_UNIT/action" "${AH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}')"
-  [ "$C" = 403 ] && [ "$(echo "$BODY" | jq -r '.code')" = elevation_required ] \
-    && ok "#7 alice restart → 403 elevation_required" || bad "#7 未提权写操作应 403 elevation_required" "$C $BODY"
+  # 服务操作走 exec.rs 的 call_escalating_from：**先在 user worker 里试**，让 polkit
+  # 裁决（design.md §5 的原则），失败时返回 polkit 的真实理由并带上 can_retry_elevated。
+  # 所以这里可能是 permission_denied（polkit 拒绝）而不是 elevation_required
+  # （后者是 Privilege::Admin 那类路由在「压根没有 admin worker」时的回答）。
+  # 真正要断言的是「403 且前端被告知提权可解决」。
+  code POST "/api/v1/services/$TEST_UNIT/action" "${AH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}'
+  ecode="$(echo "$BODY" | jq -r '.code')"
+  retry="$(echo "$BODY" | jq -r '.can_retry_elevated')"
+  if [ "$C" = 403 ] && [ "$retry" = true ] \
+     && { [ "$ecode" = elevation_required ] || [ "$ecode" = permission_denied ]; }; then
+    ok "#7 alice restart → 403 $ecode（can_retry_elevated=true）"
+  else bad "#7 未提权写操作应 403 且 can_retry_elevated=true" "$C $BODY"; fi
 
   BEFORE="$(helper_count)"
-  C="$(code POST /api/v1/auth/elevate/start "${AH[@]}" -H 'Content-Type: application/json' -d '{"username":""}')"
+  code POST /api/v1/auth/elevate/start "${AH[@]}" -H 'Content-Type: application/json' -d '{"username":""}'
   AFTER="$(helper_count)"
   [ "$C" = 403 ] && [ "$(echo "$BODY" | jq -r '.code')" = permission_denied ] \
     && ok "#8 alice elevate/start → 403 permission_denied" || bad "#8 alice 提权应 403 permission_denied" "$C $BODY"
   [ "$AFTER" -le "$BEFORE" ] && ok "#8 提权被拒未新起 helper（$BEFORE→$AFTER）" || bad "#8 提权被拒却起了 helper" "$BEFORE→$AFTER"
 
-  C="$(code GET '/api/v1/services?scope=user' "${AH[@]}")"
-  [ "$C" = 200 -o "$C" = 501 ] && ok "#9 alice services?scope=user 返回 $C" || bad "#9 scope=user 异常" "$C"
+  # 503 unavailable = 「用户级 systemd 的 session bus 连不上」，是设计好的一档
+  # （error.rs：503 暂时不可用、页面别隐藏；501 本机没装、隐藏整个页面）。
+  # 容器里 pam_open_session 建了 logind 会话但通常没起 user@.service，503 属环境
+  # 而非缺陷——如实标 skip，不假装通过、也不误报为失败。
+  code GET '/api/v1/services?scope=user' "${AH[@]}"
+  case "$C" in
+    200|501) ok "#9 alice services?scope=user 返回 $C" ;;
+    503) skip "#9 scope=user 得到 503" "用户级 systemd 未起（容器常见）；VM 上应为 200" ;;
+    *) bad "#9 scope=user 异常" "$C $BODY" ;;
+  esac
 
-  C="$(code POST /api/v1/auth/logout "${AH[@]}")"
+  code POST /api/v1/auth/logout "${AH[@]}"
   sleep 1
   gone_w="$(worker_count "$ALICE")"; gone_h="$(helper_count)"
   [ "$C" = 200 -o "$C" = 204 ] && ok "#10 alice logout → $C" || bad "#10 logout 异常" "$C"
@@ -129,21 +161,37 @@ else
       || skip "#11 未见 uid 0 worker" "admin worker 可能名字不同，人工 ps 核对"
     BH=(-H "Authorization: Bearer $ETOK")
 
-    C="$(code GET /api/v1/capabilities "${BH[@]}")"
-    caps="$(echo "$BODY" | jq -r '.user.elevated') $(echo "$BODY" | jq -r '.user.can_manage_units') $(echo "$BODY" | jq -r '.user.can_read_journal')"
-    [ "$caps" = "true true true" ] && ok "#12 bob elevated/can_manage_units/can_read_journal 全 true" \
+    # can_read_journal 不是按组推导的结论，而是 worker 内**实测**的结果，会覆盖推导
+    # （worker/probe.rs：判据是读不读得到 _TRANSPORT=kernel 的条目）。容器里没有
+    # 内核日志可读，探测如实报 false——这正是它该做的，不是缺陷。分开断言，
+    # 让「提权本身生效」与「日志可见性」各自成立或各自失败。
+    code GET /api/v1/capabilities "${BH[@]}"
+    caps="$(echo "$BODY" | jq -r '.user.elevated') $(echo "$BODY" | jq -r '.user.can_manage_units')"
+    [ "$caps" = "true true" ] && ok "#12 bob elevated=true can_manage_units=true" \
       || bad "#12 bob 提权后能力不全" "$caps · $BODY"
+    # 对照必须**以同一个身份**做。日志读取三处都是 Privilege::User（logs.rs），
+    # 提权不改变 /logs 返回什么，所以这里要问的是「bob 自己读不读得到内核日志」，
+    # 而不是「root 读不读得到」——拿 root 去比会得到必然的假阳性。
+    cap_j="$(echo "$BODY" | jq -r '.user.can_read_journal')"
+    if su - "$BOB" -c 'journalctl -n 1 -q --no-pager --output=cat _TRANSPORT=kernel' 2>/dev/null | grep -q .; then
+      real_j=true
+    else
+      real_j=false
+    fi
+    [ "$cap_j" = "$real_j" ] \
+      && ok "#12 can_read_journal=$cap_j 与 $BOB 实际的内核日志可见性一致" \
+      || bad "#12 can_read_journal=$cap_j 但 $BOB 实测可见性=$real_j" "$BODY"
 
-    C="$(code POST "/api/v1/services/$TEST_UNIT/action" "${BH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}')"
+    code POST "/api/v1/services/$TEST_UNIT/action" "${BH[@]}" -H 'Content-Type: application/json' -d '{"action":"restart"}'
     if [ "$C" = 200 ]; then
       ok "#13 bob restart $TEST_UNIT → 200"
       systemctl is-active "$TEST_UNIT" >/dev/null 2>&1 && ok "#13 $TEST_UNIT restart 后 active" || skip "#13 $TEST_UNIT 非 active" "取决于测试 unit 类型"
     else bad "#13 bob restart 应 200" "$C $BODY"; fi
 
-    C="$(code GET '/api/v1/logs?limit=50' "${BH[@]}")"
+    code GET '/api/v1/logs?limit=50' "${BH[@]}"
     [ "$C" = 200 ] && ok "#14 bob /logs → 200（含系统日志属人工核对）" || bad "#14 bob /logs 异常" "$C"
 
-    C="$(code PUT /api/v1/system/hostname "${BH[@]}" -H 'Content-Type: application/json' -d '{"hostname":"strix-verify"}')"
+    code PUT /api/v1/system/hostname "${BH[@]}" -H 'Content-Type: application/json' -d '{"hostname":"strix-verify"}'
     if [ "$C" = 200 -o "$C" = 204 ]; then
       [ "$(hostnamectl --static 2>/dev/null)" = strix-verify ] && ok "#18 PUT hostname → 生效" || skip "#18 hostnamectl 未反映" "容器内 hostnamectl 可能受限"
     else bad "#18 PUT hostname 应成功" "$C $BODY"; fi
@@ -169,9 +217,9 @@ if command -v systemctl >/dev/null && systemctl show strixmaid >/dev/null 2>&1; 
   if [ -n "$MAINPID" ] && [ "$MAINPID" != 0 ]; then
     kill -9 "$MAINPID" 2>/dev/null || true
     for _ in $(seq 1 30); do systemctl is-active strixmaid >/dev/null 2>&1 && break; sleep 1; done
-    for _ in $(seq 1 30); do [ "$(code GET /api/v1/health)" = 200 ] && break; sleep 1; done
+    for _ in $(seq 1 30); do code GET /api/v1/health; [ "$C" = 200 ] && break; sleep 1; done
     if [ -n "$OLD" ]; then
-      C="$(code GET /api/v1/auth/session -H "Authorization: Bearer $OLD")"
+      code GET /api/v1/auth/session -H "Authorization: Bearer $OLD"
       [ "$C" = 401 ] && ok "#19 kill -9 重启后旧 token 401" || bad "#19 旧 token 未失效" "$C"
     fi
     [ "$(pgrep -f 'strixmaid worker' | wc -l)" = 0 ] && ok "#19 重启后无残留 worker" || bad "#19 重启后仍有 worker"
@@ -228,13 +276,13 @@ if [ -x "$HELPER" ]; then
 else skip "#5 helper fd 3" "找不到 strixmaid-helper"; fi
 
 # #6 WS 无 token → 401
-C="$(code GET /ws)"
+code GET /ws
 [ "$C" = 401 ] && ok "#6 无 token 的 /ws → 401" || skip "#6 /ws 无 token" "得到 $C（升级前的鉴权，非 200 即基本符合）"
 
 # #7 反代头伪造：无 trusted_proxies 时 X-Forwarded-For 不被采信
 if [ -n "${BTOK:-}" ]; then
   code POST "/api/v1/services/$TEST_UNIT/action" -H "Authorization: Bearer ${ETOK:-$BTOK}" \
-    -H 'X-Forwarded-For: 1.2.3.4' -H 'Content-Type: application/json' -d '{"action":"restart"}' >/dev/null
+    -H 'X-Forwarded-For: 1.2.3.4' -H 'Content-Type: application/json' -d '{"action":"restart"}' 
   if command -v sqlite3 >/dev/null && [ -f "$DB" ]; then
     RA="$(sqlite3 "$DB" "SELECT remote_addr FROM audit_log ORDER BY id DESC LIMIT 1" 2>/dev/null)"
     echo "$RA" | grep -q '1.2.3.4' && bad "#7 审计采信了伪造的 X-Forwarded-For" "$RA" \

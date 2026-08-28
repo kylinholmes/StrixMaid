@@ -247,11 +247,14 @@ where
     R: DeserializeOwned,
 {
     let params = to_value(method, params)?;
-    let result = escalate(auth, session, method, params.clone()).await;
+    let (result, used_admin) = escalate(auth, session, method, params.clone()).await;
 
-    // 升级重试的方法都是写操作，一律审计；而且**只在这里写一次**——
-    // 内部那两次 worker 调用是同一次用户操作的两次尝试，不是两件事。
-    if is_write(method) {
+    // 审计条件与 [`should_audit`] 一致：写操作要记，**以管理身份做成的事也要记**
+    // （「以 root 身份做的事没有『不值得记』的」）。后半条不能省——升级重试的方法
+    // 已不全是写操作：日志读取也走这条路，而它一旦升级就是 root 在读系统日志。
+    // 而且**只在这里写一次**——内部那两次 worker 调用是同一次用户操作的两次尝试，
+    // 不是两件事。
+    if is_write(method) || used_admin {
         write_audit(
             auth,
             session,
@@ -266,21 +269,24 @@ where
 }
 
 /// 升级重试的本体。**不写审计**（见模块文档的「一次用户操作只写一条」）。
+///
+/// 返回的第二个值是「这次有没有真的用上管理身份」，调用方据此决定是否留痕：
+/// 只看方法名不够——同一个方法既可能以用户身份做成，也可能升级后才做成。
 async fn escalate<R>(
     auth: &AuthState,
     session: &Session,
     method: &str,
     params: Value,
-) -> ApiResult<R>
+) -> (ApiResult<R>, bool)
 where
     R: DeserializeOwned,
 {
     let first = call_inner::<R>(auth, session, Privilege::User, method, params.clone()).await;
     let Err(e) = first else {
-        return first;
+        return (first, false);
     };
     if e.code != ErrorCode::PermissionDenied {
-        return Err(e);
+        return (Err(e), false);
     }
 
     if auth
@@ -289,10 +295,13 @@ where
         .await
         .is_some()
     {
-        return call_inner(auth, session, Privilege::Admin, method, params).await;
+        return (
+            call_inner(auth, session, Privilege::Admin, method, params).await,
+            true,
+        );
     }
     // 保留内核给出的原始说明（哪个进程、为什么拒），只补上「提权可解」这个信号。
-    Err(e.retry_elevated())
+    (Err(e.retry_elevated()), false)
 }
 
 /// 选 worker、发 RPC、解析结果。**不写审计**：它会被 [`escalate`] 调用两次。
@@ -699,6 +708,30 @@ mod tests {
             .await
             .unwrap()
             .entries
+    }
+
+    /// 日志读取也走升级路径之后，最容易踩的坑是「顺手把读也审计了」。
+    /// 读的量比写大两三个数量级，全记下来只会把真正要看的记录淹掉——
+    /// 只有**真的用上管理身份**那一次才留痕，未升级的读不留。
+    #[tokio::test]
+    async fn 未升级的日志读取不写审计() {
+        let auth = state().await;
+        let s = session(false);
+        let origin = RequestOrigin(Some("203.0.113.5:44444".into()));
+
+        let r: ApiResult<()> = call_escalating_from(
+            &auth,
+            &s,
+            &origin,
+            rpc::LOG_QUERY,
+            serde_json::json!({"limit": 50}),
+        )
+        .await;
+        assert!(r.is_err(), "会话没有 worker，这次调用必然失败");
+        assert!(
+            entries(&auth).await.is_empty(),
+            "未升级的读操作不该进审计表"
+        );
     }
 
     #[tokio::test]

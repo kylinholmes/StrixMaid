@@ -24,10 +24,12 @@ ok()   { PASS=$((PASS+1)); printf '  ✓ %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  ✗ %s\n' "$1"; [ $# -gt 1 ] && printf '      %s\n' "$2"; return 0; }
 skip() { SKIP=$((SKIP+1)); printf '  — %s%s\n' "$1" "${2:+ · $2}"; }
 
-BODY=''
+# 状态码留在 $C、响应体留在 $BODY；**不要**用 C="$(code ...)" 包——命令替换的
+# 子 shell 会把 BODY 的赋值吞掉（root-checks.sh 的 code() 有同样的注释）。
+C=''; BODY=''
 code() { local m="$1" p="$2"; shift 2; local t; t="$(mktemp)"
-  local c; c="$(curl -sS -o "$t" -w '%{http_code}' -X "$m" "$@" "$BASE$p" 2>/dev/null || echo 000)"
-  BODY="$(cat "$t")"; rm -f "$t"; echo "$c"; }
+  C="$(curl -sS -o "$t" -w '%{http_code}' -X "$m" "$@" "$BASE$p" 2>/dev/null || echo 000)"
+  BODY="$(cat "$t")"; rm -f "$t"; }
 
 login()   { STRIX_PASSWORD="$2" "$HERE/login.sh" login "$BASE" "$1"; }
 elevate() { STRIX_PASSWORD="$2" "$HERE/login.sh" elevate "$BASE" "$1" ""; }
@@ -39,20 +41,20 @@ command -v jq >/dev/null || { echo "缺少 jq" >&2; exit 2; }
 BTOK="$(login "$BOB" "$BOB_PW")" || { bad "bob 登录失败"; exit 1; }
 ETOK="$(elevate "$BTOK" "$BOB_PW")" || { bad "bob 提权失败"; exit 1; }
 
-C="$(code POST /api/v1/nodes -H "Authorization: Bearer $ETOK" \
-  -H 'Content-Type: application/json' -d "$(jq -nc --arg id "$NODE_ID" '{id:$id, name:"验证节点"}')")"
+code POST /api/v1/nodes -H "Authorization: Bearer $ETOK" \
+  -H 'Content-Type: application/json' -d "$(jq -nc --arg id "$NODE_ID" '{id:$id, name:"验证节点"}')"
 if [ "$C" != 201 ]; then
   # 可能已存在：删掉重登。
   code DELETE "/api/v1/nodes/$NODE_ID" -H "Authorization: Bearer $ETOK" >/dev/null
-  C="$(code POST /api/v1/nodes -H "Authorization: Bearer $ETOK" \
-    -H 'Content-Type: application/json' -d "$(jq -nc --arg id "$NODE_ID" '{id:$id, name:"验证节点"}')")"
+  code POST /api/v1/nodes -H "Authorization: Bearer $ETOK" \
+    -H 'Content-Type: application/json' -d "$(jq -nc --arg id "$NODE_ID" '{id:$id, name:"验证节点"}')"
 fi
 [ "$C" = 201 ] && ok "POST /nodes 登记 $NODE_ID → 201" || { bad "登记节点失败" "$C $BODY"; exit 1; }
 TOKEN="$(echo "$BODY" | jq -r '.token')"
 [ -n "$TOKEN" ] && [ "$TOKEN" != null ] && ok "token 仅在响应出现一次（已取走）" || bad "响应无 token"
 
 # 错误 token 连接被拒（§5.3）：curl 只到升级前，401 即符合。
-C="$(code GET /ws/agent -H 'Sec-WebSocket-Protocol: bearer, wrongtoken')"
+code GET /ws/agent -H 'Sec-WebSocket-Protocol: bearer, wrongtoken'
 [ "$C" = 401 ] && ok "§5.3 错误 token 的 /ws/agent → 401" || skip "§5.3 错误 token" "得到 $C（非 101/200 即基本符合）"
 
 # ---- 起 Agent ----
@@ -77,7 +79,7 @@ trap 'kill "$AGENT_PID" 2>/dev/null || true; code DELETE "/api/v1/nodes/$NODE_ID
 # 在线？
 online=0
 for _ in $(seq 1 20); do
-  C="$(code GET /api/v1/nodes -H "Authorization: Bearer $ETOK")"
+  code GET /api/v1/nodes -H "Authorization: Bearer $ETOK"
   [ "$(echo "$BODY" | jq -r --arg n "$NODE_ID" '.[] | select(.id==$n) | .online')" = true ] && { online=1; break; }
   sleep 1
 done
@@ -88,7 +90,7 @@ printf '  … 等 %ss 让 Agent 采集、落盘、推送\n' "$WAIT"
 sleep "$WAIT"
 
 now="$(date +%s)"
-C="$(code GET "/api/v1/metrics/query?node=$NODE_ID&series=cpu.usage&from=$((now-600))&to=$now&step=60" -H "Authorization: Bearer $ETOK")"
+code GET "/api/v1/metrics/query?node=$NODE_ID&series=cpu.usage&from=$((now-600))&to=$now&step=60" -H "Authorization: Bearer $ETOK"
 n="$(echo "$BODY" | jq '[.series[]?.points[]?] | length')"
 [ "$C" = 200 ] && [ "${n:-0}" -ge 1 ] && ok "query?node=$NODE_ID&series=cpu.usage 返回 ${n} 个点（≥1）" \
   || bad "非本机节点的落盘查询应有 ≥1 点" "$C n=$n"
@@ -100,7 +102,7 @@ if systemctl show strixmaid >/dev/null 2>&1; then
   BTOK="$(login "$BOB" "$BOB_PW")"; ETOK="$(elevate "$BTOK" "$BOB_PW")"
   sleep "$WAIT"
   now="$(date +%s)"
-  C="$(code GET "/api/v1/metrics/query?node=$NODE_ID&series=cpu.usage&from=$((now-3600))&to=$now&step=60" -H "Authorization: Bearer $ETOK")"
+  code GET "/api/v1/metrics/query?node=$NODE_ID&series=cpu.usage&from=$((now-3600))&to=$now&step=60" -H "Authorization: Bearer $ETOK"
   # 相邻 ts 差应恒为 60（无空洞）。
   gaps="$(echo "$BODY" | jq '[.series[0].points[].ts] | [range(1;length) as $i | .[$i]-.[$i-1]] | map(select(. != 60)) | length' 2>/dev/null || echo '?')"
   if [ "$gaps" = 0 ]; then ok "Server 重启后 $NODE_ID 的 cpu.usage 无空洞（相邻 ts 差恒 60）"

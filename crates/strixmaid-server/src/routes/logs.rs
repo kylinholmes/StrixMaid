@@ -33,7 +33,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthState;
-use crate::auth::exec::{self, Privilege};
+use crate::auth::exec::{self, RequestOrigin};
 use crate::error::ApiResult;
 
 /// 构建日志路由。挂到 `/api/v1` 之下（路径已含 `/logs` 前缀）。
@@ -52,6 +52,11 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
 /// 由新到旧一页；翻页带上 `cursor`（上一页的 `next_cursor`）与**相同的过滤条件**。
 /// `limit` 缺省 100、上限 1000。`q` 是字面量关键字（不是正则），大小写不敏感。
 /// 结果集只含登录用户可见的条目（见模块文档）。
+///
+/// **提权会扩大可见范围**：先以登录用户的身份读，被 journald 拒绝时，若会话已提权
+/// 就换管理身份重试（`auth::exec::escalate`）——与用户在终端里 `sudo journalctl`
+/// 得到的结果一致。未提权时返回 403 并带 `can_retry_elevated`，前端据此提示提权。
+/// 升级成功的那次会留审计（以管理身份读系统日志不是无痕操作）；未升级的读不审计。
 #[utoipa::path(
     get,
     path = "/logs",
@@ -59,9 +64,10 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
     params(LogQuery),
     security(("bearer" = [])),
     responses(
-        (status = 200, description = "一页日志（范围已由 journald ACL 按登录用户裁剪）", body = LogPage),
+        (status = 200, description = "一页日志（范围按登录用户或已提权的管理身份裁剪）", body = LogPage),
         (status = 400, description = "参数不合法（limit 越界、since > until、boot / cursor 格式错）", body = ApiError),
         (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "读不到日志且会话未提权；带 `can_retry_elevated`", body = ApiError),
         (status = 501, description = "本机没有 journalctl", body = ApiError),
         (status = 504, description = "journalctl 超时", body = ApiError),
     ),
@@ -69,10 +75,11 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
 pub async fn query_logs(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
     Query(query): Query<LogQuery>,
 ) -> ApiResult<Json<LogPage>> {
     Ok(Json(
-        exec::call(&auth, &session, Privilege::User, rpc::LOG_QUERY, query).await?,
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_QUERY, query).await?,
     ))
 }
 
@@ -100,13 +107,14 @@ pub async fn query_logs(
 pub async fn log_entry(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
     Path(cursor): Path<String>,
 ) -> ApiResult<Json<LogEntryDetail>> {
     Ok(Json(
-        exec::call(
+        exec::call_escalating_from(
             &auth,
             &session,
-            Privilege::User,
+            &origin,
             rpc::LOG_ENTRY,
             CursorParams { cursor },
         )
@@ -132,8 +140,9 @@ pub async fn log_entry(
 pub async fn list_boots(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
 ) -> ApiResult<Json<Vec<BootInfo>>> {
     Ok(Json(
-        exec::call(&auth, &session, Privilege::User, rpc::LOG_BOOTS, ()).await?,
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_BOOTS, ()).await?,
     ))
 }
