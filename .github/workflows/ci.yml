@@ -42,10 +42,19 @@ jobs:
       - name: 静态构建
         run: cargo build --release --target x86_64-unknown-linux-musl -p strixmaid-server -p strixmaid-agent
       - name: 断言静态链接
+        # Rust 的 musl 目标默认产出 static-pie，file 对它的措辞是 "static-pie linked"
+        # 而非 "statically linked"——两种都算静态。真正要挡的是 "dynamically linked"，
+        # 所以正面匹配之外再显式否定一次，避免哪天措辞再变就悄悄放行。
         run: |
           for bin in strixmaid strixmaid-agent; do
             f="target/x86_64-unknown-linux-musl/release/$bin"
-            file "$f" | grep -q 'statically linked' || { echo "$f 不是静态链接"; file "$f"; exit 1; }
+            desc=$(file "$f")
+            echo "$desc"
+            case "$desc" in
+              *"dynamically linked"*) echo "$f 是动态链接"; exit 1 ;;
+              *"static-pie linked"*|*"statically linked"*) ;;
+              *) echo "$f 的链接方式无法判定，file 说：$desc"; exit 1 ;;
+            esac
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -60,7 +69,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # build.rs 有意用 `-l:libpam.so.0`（不必装 dev 包提供 .so 符号链接，见其头注释），
+      # 但 zig 的 sysroot 里没有 libpam，ld.lld 找不到它。把宿主的 libpam.so.0 单独
+      # 拷进一个只有它的目录再 -L 过去——**不能**直接 -L 宿主的 multiarch 目录，
+      # 那里还躺着宿主的 glibc 2.39，会把 2.28 的目标基线毁掉。
+      # 链接期只取 SONAME 与符号表，运行期解析的是目标系统自己的 libpam。
+      - name: 备好 libpam 的链接目标
+        run: |
+          mkdir -p /tmp/pamlib
+          cp -L /usr/lib/x86_64-linux-gnu/libpam.so.0 /tmp/pamlib/libpam.so.0
+          ls -l /tmp/pamlib
       - name: zigbuild（glibc 2.28 基线：Debian 10 / RHEL 8）
+        env:
+          RUSTFLAGS: -L/tmp/pamlib
         run: |
           pip install cargo-zigbuild
           cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28 -p strixmaid-helper
