@@ -104,6 +104,8 @@
 .body {
   flex: 1;
   overflow-y: auto;
+  /* 内容区永不横滚（spec §8）：宽内容各自收敛，不许把页面撑开 */
+  overflow-x: hidden;
   scrollbar-gutter: stable;
   padding: 16px;
 }
@@ -160,6 +162,8 @@
 .numbers > div {
   background: var(--surface);
   padding: 8px 12px;
+  /* grid 子项默认 min-width:auto，长文本会把整行撑爆 */
+  min-width: 0;
 }
 
 .numbers .k {
@@ -172,11 +176,17 @@
   font: 500 16px var(--mono);
   margin-top: 2px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .numbers .v small {
+  display: block;
   font-size: 11px;
   color: var(--ink-3);
+  /* 副行（挂载点列表等）允许换行，主值保持单行 */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ---- 成员格（08 §6.4） ---- */
