@@ -636,7 +636,7 @@ export interface paths {
          *
          *     在 user worker 内执行，因此「读不到」与「无权读」的结果对登录用户是真实的。
          */
-        get: operations["health"];
+        get: operations["system_health"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4349,7 +4349,7 @@ export interface operations {
             };
         };
     };
-    health: {
+    system_health: {
         parameters: {
             query?: never;
             header?: never;
