@@ -200,6 +200,8 @@
   overflow: hidden;
   font: inherit;
   color: inherit;
+  /* button 默认 ButtonFace 底必须压掉；底板染 6% 资源色（08 §6.4） */
+  background: color-mix(in oklab, var(--cell-tone) 6%, var(--surface));
 }
 
 .cell:hover {

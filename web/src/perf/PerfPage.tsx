@@ -188,7 +188,7 @@ export function PerfPage() {
           <h1>性能</h1>
         </header>
         <div className={chrome.body}>
-          <p className={s.note}>没有探测到任何指标序列。采集器可能尚未完成第一轮采集。</p>
+          <p className={s.note}>暂无序列。</p>
         </div>
       </>
     );
@@ -210,11 +210,7 @@ export function PerfPage() {
         </span>
         <span className={chrome.spacer} />
         <span className={s.layerNote} title="区间带 = min–max · 实线 = avg · 虚线 = med">
-          {range === "60s"
-            ? "live · 2s 采集"
-            : layer
-              ? `层 ${layer} · 带 min–max · 实线 avg · 虚线 med`
-              : "自动选层中…"}
+          {range === "60s" ? "live · 2s" : (layer ?? "…")}
         </span>
         <Segmented
           label="时间范围"

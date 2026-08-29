@@ -9,10 +9,7 @@ export function StubPage({ title }: { title: string }) {
         <h1>{title}</h1>
       </header>
       <div className={s.body}>
-        <EmptyState
-          title={`「${title}」还没有实现`}
-          detail="外壳与登录先行；这个页面在实施顺序的后续批次里。"
-        />
+        <EmptyState title="尚未实现" />
       </div>
     </>
   );
