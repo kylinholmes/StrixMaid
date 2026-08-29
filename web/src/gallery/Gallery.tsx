@@ -160,8 +160,10 @@ export function Gallery() {
           title="色彩"
           note={
             <>
-              上排是中性色阶（由发行版色相派生，<b>暗色 C 0.005 / 亮色 C 0.004</b>
-              ），下排是数据色（静态， 穷举验证过色盲安全）。<b>一个像素只能属于一层</b>。
+              上排是中性色阶（<b>纯灰</b>）；中间是当前发行版的主题色 <code>--accent</code>
+              （亮暗各校过
+              ≥4.5:1，认不出时是错开明度的灰）；下排是数据色（静态，穷举验证过色盲安全）。
+              <b>一个像素只能属于一层</b>。
             </>
           }
         >
@@ -174,6 +176,12 @@ export function Gallery() {
                     <span style={{ color: l > 55 ? "#111" : "#eee" }}>{k}</span>
                   </div>
                 ))}
+            </div>
+            <div className={s.swatches} style={{ marginBottom: 4 }}>
+              <span className={s.sw}>
+                <i style={{ background: "var(--accent)" }} />
+                accent · {distro.name}
+              </span>
             </div>
             <div className={s.swatches}>
               {[

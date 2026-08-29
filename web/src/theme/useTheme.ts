@@ -1,11 +1,10 @@
 import { create } from "zustand";
 import { type Distro, findDistro, UNKNOWN_DISTRO } from "./distro";
-import { hueOf, oklch } from "./oklch";
-import { CHROMA, chromaFor, type Mode, RAMP } from "./tokens";
+import { type Mode, RAMP } from "./tokens";
 
 interface ThemeState {
   mode: Mode;
-  /** 当前会话所认证的那个节点的发行版（spec §2.2 多节点一节） */
+  /** 当前会话所认证的那个节点的发行版 */
   distro: Distro;
   setMode: (mode: Mode) => void;
   toggleMode: () => void;
@@ -22,19 +21,17 @@ function initialMode(): Mode {
 }
 
 /**
- * 把中性色写进 :root。
+ * 把主题写进 :root。
  *
- * 中性色的色相来自发行版，所以它不是一组静态常量，必须在运行时算。
- * 数据色（五资源 + 三状态）是静态的，写在 tokens.css 里，不经过这里。
+ * 中性色是纯灰明度阶；发行版身份只走 `--accent`（按主题取亮/暗档，
+ * 认不出时是与界面灰明度错开的灰）。数据色是静态的，写在 tokens.css 里。
  */
 export function applyTheme(mode: Mode, distro: Distro): void {
   const root = document.documentElement;
-  const hue = distro.brand ? hueOf(distro.brand) : 0;
-  const base = distro.brand ? CHROMA[mode] : 0;
-
   for (const [token, lightness] of Object.entries(RAMP[mode])) {
-    root.style.setProperty(`--${token}`, oklch(lightness, chromaFor(token, base, mode), hue));
+    root.style.setProperty(`--${token}`, `oklch(${lightness.toFixed(1)}% 0 0)`);
   }
+  root.style.setProperty("--accent", distro.accent[mode]);
   root.dataset.mode = mode;
   root.style.colorScheme = mode;
 }
