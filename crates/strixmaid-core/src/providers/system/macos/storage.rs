@@ -33,18 +33,28 @@ pub fn read_filesystems() -> Vec<FilesystemInfo> {
             used_bytes: m.used(),
             inodes_used: m.inodes_used(),
             inodes_total: (m.inodes_total > 0).then_some(m.inodes_total),
+            backing_dev: container_of(&m.device),
             mount_point: m.mount_point,
             device: m.device,
             fs_type: m.fstype,
             total_bytes: m.total,
             available_bytes: m.available,
             read_only: m.read_only,
-            // 挂载点→块设备的映射在 macOS 上要走 IOKit，P0 不做。
-            backing_dev: None,
         })
         .collect();
     out.sort_by(|a, b| a.mount_point.cmp(&b.mount_point));
     out
+}
+
+/// 从挂载来源提取容器设备名：`/dev/disk3s1s1` → `disk3`。
+/// 非 `/dev/diskN...` 形态（`map auto_home` 等）返回 `None`。
+fn container_of(device: &str) -> Option<String> {
+    let rest = device.strip_prefix("/dev/disk")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(format!("disk{digits}"))
 }
 
 #[cfg(test)]

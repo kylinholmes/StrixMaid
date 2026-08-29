@@ -49,9 +49,19 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
       const rd = latestSum(rings, "disk.read_bytes");
       const wr = latestSum(rings, "disk.write_bytes");
       if (rd === null && wr === null) {
-        const used = latestSum(rings, "fs.used");
-        const total = latestSum(rings, "fs.total");
-        return used !== null && total ? `容量 ${fmtPct(used / total)} 已用` : "—";
+        // 没有速率时报「最满」而不是求和——APFS 同容器的卷共享空间，求和会数多遍
+        let worst: number | null = null;
+        for (const [key, r] of rings) {
+          if (!key.startsWith("fs.used|mount=")) continue;
+          const total = rings.get(key.replace("fs.used", "fs.total"));
+          const u = r.v[r.v.length - 1];
+          const t = total?.v[total.v.length - 1];
+          if (typeof u === "number" && typeof t === "number" && t > 0) {
+            const pct = u / t;
+            if (worst === null || pct > worst) worst = pct;
+          }
+        }
+        return worst === null ? "—" : `最满 ${fmtPct(worst)}`;
       }
       return `${fmtBytes((rd ?? 0) + (wr ?? 0))}/s`;
     }

@@ -417,6 +417,39 @@ function MemberGrid({
 
 /* ================= 磁盘 ================= */
 
+interface MountGroup {
+  /** APFS 容器 / 后端设备；无拓扑信息时为 null（独立成组） */
+  dev: string | null;
+  mounts: string[];
+}
+
+/**
+ * 挂载点按后端设备去重（roadmap/08 §6.3）：同容器的卷共享物理空间，
+ * 容量各算一遍会得出荒谬的合计。拓扑来自 SystemInfo.filesystems.backing_dev。
+ */
+function groupMounts(
+  mounts: readonly string[],
+  filesystems: readonly { mount_point: string; backing_dev?: string | null }[] | undefined,
+): MountGroup[] {
+  const devOf = new Map<string, string>();
+  for (const f of filesystems ?? []) {
+    if (f.backing_dev) devOf.set(f.mount_point, f.backing_dev);
+  }
+  const groups = new Map<string, MountGroup>();
+  const solo: MountGroup[] = [];
+  for (const m of mounts) {
+    const dev = devOf.get(m);
+    if (!dev) {
+      solo.push({ dev: null, mounts: [m] });
+      continue;
+    }
+    const g = groups.get(dev);
+    if (g) g.mounts.push(m);
+    else groups.set(dev, { dev, mounts: [m] });
+  }
+  return [...groups.values(), ...solo];
+}
+
 export function DiskSection({ range, onLayer }: SectionProps) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
@@ -477,13 +510,20 @@ export function DiskSection({ range, onLayer }: SectionProps) {
         <>
           <h2 className={s.sectionTitle}>挂载点</h2>
           <Numbers
-            items={mounts.map((m) => {
-              const used = latestOf(rings, seriesKey("fs.used", `mount=${m}`));
-              const total = latestOf(rings, seriesKey("fs.total", `mount=${m}`));
+            items={groupMounts(mounts, info.data?.filesystems).map((g) => {
+              // 同容器的卷共享物理空间：容量取任一成员（数值相同），只算一次
+              const first = g.mounts[0] ?? "";
+              const used = latestOf(rings, seriesKey("fs.used", `mount=${first}`));
+              const total = latestOf(rings, seriesKey("fs.total", `mount=${first}`));
               return {
-                k: m,
+                k: g.dev ? `容器 ${g.dev}` : first,
                 v: used !== null && total ? fmtPct(used / total) : "—",
-                sub: used !== null && total ? `${fmtBytes(used)} / ${fmtBytes(total)}` : undefined,
+                sub:
+                  used !== null && total
+                    ? `${fmtBytes(used)} / ${fmtBytes(total)}${
+                        g.mounts.length > 1 ? ` · ${g.mounts.join(" ")}` : ` · ${first}`
+                      }`
+                    : undefined,
               };
             })}
           />
