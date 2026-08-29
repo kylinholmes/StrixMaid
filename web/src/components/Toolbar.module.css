@@ -23,7 +23,7 @@
   transition: border-color var(--t-color);
 }
 .search:focus-within {
-  border-color: var(--ink);
+  border-color: var(--accent);
 }
 .search svg {
   color: var(--ink-3);

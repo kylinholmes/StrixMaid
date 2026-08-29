@@ -18,7 +18,7 @@
   transition: border-color var(--t-color);
 }
 .box:focus-within {
-  border-color: var(--ink);
+  border-color: var(--accent);
 }
 .input {
   font: inherit;

@@ -38,6 +38,7 @@
   background: var(--sel);
   color: var(--ink);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 .row svg {
   flex: none;

@@ -31,7 +31,7 @@
   position: absolute;
   inset: 0 auto 0 0;
   width: 34%;
-  background: var(--ink-2);
+  background: var(--accent);
   animation: slide 1.1s ease-in-out infinite;
 }
 @keyframes slide {

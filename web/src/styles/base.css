@@ -47,9 +47,10 @@ body {
 }
 
 /* 焦点：全站唯一样式，无例外（spec §5.4）。
-   留 2px 空是必需的——贴边会和控件自己的 1px 边框糊成「边框变粗了」。 */
+   留 2px 空是必需的——贴边会和控件自己的 1px 边框糊成「边框变粗了」。
+   用 accent：焦点是「你正在操作的地方」，正是身份层的领地。 */
 :focus-visible {
-  outline: 2px solid var(--ink);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 :focus:not(:focus-visible) {

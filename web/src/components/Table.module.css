@@ -65,6 +65,10 @@
 .row[aria-selected="true"] {
   background: var(--sel);
 }
+/* 左缘 3px accent 条：选中是「你正在操作的行」，身份层的领地 */
+.row[aria-selected="true"] td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 /* 选中行额外加粗主字段（spec §5.3） */
 .row[aria-selected="true"] td:first-child {
   font-weight: 600;
