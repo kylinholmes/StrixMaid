@@ -12,6 +12,32 @@
   flex-direction: column;
 }
 
+/* 嵌入外层自定义栏时由外层负责宽度与边线 */
+.bare {
+  width: auto;
+  flex: 1;
+  min-height: 0;
+  background: none;
+  border-right: 0;
+}
+
+.groupLabel {
+  height: 24px;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 12px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+.groupSep {
+  display: none;
+  border-top: 1px solid var(--line);
+  margin: 4px 0;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -89,4 +115,11 @@
 .narrow .count,
 .narrow .lock {
   display: none;
+}
+/* 窄条放不下组标题，退成发丝线 */
+.narrow .groupLabel {
+  display: none;
+}
+.narrow .groupSep {
+  display: block;
 }

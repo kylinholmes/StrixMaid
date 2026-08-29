@@ -101,6 +101,17 @@ export const DISTROS: readonly Distro[] = [
     brand: "#932279",
     accent: { light: "#932279", dark: "#D461B4" },
   },
+  {
+    // 平台无关不等于只认 Linux：macOS 是一等开发平台（docs/macos-dev-platform.md）。
+    // 取的是铝壳的颜色，不是商标：亮色主题用星空灰（#504D4B，偏暖，6.97:1），
+    // 暗色主题用银色（#C8CACD，偏冷，8.5:1）。微量色温把它和「认不出」的
+    // 纯灰（#5A5A5A / #9A9A9A）区分开——那个是没有身份，这个是铝。
+    id: "macos",
+    name: "macOS",
+    initial: "M",
+    brand: "#504D4B",
+    accent: { light: "#504D4B", dark: "#C8CACD" },
+  },
 ];
 
 export const UNKNOWN_DISTRO: Distro = {
