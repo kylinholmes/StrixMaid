@@ -43,6 +43,12 @@ use crate::state::AppState;
                        `Sec-WebSocket-Protocol: bearer, <token>`。",
     ),
     modifiers(&SecurityAddon),
+    // utoipa-axum 只收集 handler 请求/响应体里的 schema；`IntoParams` 查询参数
+    // 通过 `$ref` 引用的枚举不会被自动登记，缺了会让 openapi-typescript 解析失败。
+    components(schemas(
+        strixmaid_types::process::ProcessSortKey,
+        strixmaid_types::process::SortOrder,
+    )),
     tags(
         (name = "auth", description = "认证与提权（PAM challenge-response）"),
         (name = "capabilities", description = "两层能力探测：system / user"),
