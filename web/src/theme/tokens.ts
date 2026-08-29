@@ -26,17 +26,21 @@ export const RAMP: Readonly<Record<Mode, Ramp>> = {
     "ink-2": 79.0,
     ink: 92.0,
   },
+  // 2026-08-29 修订：原来的面板底 L99.5 ≈ 纯白，而面板是屏幕上面积最大的东西，
+  // 正文对它 17.8:1 也过高（长时间阅读的舒适区约 10–14:1）。整条压深。
+  // 注意这次连**亮色档的数据色**一起压深了 10（见 styles/tokens.css）——
+  // 顶住中性色的其实是 CPU 的青，不动它的话面板底最低只能到 L96.5。
   light: {
-    ground: 96.0,
-    surface: 99.5,
-    "surface-2": 97.0,
-    "surface-3": 93.5,
-    line: 89.0,
-    "line-strong": 72.0,
-    sel: 86.0,
-    "ink-3": 55.0,
-    "ink-2": 40.0,
-    ink: 20.0,
+    ground: 88.0,
+    surface: 93.0,
+    "surface-2": 89.5,
+    "surface-3": 85.0,
+    line: 82.0,
+    "line-strong": 64.0,
+    sel: 78.0,
+    "ink-3": 48.0,
+    "ink-2": 34.0,
+    ink: 24.0,
   },
 };
 

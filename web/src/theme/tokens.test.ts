@@ -29,9 +29,25 @@ describe("chromaFor", () => {
 });
 
 describe("RAMP", () => {
-  it("正文钳在 L92 / L20，纯白正文在暗底上会产生光晕", () => {
+  it("正文钳在 L92 / L24，纯白正文在暗底上会产生光晕", () => {
     expect(RAMP.dark.ink).toBe(92);
-    expect(RAMP.light.ink).toBe(20);
+    expect(RAMP.light.ink).toBe(24);
+  });
+
+  it("亮色面板不得接近纯白——面板是屏幕上面积最大的东西，L99.5 会刺眼", () => {
+    expect(RAMP.light.surface!).toBeLessThanOrEqual(94);
+  });
+
+  it("亮色四级底的明度阶梯严格递减：面板 > 偶行 > 划过 > 选中", () => {
+    const r = RAMP.light;
+    expect(r.surface!).toBeGreaterThan(r["surface-2"]!);
+    expect(r["surface-2"]!).toBeGreaterThan(r["surface-3"]!);
+    expect(r["surface-3"]!).toBeGreaterThan(r.sel!);
+  });
+
+  it("页底比面板暗，面板才浮得起来", () => {
+    expect(RAMP.light.ground!).toBeLessThan(RAMP.light.surface!);
+    expect(RAMP.dark.ground!).toBeLessThan(RAMP.dark.surface!);
   });
 
   it("暗色四级底的明度阶梯严格递增：奇行 < 偶行 < 划过 < 选中", () => {
