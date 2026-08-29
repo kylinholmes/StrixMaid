@@ -57,16 +57,32 @@ export const useLive = create<LiveState>((set, get) => ({
 
 let detach: (() => void) | null = null;
 
-/** 登录后调用：订阅 metrics.live 灌进 store。返回清理函数（锁定时调）。 */
+/**
+ * 登录后调用：订阅 metrics.live 灌进 store；WS 不健康（未连上或 6 秒没有帧）时
+ * 退化为 REST 轮询 `/metrics/current`——页面照常工作，「实时」方块保持灰色示警。
+ */
 export function startLive(): void {
   stopLive();
   const offData = wsClient.subscribe("metrics.live", {}, (payload) => {
     useLive.getState().ingest(payload as MetricSnapshot);
   });
   const offStatus = wsClient.onStatus((up) => useLive.getState().setUp(up));
+  const poller = setInterval(() => {
+    const st = useLive.getState();
+    const stale = st.lastTs === 0 || Date.now() / 1000 - st.lastTs > 6;
+    if (!stale) return;
+    void (async () => {
+      const { api } = await import("@/api/client");
+      const { data } = await api.GET("/api/v1/metrics/current");
+      // 只在仍然陈旧时并入，避免和迟到的 WS 帧打架
+      const cur = useLive.getState();
+      if (data && (cur.lastTs === 0 || data.ts > cur.lastTs)) cur.ingest(data);
+    })();
+  }, 2_000);
   detach = () => {
     offData();
     offStatus();
+    clearInterval(poller);
   };
 }
 
