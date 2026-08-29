@@ -1,0 +1,41 @@
+.wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* 四角标注（08 §8.1）：不用库的轴，绝对定位的 HTML 盖在图上 */
+.corner {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink-3);
+  padding: 2px 4px;
+}
+
+.tl {
+  top: 0;
+  left: 0;
+}
+
+.tr {
+  top: 0;
+  right: 0;
+}
+
+.bl {
+  bottom: 0;
+  left: 0;
+}
+
+.br {
+  bottom: 0;
+  right: 0;
+}
+
+/* 游标线：压掉 uPlot 默认的蓝灰，换成资源色虚线（08 §8.1） */
+.wrap :global(.u-cursor-x) {
+  border-right: 1px dashed var(--plot-hue);
+}

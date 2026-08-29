@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { api, setAuthToken } from "@/api/client";
+import { wsClient } from "@/lib/ws";
+import { startLive, stopLive } from "@/metrics/live";
 
 /** 会话里留存的最小身份。gid 等细节用不上就不存。 */
 export interface SessionUser {
@@ -41,6 +43,8 @@ export const useSession = create<SessionState>((set) => ({
     setAuthToken(saved);
     const { data } = await api.GET("/api/v1/auth/session").catch(() => ({ data: undefined }));
     if (data) {
+      wsClient.connect(saved);
+      startLive();
       set({
         status: "open",
         user: { username: data.username, uid: data.uid, groups: data.groups ?? [] },
@@ -55,10 +59,14 @@ export const useSession = create<SessionState>((set) => ({
   complete: (token, user) => {
     setAuthToken(token);
     globalThis.localStorage?.setItem(TOKEN_KEY, token);
+    wsClient.connect(token);
+    startLive();
     set({ status: "open", user });
   },
 
   lock: async () => {
+    stopLive();
+    wsClient.close();
     await api.POST("/api/v1/auth/logout").catch(() => undefined);
     setAuthToken(null);
     globalThis.localStorage?.removeItem(TOKEN_KEY);

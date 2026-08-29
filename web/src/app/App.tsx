@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Gallery } from "@/gallery/Gallery";
+import { PerfPage } from "@/perf/PerfPage";
 import { useSession } from "@/session/useSession";
 import { useTheme } from "@/theme/useTheme";
 import { Overview } from "./Overview";
@@ -45,7 +46,9 @@ export function App() {
           <Route element={<Shell />}>
             <Route index element={<Navigate to="/overview" replace />} />
             <Route path="/overview" element={<Overview />} />
-            <Route path="/performance" element={<StubPage title="性能" />} />
+            <Route path="/performance" element={<PerfPage />} />
+            <Route path="/performance/:res" element={<PerfPage />} />
+            <Route path="/performance/:res/:member" element={<PerfPage />} />
             <Route path="/processes" element={<StubPage title="进程" />} />
             <Route path="/services" element={<StubPage title="服务" />} />
             <Route path="/logs" element={<StubPage title="日志" />} />
