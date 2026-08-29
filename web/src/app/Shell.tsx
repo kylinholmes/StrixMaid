@@ -5,6 +5,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api } from "@/api/client";
 import { DistroMark, Menu, NavRail } from "@/components";
 import { cx } from "@/lib/cx";
+import { useLive } from "@/metrics/live";
 import { useSession } from "@/session/useSession";
 import { findDistro } from "@/theme/distro";
 import { useTheme } from "@/theme/useTheme";
@@ -48,8 +49,9 @@ export function Shell() {
   const identity = caps.data?.identity;
   const distro = findDistro(identity?.os_id);
 
-  const snapshot = useQuery(snapshotQuery(open));
   const health = useQuery(healthQuery(open));
+  const wsUp = useLive((st) => st.up);
+  const lastTs = useLive((st) => st.lastTs);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -70,7 +72,8 @@ export function Shell() {
       .map((p) => ({ id: p.id, label: p.label, icon: p.icon })),
   })).filter((g) => g.items.length > 0);
 
-  const live = snapshot.isSuccess && !snapshot.isError;
+  // 「实时」= WS 在线且 10 秒内收到过帧——不是 REST 心跳，WS 挂了就该灭
+  const live = wsUp && lastTs > 0 && Date.now() / 1000 - lastTs < 10;
   const healthState = health.data?.status;
   const healthCls =
     healthState === "critical"

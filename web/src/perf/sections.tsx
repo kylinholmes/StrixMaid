@@ -62,7 +62,6 @@ function SeriesChart({
 
   const rangeLabel = rangeOf(range)?.label ?? "";
   const corner = {
-    cornerTL: title,
     cornerTR: yMax !== undefined ? unitFmt(yMax) : latest !== undefined ? unitFmt(latest) : "",
     cornerBL: rangeLabel,
     cornerBR: "0",
@@ -147,7 +146,6 @@ function SumChart({
         series={[{ stroke: hue, width: 2, fill: live ? withAlpha(hue, 0.18) : undefined }]}
         height={height}
         tone={tone}
-        cornerTL={title}
         cornerBL={rangeOf(range)?.label ?? ""}
         cornerBR="0"
       />
