@@ -33,7 +33,7 @@ export function applyTheme(mode: Mode, distro: Distro): void {
   const base = distro.brand ? CHROMA[mode] : 0;
 
   for (const [token, lightness] of Object.entries(RAMP[mode])) {
-    root.style.setProperty(`--${token}`, oklch(lightness, chromaFor(token, base), hue));
+    root.style.setProperty(`--${token}`, oklch(lightness, chromaFor(token, base, mode), hue));
   }
   root.dataset.mode = mode;
   root.style.colorScheme = mode;

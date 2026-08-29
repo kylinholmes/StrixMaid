@@ -5,19 +5,28 @@ describe("chromaFor", () => {
   it("认不出发行版时每个 token 都是纯灰", () => {
     // 这条曾经漏过：sel 的彩度下限把颜色带回了本该纯灰的界面
     for (const token of Object.keys(RAMP.dark)) {
-      expect(chromaFor(token, 0)).toBe(0);
+      expect(chromaFor(token, 0, "dark")).toBe(0);
+      expect(chromaFor(token, 0, "light")).toBe(0);
     }
   });
 
   it("文字端彩度低于面板端——高彩度的深色文字会显脏", () => {
     const base = CHROMA.dark;
-    expect(chromaFor("ink", base)).toBeLessThan(chromaFor("surface", base));
-    expect(chromaFor("ink-2", base)).toBeLessThan(base);
+    expect(chromaFor("ink", base, "dark")).toBeLessThan(chromaFor("surface", base, "dark"));
+    expect(chromaFor("ink-2", base, "dark")).toBeLessThan(base);
   });
 
   it("选中底的彩度高于面板，否则在低彩度下看不出来", () => {
-    const base = CHROMA.dark;
-    expect(chromaFor("sel", base)).toBeGreaterThan(base);
+    for (const mode of ["dark", "light"] as const) {
+      expect(chromaFor("sel", CHROMA[mode], mode)).toBeGreaterThan(CHROMA[mode]);
+    }
+  });
+
+  it("亮色选中底的彩度低于暗色——同样的彩度在 L78 上显色、在 L44 上不显", () => {
+    // 截图实测：0.017 在亮色下读成粉，叠在失败行上像错误高亮
+    expect(chromaFor("sel", CHROMA.light, "light")).toBeLessThan(
+      chromaFor("sel", CHROMA.dark, "dark"),
+    );
   });
 
   it("彩度停留在实测的安全区间内（C ≤ 0.008 六个发行版全部分得开）", () => {

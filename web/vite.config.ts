@@ -18,6 +18,10 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // localtest.me / lvh.me 都解析到 127.0.0.1。允许它们只是为了让
+    // 那些拒绝访问裸 localhost 的工具（浏览器扩展的安全分类、部分代理）
+    // 能打开开发服务器。仅 dev 生效，与产物无关。
+    allowedHosts: ["localtest.me", "lvh.me"],
     proxy: {
       "/api": { target: "http://127.0.0.1:9700", changeOrigin: true },
       "/ws": { target: "ws://127.0.0.1:9700", ws: true },

@@ -49,15 +49,18 @@ export const CHROMA: Readonly<Record<Mode, number>> = { dark: 0.005, light: 0.00
 
 /** 文字端彩度系数——高彩度的文字会显脏。 */
 const INK_CHROMA_SCALE = 0.55;
-/** 选中底需要看得出来，彩度给足。 */
-const SEL_CHROMA_SCALE = 1.7;
-const SEL_CHROMA_FLOOR = 0.01;
+/**
+ * 选中底的彩度按主题分档。同一个 0.017 在暗色 L44 上几乎察觉不到，
+ * 在亮色 L78 上却直接读成「粉」——截图实测里它叠在失败行上像一块错误高亮。
+ * 亮色压到 0.010：仍带得出发行版色温，但不再显色。
+ */
+const SEL_CHROMA: Readonly<Record<Mode, number>> = { dark: 0.017, light: 0.01 };
 
-export function chromaFor(token: string, base: number): number {
+export function chromaFor(token: string, base: number, mode: Mode): number {
   // 认不出发行版时 base 为 0，此时**每一个** token 都必须是纯灰。
-  // 下面 sel 的彩度下限是给「有色相」准备的，不能让它在纯灰模式下把颜色带回来。
+  // sel 的固定档也不例外，不能让它在纯灰模式下把颜色带回来。
   if (base === 0) return 0;
   if (token.startsWith("ink")) return base * INK_CHROMA_SCALE;
-  if (token === "sel") return Math.max(base, SEL_CHROMA_FLOOR) * SEL_CHROMA_SCALE;
+  if (token === "sel") return SEL_CHROMA[mode];
   return base;
 }
