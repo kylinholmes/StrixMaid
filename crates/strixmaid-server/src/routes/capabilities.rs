@@ -30,7 +30,9 @@ use axum::Json;
 use axum::extract::{Extension, State};
 use strixmaid_core::capability::UserIdentity;
 use strixmaid_core::session::Session;
-use strixmaid_types::capability::{Capabilities, SystemCapabilities, UserCapabilities, UserProbe};
+use strixmaid_types::capability::{
+    Capabilities, HostIdentity, SystemCapabilities, UserCapabilities, UserProbe,
+};
 use strixmaid_types::rpc;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -48,6 +50,8 @@ const PROBE_TTL: Duration = Duration::from_secs(60);
 /// 若两边取值不同，用户就会看到一个点了必被拒的按钮。
 pub struct CapabilityState {
     pub system: SystemCapabilities,
+    /// 未认证可见的主机身份，启动时从 host provider 取一次（[`Capabilities::identity`]）。
+    pub identity: HostIdentity,
     pub elevate_groups: Vec<String>,
     /// 会话身份 → (实测时刻, 结果)。见模块文档「为什么要缓存」。
     probes: Mutex<HashMap<ProbeKey, (Instant, UserProbe)>>,
@@ -78,11 +82,13 @@ impl std::fmt::Debug for CapabilityState {
 impl CapabilityState {
     pub fn new(
         system: SystemCapabilities,
+        identity: HostIdentity,
         elevate_groups: Vec<String>,
         auth: Arc<AuthState>,
     ) -> Self {
         Self {
             system,
+            identity,
             elevate_groups,
             probes: Mutex::new(HashMap::new()),
             auth,
@@ -194,6 +200,7 @@ pub async fn capabilities(
     Json(Capabilities {
         system: state.system,
         user,
+        identity: state.identity.clone(),
     })
 }
 

@@ -26,6 +26,31 @@ pub struct Capabilities {
     /// 而不是让用户对着一个神秘失败的登录框反复试。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<UserCapabilities>,
+    /// 登录前可见的最小主机身份。
+    ///
+    /// 登录页要展示「你在登录哪台机器」（主机名、发行版、内核）并按发行版取主题色，
+    /// 而 `/system/*` 全在认证墙后。这里只暴露与 SSH banner / Cockpit 登录页同级的
+    /// 信息量，不含硬件、网络、磁盘等细节。
+    #[serde(default)]
+    pub identity: HostIdentity,
+}
+
+/// 未认证即可见的主机身份（[`Capabilities::identity`]）。启动时从 host provider 取一次。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+pub struct HostIdentity {
+    /// 主机名。
+    #[schema(example = "strix-web-01")]
+    pub hostname: String,
+    /// os-release 的 `ID`（`"ubuntu"` / `"arch"` / …），前端据此选发行版主题色；
+    /// 认不出时为空字符串，前端回落到中性灰。
+    #[schema(example = "ubuntu")]
+    pub os_id: String,
+    /// os-release 的 `PRETTY_NAME`，直接展示。
+    #[schema(example = "Ubuntu 24.04.2 LTS")]
+    pub os_name: String,
+    /// 内核版本（`uname -r`）。
+    #[schema(example = "6.8.0-45-generic")]
+    pub kernel: String,
 }
 
 /// 机器级能力。字段名即 [`crate::ApiError::capability`] 的取值。

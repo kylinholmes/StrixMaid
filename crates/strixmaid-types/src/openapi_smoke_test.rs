@@ -27,6 +27,7 @@ use crate::{
     auth::AuthOutcome,
     auth::SessionInfo,
     capability::Capabilities,
+    capability::HostIdentity,
     capability::SystemCapabilities,
     capability::UserCapabilities,
     system::SystemInfo,
@@ -115,10 +116,10 @@ struct AllSchemas;
 fn every_type_enters_the_spec() {
     let doc = AllSchemas::openapi();
     let components = doc.components.as_ref().expect("components 应存在");
-    // 登记了 92 个类型；数量对不上说明有同名类型互相覆盖，会静默丢失 schema。
+    // 登记了 93 个类型；数量对不上说明有同名类型互相覆盖，会静默丢失 schema。
     assert_eq!(
         components.schemas.len(),
-        92,
+        93,
         "schema 数量与登记数量不一致，说明有重名覆盖：{:?}",
         components.schemas.keys().collect::<Vec<_>>()
     );
