@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/api/client";
 import { Segmented } from "@/components";
 import { cssVar, Plot, withAlpha } from "@/components/Plot";
-import { fmtBytes, fmtPct, fmtRateBits } from "@/lib/fmt";
+import { fmtBytes, fmtPct, fmtRateBits, fmtUptime } from "@/lib/fmt";
 import { labelValue, useDiscovery } from "@/metrics/discovery";
 import { type RangeKey, rangeOf, useHistory } from "@/metrics/history";
 import { latestOf, latestSum, type Ring, seriesKey, useLive } from "@/metrics/live";
@@ -19,7 +19,52 @@ interface SectionProps {
   onLayer: (layer: string | null) => void;
 }
 
-/** 单序列图：60 秒走 live 环，其余档走历史 band。 */
+/** 图下的 `<details>` 表格视图（spec §10：每张图都要有）。 */
+function ReadingsTable({
+  xs,
+  vs,
+  unitFmt,
+  metric,
+}: {
+  xs: readonly (number | null | undefined)[];
+  vs: readonly (number | null | undefined)[];
+  unitFmt: (v: number) => string;
+  metric: string;
+}) {
+  const rows: { t: string; v: string }[] = [];
+  for (let i = xs.length - 1; i >= 0 && rows.length < 8; i--) {
+    const t = xs[i];
+    const v = vs[i];
+    if (typeof t !== "number" || typeof v !== "number") continue;
+    rows.push({
+      t: new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
+      v: unitFmt(v),
+    });
+  }
+  return (
+    <details className={s.tblView}>
+      <summary>以表格查看最近读数</summary>
+      <table>
+        <thead>
+          <tr>
+            <th>时刻</th>
+            <th>{metric}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.t}>
+              <td>{r.t}</td>
+              <td>{r.v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  );
+}
+
+/** 单序列图：60 秒走 live 环，其余档走历史 band。可挂一条次要序列（细线 + 图例）。 */
 function SeriesChart({
   expr,
   metric,
@@ -32,6 +77,7 @@ function SeriesChart({
   range,
   onLayer,
   unitFmt,
+  secondary,
 }: {
   /** 历史查询表达式（`metric` 或 `metric{k=v}`） */
   expr: string;
@@ -45,19 +91,25 @@ function SeriesChart({
   range: RangeKey;
   onLayer: (layer: string | null) => void;
   unitFmt: (v: number) => string;
+  /** 次要序列（如 CPU 的内核态）：细线，两条线以上必有图例（spec §10） */
+  secondary?: { expr: string; metric: string; labels: string; name: string };
 }) {
   const rings = useLive((st) => st.rings);
   const mode = useTheme((t) => t.mode);
   const hue = cssVar(tone);
+  const hue2 = withAlpha(hue, 0.55);
   const live = range === "60s";
-  const hist = useHistory([expr], range, !live);
+  const exprs = secondary ? [expr, secondary.expr] : [expr];
+  const hist = useHistory(exprs, range, !live);
 
   useEffect(() => {
     onLayer(live ? null : (hist.data?.layer ?? null));
   }, [live, hist.data?.layer, onLayer]);
 
   const ring = rings.get(seriesKey(metric, labels));
+  const ring2 = secondary ? rings.get(seriesKey(secondary.metric, secondary.labels)) : undefined;
   const bs = hist.data?.bySeries.get(expr);
+  const bs2 = secondary ? hist.data?.bySeries.get(secondary.expr) : undefined;
   const latest = ring?.v[ring.v.length - 1];
 
   const rangeLabel = rangeOf(range)?.label ?? "";
@@ -67,32 +119,75 @@ function SeriesChart({
     cornerBR: "0",
   };
 
+  let data: ReturnType<typeof liveSingle>;
+  let plotSeries = liveSeries(hue);
+  let bands: ReturnType<typeof bandFill> | undefined;
+  if (live || !bs) {
+    data = liveSingle(ring);
+    if (secondary) {
+      // 次要序列按主序列的时间轴对齐
+      const by = new Map<number, number>();
+      if (ring2)
+        for (let i = 0; i < ring2.ts.length; i++) {
+          const t = ring2.ts[i];
+          const v = ring2.v[i];
+          if (t !== undefined && v !== undefined) by.set(t, v);
+        }
+      const xs = data[0] as number[];
+      data = [xs, data[1], xs.map((t) => by.get(t) ?? null)] as typeof data;
+      plotSeries = [...liveSeries(hue), { stroke: hue2, width: 1.25 }];
+    }
+  } else {
+    data = bandData(bs);
+    plotSeries = bandSeries(hue);
+    bands = bandFill(hue);
+    if (secondary && bs2) {
+      // 次要序列只画 avg——band 套 band 会糊成一团
+      const by = new Map<number, number>();
+      for (let i = 0; i < bs2.xs.length; i++) {
+        const t = bs2.xs[i];
+        const v = bs2.avg[i];
+        if (t !== undefined && typeof v === "number") by.set(t, v);
+      }
+      const xs = data[0] as number[];
+      data = [...data, xs.map((t) => by.get(t) ?? null)] as typeof data;
+      plotSeries = [...plotSeries, { stroke: hue2, width: 1.25 }];
+    }
+  }
+
   return (
     <div className={s.chartBlock} key={mode}>
       <div className={s.chartTitle}>
         <b>{title}</b>
         <span>{sub ?? (latest !== undefined ? unitFmt(latest) : "—")}</span>
       </div>
-      {live || !bs ? (
-        <Plot
-          data={liveSingle(ring)}
-          series={liveSeries(hue)}
-          yMax={yMax}
-          height={height}
-          tone={tone}
-          {...corner}
-        />
-      ) : (
-        <Plot
-          data={bandData(bs)}
-          series={bandSeries(hue)}
-          bands={bandFill(hue)}
-          yMax={yMax}
-          height={height}
-          tone={tone}
-          {...corner}
-        />
+      <Plot
+        data={data}
+        series={plotSeries}
+        bands={bands}
+        yMax={yMax}
+        height={height}
+        tone={tone}
+        {...corner}
+      />
+      {secondary && (
+        <div className={s.legend}>
+          <span>
+            <i style={{ background: hue }} />
+            {metric}
+          </span>
+          <span>
+            <i style={{ background: hue2 }} />
+            {secondary.name}
+          </span>
+        </div>
       )}
+      <ReadingsTable
+        xs={live || !bs ? (data[0] as number[]) : bs.xs}
+        vs={live || !bs ? (data[1] as number[]) : bs.avg}
+        unitFmt={unitFmt}
+        metric={metric}
+      />
     </div>
   );
 }
@@ -149,6 +244,12 @@ function SumChart({
         cornerBL={rangeOf(range)?.label ?? ""}
         cornerBR="0"
       />
+      <ReadingsTable
+        xs={data[0] as number[]}
+        vs={data[1] as number[]}
+        unitFmt={unitFmt}
+        metric="合计"
+      />
     </div>
   );
 }
@@ -169,7 +270,7 @@ function Numbers({ items }: { items: readonly { k: string; v: string; sub?: stri
   );
 }
 
-function useSystemInfo() {
+export function useSystemInfo() {
   const open = useSession((st) => st.status) === "open";
   return useQuery({
     queryKey: ["system", "info"],
@@ -205,8 +306,9 @@ export function CpuSection({ range, rangeSecs, onLayer }: SectionProps & { range
   }
   const procs = latestOf(rings, seriesKey("procs.total", ""));
   if (procs !== null) numberItems.push({ k: "进程", v: String(Math.round(procs)) });
-  const load =
-    latestOf(rings, seriesKey("load.1min", "")) ?? latestOf(rings, seriesKey("load1", ""));
+  const running = latestOf(rings, seriesKey("procs.running", ""));
+  if (running !== null) numberItems.push({ k: "运行中", v: String(Math.round(running)) });
+  const load = latestOf(rings, seriesKey("load.1m", ""));
   if (load !== null) numberItems.push({ k: "负载 1 分钟", v: load.toFixed(2) });
 
   return (
@@ -238,13 +340,31 @@ export function CpuSection({ range, rangeSecs, onLayer }: SectionProps & { range
             range={range}
             onLayer={onLayer}
             unitFmt={(v) => fmtPct(v / 100)}
+            secondary={
+              discovery.data?.has("cpu.system")
+                ? {
+                    expr: "cpu.system",
+                    metric: "cpu.system",
+                    labels: "",
+                    name: "cpu.system（内核态）",
+                  }
+                : undefined
+            }
           />
           {numberItems.length > 0 && <Numbers items={numberItems} />}
           {info.data && (
             <Numbers
               items={[
                 { k: "型号", v: info.data.cpu.model },
+                {
+                  k: "插槽 / 物理核",
+                  v: `${(info.data.cpu.packages ?? []).length || 1} / ${
+                    info.data.cpu.physical_cores ?? info.data.cpu.logical_cores
+                  }`,
+                },
                 { k: "逻辑核", v: String(info.data.cpu.logical_cores) },
+                { k: "虚拟化", v: info.data.virtualization ?? "未检出" },
+                { k: "运行时间", v: fmtUptime(info.data.uptime_secs) },
               ]}
             />
           )}
@@ -464,7 +584,7 @@ export function DiskSection({ range, onLayer }: SectionProps) {
         <SumChart
           exprs={devs.flatMap((d) => [`disk.read_bytes{dev=${d}}`, `disk.write_bytes{dev=${d}}`])}
           metrics={["disk.read_bytes", "disk.write_bytes"]}
-          title="磁盘 · 合计吞吐（读 + 写 · 求和）"
+          title="磁盘 · 吞吐"
           tone="--disk"
           height={220}
           range={range}
@@ -477,6 +597,33 @@ export function DiskSection({ range, onLayer }: SectionProps) {
 
       {devs.length > 0 && (
         <>
+          <Numbers
+            items={devs.flatMap((d) => {
+              const util = latestOf(rings, seriesKey("disk.util", `dev=${d}`));
+              const iops = latestOf(rings, seriesKey("disk.iops", `dev=${d}`));
+              const await_ = latestOf(rings, seriesKey("disk.await", `dev=${d}`));
+              return [
+                { k: `${d} 繁忙`, v: util !== null ? fmtPct(util / 100) : "—" },
+                { k: `${d} IOPS`, v: iops !== null ? String(Math.round(iops)) : "—" },
+                { k: `${d} 等待`, v: await_ !== null ? `${await_.toFixed(1)} ms` : "—" },
+              ];
+            })}
+          />
+          {(info.data?.disks ?? []).length > 0 && (
+            <Numbers
+              items={(info.data?.disks ?? []).map((dsk) => ({
+                k: dsk.name,
+                v: dsk.model || (dsk.rotational ? "HDD" : "SSD"),
+                sub: [
+                  fmtBytes(dsk.size_bytes),
+                  dsk.rotational ? "HDD" : "SSD",
+                  dsk.smart_healthy === false ? "SMART 异常" : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+              }))}
+            />
+          )}
           <h2 className={s.sectionTitle}>块设备</h2>
           <MemberGrid
             resource={{
@@ -507,8 +654,19 @@ export function DiskSection({ range, onLayer }: SectionProps) {
       )}
 
       {mounts.length > 0 && (
-        <>
-          <h2 className={s.sectionTitle}>挂载点</h2>
+        <details className={s.mts}>
+          <summary>
+            全部挂载点　{mounts.length} 个 · {groupMounts(mounts, info.data?.filesystems).length}{" "}
+            个设备 · 最满 {(() => {
+              let worst = 0;
+              for (const m of mounts) {
+                const u = latestOf(rings, seriesKey("fs.used", `mount=${m}`));
+                const t = latestOf(rings, seriesKey("fs.total", `mount=${m}`));
+                if (u !== null && t) worst = Math.max(worst, u / t);
+              }
+              return fmtPct(worst);
+            })()}
+          </summary>
           <Numbers
             items={groupMounts(mounts, info.data?.filesystems).map((g) => {
               // 同容器的卷共享物理空间：容量取任一成员（数值相同），只算一次
@@ -527,7 +685,7 @@ export function DiskSection({ range, onLayer }: SectionProps) {
               };
             })}
           />
-        </>
+        </details>
       )}
     </>
   );
@@ -546,13 +704,36 @@ export function NetSection({ range, onLayer }: SectionProps) {
       <SumChart
         exprs={ifaces.flatMap((i) => [`net.rx_bytes{iface=${i}}`, `net.tx_bytes{iface=${i}}`])}
         metrics={["net.rx_bytes", "net.tx_bytes"]}
-        title="网络 · 合计吞吐（收 + 发 · 求和）"
+        title="网络 · 吞吐"
         tone="--net"
         height={220}
         range={range}
         onLayer={onLayer}
         unitFmt={fmtRateBits}
       />
+      <Numbers
+        items={[
+          { k: "接收", v: fmtRateBits(latestSum(rings, "net.rx_bytes") ?? 0) },
+          { k: "发送", v: fmtRateBits(latestSum(rings, "net.tx_bytes") ?? 0) },
+          {
+            k: "错误",
+            v: `${Math.round(latestSum(rings, "net.errors") ?? 0)}/s`,
+          },
+          { k: "接口", v: String(ifaces.length) },
+        ]}
+      />
+      {(info.data?.networks ?? []).filter((n) => n.carrier).length > 0 && (
+        <Numbers
+          items={(info.data?.networks ?? [])
+            .filter((n) => n.carrier)
+            .slice(0, 8)
+            .map((n) => ({
+              k: n.name,
+              v: n.speed_mbps ? `${n.speed_mbps} Mb/s` : "已连接",
+              sub: [n.mac, n.mtu ? `MTU ${n.mtu}` : null].filter(Boolean).join(" · "),
+            }))}
+        />
+      )}
       {ifaces.length > 0 && (
         <>
           <h2 className={s.sectionTitle}>接口</h2>
@@ -595,6 +776,7 @@ export function NetSection({ range, onLayer }: SectionProps) {
 export function GpuSection({ range, onLayer }: SectionProps) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
+  const info = useSystemInfo();
   const gpus = discovery.data?.members("gpu.usage", "gpu") ?? [];
 
   return (
@@ -603,13 +785,31 @@ export function GpuSection({ range, onLayer }: SectionProps) {
         expr="gpu.usage"
         metric="gpu.usage"
         labels={gpus.length === 1 ? `gpu=${gpus[0]}` : ""}
-        title="GPU · gpu.usage（组内取最大）"
+        title="GPU · gpu.usage"
         tone="--gpu"
         yMax={100}
         height={220}
         range={range}
         onLayer={onLayer}
         unitFmt={(v) => fmtPct(v / 100)}
+      />
+      <Numbers
+        items={[
+          {
+            k: "显存占用",
+            v: (() => {
+              const mu = latestSum(rings, "gpu.mem_used");
+              return mu !== null ? fmtBytes(mu) : "—";
+            })(),
+          },
+          ...(info.data?.gpus ?? []).map((g) => ({
+            k: g.card || "GPU",
+            v: g.model || "—",
+            sub: [g.driver, g.vram_bytes ? fmtBytes(g.vram_bytes) : null]
+              .filter(Boolean)
+              .join(" · "),
+          })),
+        ]}
       />
       {gpus.length > 1 && (
         <MemberGrid

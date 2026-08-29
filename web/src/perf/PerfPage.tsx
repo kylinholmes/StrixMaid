@@ -16,6 +16,7 @@ import {
   MemberDetail,
   MemSection,
   NetSection,
+  useSystemInfo,
 } from "./sections";
 
 /** 二级导航行的 sparkline 数据：按指标名把各标签序列求和后取窗口。 */
@@ -34,6 +35,17 @@ function railSpark(rings: ReadonlyMap<string, Ring>, metrics: readonly string[])
   return [...byTs.keys()].sort((a, b) => a - b).map((t) => byTs.get(t) ?? 0);
 }
 
+/** 某指标各标签成员里的最大值。 */
+function latestMax(rings: ReadonlyMap<string, Ring>, metric: string): number | null {
+  let max: number | null = null;
+  for (const [key, r] of rings) {
+    if (!key.startsWith(`${metric}|`)) continue;
+    const v = r.v[r.v.length - 1];
+    if (typeof v === "number" && (max === null || v > max)) max = v;
+  }
+  return max;
+}
+
 function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
   switch (r.id) {
     case "cpu": {
@@ -43,11 +55,20 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
     case "mem": {
       const used = latestSum(rings, "mem.used");
       const total = latestSum(rings, "mem.total");
-      return used !== null && total ? `${fmtPct(used / total)} · ${fmtBytes(used)}` : "—";
+      return used !== null && total
+        ? `${fmtBytes(used)} / ${fmtBytes(total)}（${fmtPct(used / total)}）`
+        : "—";
     }
     case "disk": {
       const rd = latestSum(rings, "disk.read_bytes");
       const wr = latestSum(rings, "disk.write_bytes");
+      const busiest = latestMax(rings, "disk.util");
+      if (rd !== null || wr !== null) {
+        const parts: string[] = [];
+        if (busiest !== null) parts.push(`最忙 ${fmtPct(busiest / 100)}`);
+        parts.push(`合计 ${fmtBytes((rd ?? 0) + (wr ?? 0))}/s`);
+        return parts.join(" · ");
+      }
       if (rd === null && wr === null) {
         // 没有速率时报「最满」而不是求和——APFS 同容器的卷共享空间，求和会数多遍
         let worst: number | null = null;
@@ -63,16 +84,23 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
         }
         return worst === null ? "—" : `最满 ${fmtPct(worst)}`;
       }
-      return `${fmtBytes((rd ?? 0) + (wr ?? 0))}/s`;
+      return "—";
     }
     case "net": {
       const rx = latestSum(rings, "net.rx_bytes");
       const tx = latestSum(rings, "net.tx_bytes");
-      return rx === null && tx === null ? "—" : fmtRateBits((rx ?? 0) + (tx ?? 0));
+      if (rx === null && tx === null) return "—";
+      const errs = latestSum(rings, "net.errors");
+      const base = `↓ ${fmtRateBits(rx ?? 0)} · ↑ ${fmtRateBits(tx ?? 0)}`;
+      return errs && errs >= 1 ? `${base} · 异常 ${Math.round(errs)}/s` : base;
     }
     case "gpu": {
-      const v = latestSum(rings, "gpu.usage");
-      return v === null ? "—" : fmtPct(v / 100);
+      const v = latestMax(rings, "gpu.usage");
+      const mem = latestSum(rings, "gpu.mem_used");
+      if (v === null) return "—";
+      return mem !== null
+        ? `最忙 ${fmtPct(v / 100)} · 显存 ${fmtBytes(mem)}`
+        : `最忙 ${fmtPct(v / 100)}`;
     }
   }
 }
@@ -93,6 +121,35 @@ const RAIL_SPARK_MAX: Record<string, number | undefined> = {
   net: undefined,
 };
 
+/** 页头副标题：这台机器上该资源的一句话概述。 */
+function subtitleOf(
+  id: string,
+  info: ReturnType<typeof useSystemInfo>["data"],
+  d: ReturnType<typeof useDiscovery>["data"],
+): string {
+  switch (id) {
+    case "cpu":
+      return info ? `${info.cpu.model} · ${info.cpu.logical_cores} 逻辑处理器` : "";
+    case "mem":
+      return info ? fmtBytes(info.memory.total_bytes) : "";
+    case "gpu":
+      return (info?.gpus ?? [])
+        .map((g) => g.model)
+        .filter(Boolean)
+        .join(" · ");
+    case "disk": {
+      const n = d?.members("disk.util", "dev").length ?? 0;
+      return n > 0 ? `${n} 个块设备` : "";
+    }
+    case "net": {
+      const n = d?.members("net.tx_bytes", "iface").length ?? 0;
+      return n > 0 ? `${n} 个接口` : "";
+    }
+    default:
+      return "";
+  }
+}
+
 function psiTone(v: number): string {
   if (v >= 40) return "var(--crit)";
   if (v >= 12) return "var(--warn)";
@@ -108,6 +165,7 @@ export function PerfPage() {
   const [layer, setLayer] = useState<string | null>(null);
 
   const visible = visibleResources(discovery.data);
+  const info = useSystemInfo();
 
   if (discovery.isPending) {
     return (
@@ -148,13 +206,16 @@ export function PerfPage() {
           {" / "}
           {current.label}
           {member ? ` / ${member}` : ""}
+          <span className={s.crumbSub}>{subtitleOf(current.id, info.data, discovery.data)}</span>
         </span>
         <span className={chrome.spacer} />
-        {range !== "60s" && layer && (
-          <span className={s.layerNote} title="区间带 = min–max · 实线 = avg · 虚线 = med">
-            层 {layer} · 带 min–max · 实线 avg · 虚线 med
-          </span>
-        )}
+        <span className={s.layerNote} title="区间带 = min–max · 实线 = avg · 虚线 = med">
+          {range === "60s"
+            ? "live · 2s 采集"
+            : layer
+              ? `层 ${layer} · 带 min–max · 实线 avg · 虚线 med`
+              : "自动选层中…"}
+        </span>
         <Segmented
           label="时间范围"
           value={range}
