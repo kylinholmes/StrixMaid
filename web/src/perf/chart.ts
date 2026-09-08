@@ -22,8 +22,11 @@ export function liveSingle(ring: Ring | undefined, windowSecs = 60) {
   return [xs, vs] as AlignedData;
 }
 
-/** 60 秒实时视图：多序列按 ts 求和成一条（组页聚合「速率求和」）。 */
-export function liveSum(rings: readonly (Ring | undefined)[], windowSecs = 60) {
+/** 组页聚合方式（08 §6.2）：速率求和；饱和度取组内最大。 */
+export type Agg = "sum" | "max";
+
+/** 60 秒实时视图：多序列按 ts 聚合成一条。 */
+export function liveAgg(rings: readonly (Ring | undefined)[], agg: Agg, windowSecs = 60) {
   const now = Math.floor(Date.now() / 1000);
   const byTs = new Map<number, number>();
   for (const r of rings) {
@@ -32,7 +35,8 @@ export function liveSum(rings: readonly (Ring | undefined)[], windowSecs = 60) {
       const t = r.ts[i];
       const v = r.v[i];
       if (t !== undefined && v !== undefined && t >= now - windowSecs) {
-        byTs.set(t, (byTs.get(t) ?? 0) + v);
+        const cur = byTs.get(t);
+        byTs.set(t, cur === undefined ? v : agg === "sum" ? cur + v : Math.max(cur, v));
       }
     }
   }
@@ -63,14 +67,17 @@ export function bandFill(hue: string): PlotBand[] {
   return [{ series: [1, 2], fill: withAlpha(hue, 0.22) }];
 }
 
-/** 多条 BandSeries 的 avg 按桶求和（组页聚合历史：只画合计 avg，不合成假 band）。 */
-export function sumAvg(list: readonly BandSeries[]): AlignedData {
+/** 多条 BandSeries 的 avg 按桶聚合（组页聚合历史：只画聚合 avg，不合成假 band）。 */
+export function aggAvg(list: readonly BandSeries[], agg: Agg): AlignedData {
   const byTs = new Map<number, number>();
   for (const bs of list) {
     for (let i = 0; i < bs.xs.length; i++) {
       const t = bs.xs[i];
       const v = bs.avg[i];
-      if (t !== undefined && typeof v === "number") byTs.set(t, (byTs.get(t) ?? 0) + v);
+      if (t !== undefined && typeof v === "number") {
+        const cur = byTs.get(t);
+        byTs.set(t, cur === undefined ? v : agg === "sum" ? cur + v : Math.max(cur, v));
+      }
     }
   }
   const xs = [...byTs.keys()].sort((a, b) => a - b);

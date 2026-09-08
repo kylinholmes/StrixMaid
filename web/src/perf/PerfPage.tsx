@@ -6,11 +6,12 @@ import { cx } from "@/lib/cx";
 import { fmtBytes, fmtPct, fmtRateBits } from "@/lib/fmt";
 import { useDiscovery } from "@/metrics/discovery";
 import { RANGES, type RangeKey } from "@/metrics/history";
-import { latestSum, type Ring, seriesKey, useLive } from "@/metrics/live";
+import { latestMax, latestSum, liveMembers, type Ring, seriesKey, useLive } from "@/metrics/live";
 import { type ResourceDef, visibleResources } from "./model";
 import s from "./Perf.module.css";
 import {
   CpuSection,
+  type CpuView,
   DiskSection,
   GpuSection,
   MemberDetail,
@@ -35,17 +36,6 @@ function railSpark(rings: ReadonlyMap<string, Ring>, metrics: readonly string[])
   return [...byTs.keys()].sort((a, b) => a - b).map((t) => byTs.get(t) ?? 0);
 }
 
-/** 某指标各标签成员里的最大值。 */
-function latestMax(rings: ReadonlyMap<string, Ring>, metric: string): number | null {
-  let max: number | null = null;
-  for (const [key, r] of rings) {
-    if (!key.startsWith(`${metric}|`)) continue;
-    const v = r.v[r.v.length - 1];
-    if (typeof v === "number" && (max === null || v > max)) max = v;
-  }
-  return max;
-}
-
 function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
   switch (r.id) {
     case "cpu": {
@@ -55,9 +45,7 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
     case "mem": {
       const used = latestSum(rings, "mem.used");
       const total = latestSum(rings, "mem.total");
-      return used !== null && total
-        ? `${fmtBytes(used)} / ${fmtBytes(total)}（${fmtPct(used / total)}）`
-        : "—";
+      return used !== null && total ? `${fmtBytes(used)} / ${fmtBytes(total)}` : "—";
     }
     case "disk": {
       const rd = latestSum(rings, "disk.read_bytes");
@@ -66,7 +54,7 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
       if (rd !== null || wr !== null) {
         const parts: string[] = [];
         if (busiest !== null) parts.push(`最忙 ${fmtPct(busiest / 100)}`);
-        parts.push(`合计 ${fmtBytes((rd ?? 0) + (wr ?? 0))}/s`);
+        parts.push(`${fmtBytes((rd ?? 0) + (wr ?? 0))}/s`);
         return parts.join(" · ");
       }
       if (rd === null && wr === null) {
@@ -91,7 +79,7 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
       const tx = latestSum(rings, "net.tx_bytes");
       if (rx === null && tx === null) return "—";
       const errs = latestSum(rings, "net.errors");
-      const base = `↓ ${fmtRateBits(rx ?? 0)} · ↑ ${fmtRateBits(tx ?? 0)}`;
+      const base = `↓${fmtRateBits(rx ?? 0)} ↑${fmtRateBits(tx ?? 0)}`;
       return errs && errs >= 1 ? `${base} · 异常 ${Math.round(errs)}/s` : base;
     }
     case "gpu": {
@@ -99,7 +87,7 @@ function railSummary(r: ResourceDef, rings: ReadonlyMap<string, Ring>): string {
       const mem = latestSum(rings, "gpu.mem_used");
       if (v === null) return "—";
       return mem !== null
-        ? `最忙 ${fmtPct(v / 100)} · 显存 ${fmtBytes(mem)}`
+        ? `最忙 ${fmtPct(v / 100)} · ${fmtBytes(mem)}`
         : `最忙 ${fmtPct(v / 100)}`;
     }
   }
@@ -126,6 +114,7 @@ function subtitleOf(
   id: string,
   info: ReturnType<typeof useSystemInfo>["data"],
   d: ReturnType<typeof useDiscovery>["data"],
+  rings: ReadonlyMap<string, Ring>,
 ): string {
   switch (id) {
     case "cpu":
@@ -138,11 +127,15 @@ function subtitleOf(
         .filter(Boolean)
         .join(" · ");
     case "disk": {
-      const n = d?.members("disk.util", "dev").length ?? 0;
+      const n = d
+        ? liveMembers(rings, "disk.util", "dev", d.members("disk.util", "dev")).length
+        : 0;
       return n > 0 ? `${n} 个块设备` : "";
     }
     case "net": {
-      const n = d?.members("net.tx_bytes", "iface").length ?? 0;
+      const n = d
+        ? liveMembers(rings, "net.tx_bytes", "iface", d.members("net.tx_bytes", "iface")).length
+        : 0;
       return n > 0 ? `${n} 个接口` : "";
     }
     default:
@@ -163,6 +156,7 @@ export function PerfPage() {
   const rings = useLive((st) => st.rings);
   const [range, setRange] = useState<RangeKey>("60s");
   const [layer, setLayer] = useState<string | null>(null);
+  const [cpuView, setCpuView] = useState<CpuView>("all");
 
   const visible = visibleResources(discovery.data);
   const info = useSystemInfo();
@@ -206,9 +200,26 @@ export function PerfPage() {
           {" / "}
           {current.label}
           {member ? ` / ${member}` : ""}
-          <span className={s.crumbSub}>{subtitleOf(current.id, info.data, discovery.data)}</span>
+          <span className={s.crumbSub}>
+            {subtitleOf(current.id, info.data, discovery.data, rings)}
+          </span>
         </span>
         <span className={chrome.spacer} />
+        {/* CPU 专有:总体⇄逻辑处理器只切图表区,切换器贴着时间档(08 §6.6) */}
+        {current.id === "cpu" && !member && (
+          <Segmented
+            label="视图"
+            value={cpuView}
+            onChange={setCpuView}
+            options={[
+              { value: "all", label: "总体" },
+              {
+                value: "cores",
+                label: `逻辑处理器 ${discovery.data?.members("cpu.core.usage", "core").length ?? 0}`,
+              },
+            ]}
+          />
+        )}
         <span className={s.layerNote} title="区间带 = min–max · 实线 = avg · 虚线 = med">
           {range === "60s" ? "live · 2s" : (layer ?? "…")}
         </span>
@@ -227,7 +238,12 @@ export function PerfPage() {
             const psiVal = psiRing?.v[psiRing.v.length - 1];
             const memberCount =
               r.memberLabel && r.memberMetric && discovery.data
-                ? discovery.data.members(r.memberMetric, r.memberLabel).length
+                ? liveMembers(
+                    rings,
+                    r.memberMetric,
+                    r.memberLabel,
+                    discovery.data.members(r.memberMetric, r.memberLabel),
+                  ).length
                 : 0;
             return (
               <button
@@ -274,7 +290,12 @@ export function PerfPage() {
             ) : (
               <>
                 {current.id === "cpu" && (
-                  <CpuSection range={range} rangeSecs={rangeDef?.secs ?? 60} onLayer={setLayer} />
+                  <CpuSection
+                    range={range}
+                    rangeSecs={rangeDef?.secs ?? 60}
+                    view={cpuView}
+                    onLayer={setLayer}
+                  />
                 )}
                 {current.id === "mem" && <MemSection range={range} onLayer={setLayer} />}
                 {current.id === "disk" && <DiskSection range={range} onLayer={setLayer} />}

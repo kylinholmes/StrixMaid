@@ -39,3 +39,32 @@
 .wrap :global(.u-cursor-x) {
   border-right: 1px dashed var(--plot-hue);
 }
+
+/* 跟随鼠标的数值提示（08 §8.1 setCursor → HTML tooltip）。浮层规格照 spec §5.5 */
+.tip {
+  position: absolute;
+  z-index: 3;
+  display: none;
+  pointer-events: none;
+  white-space: nowrap;
+  font: 11px var(--mono);
+  line-height: 16px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+  padding: 4px 7px;
+}
+
+.tip b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tip i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  font-style: normal;
+}

@@ -19,6 +19,12 @@ export interface PlotBand {
   fill: string;
 }
 
+export interface PlotTip {
+  /** 每条 series 在提示里的名字,与 series 一一对应;null = 不进提示（band 的 min/max 边界） */
+  names: readonly (string | null)[];
+  unitFmt: (v: number) => string;
+}
+
 export interface PlotProps {
   /** [xs, ...ys]，与 series 一一对应 */
   data: AlignedData;
@@ -35,6 +41,8 @@ export interface PlotProps {
   cornerBR?: string;
   /** 关掉游标（sparkline / 成员格小图） */
   noCursor?: boolean;
+  /** 悬停时跟随鼠标的数值提示（08 §8.1）。noCursor 时无效 */
+  tip?: PlotTip;
   className?: string;
 }
 
@@ -66,12 +74,16 @@ export function Plot({
   cornerBL,
   cornerBR,
   noCursor,
+  tip,
   className,
 }: PlotProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const tipRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const dataRef = useRef(data);
   dataRef.current = data;
+  const tipRef2 = useRef(tip);
+  tipRef2.current = tip;
   const mode = useTheme((t) => t.mode);
 
   // 结构性参数变化（序列形状 / 主题 / 上限模式）→ 重建实例
@@ -131,6 +143,41 @@ export function Plot({
       ],
       bands: bands?.map((b) => ({ series: [...b.series] as [number, number], fill: b.fill })),
       hooks: {
+        setCursor: [
+          (u) => {
+            // 跟随鼠标的数值提示（08 §8.1）。直接改 DOM,不走 React——每帧 setState 不值得
+            const el = tipRef.current;
+            const t = tipRef2.current;
+            if (!el || !t) return;
+            const { idx, left, top } = u.cursor;
+            if (idx == null || left == null || left < 0) {
+              el.style.display = "none";
+              return;
+            }
+            const xv = u.data[0]?.[idx];
+            let html =
+              typeof xv === "number"
+                ? `<b>${new Date(xv * 1000).toLocaleTimeString("zh-CN", { hour12: false })}</b>`
+                : "";
+            for (let si = 1; si < u.data.length; si++) {
+              const name = t.names[si - 1];
+              if (!name) continue;
+              const v = u.data[si]?.[idx];
+              if (typeof v !== "number") continue;
+              const raw = series[si - 1]?.stroke;
+              const color = !raw || raw === "transparent" ? hue : raw;
+              html += `<br><i style="background:${color}"></i>${name} ${t.unitFmt(v)}`;
+            }
+            el.innerHTML = html;
+            el.style.display = "block";
+            const w = el.offsetWidth;
+            const hostW = host.clientWidth;
+            const x = left + 12 + w > hostW - 4 ? left - w - 12 : left + 12;
+            const y = typeof top === "number" && top >= 0 ? Math.min(top + 14, height - 24) : 8;
+            el.style.left = `${Math.max(2, x)}px`;
+            el.style.top = `${y}px`;
+          },
+        ],
         drawClear: [
           (u) => {
             // 固定像素网格：步长不随刻度走（08 §8.1）
@@ -214,6 +261,7 @@ export function Plot({
       {cornerTR && <span className={`${s.corner} ${s.tr}`}>{cornerTR}</span>}
       {cornerBL && <span className={`${s.corner} ${s.bl}`}>{cornerBL}</span>}
       {cornerBR && <span className={`${s.corner} ${s.br}`}>{cornerBR}</span>}
+      {tip && !noCursor && <div className={s.tip} ref={tipRef} />}
     </div>
   );
 }

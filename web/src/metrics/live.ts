@@ -99,6 +99,32 @@ export function latestOf(rings: ReadonlyMap<string, Ring>, key: string): number 
   return typeof v === "number" ? v : null;
 }
 
+/** 某指标各标签成员里的最新值最大者。找不到返回 null。 */
+export function latestMax(rings: ReadonlyMap<string, Ring>, metric: string): number | null {
+  let max: number | null = null;
+  for (const [key, r] of rings) {
+    if (!key.startsWith(`${metric}|`)) continue;
+    const v = r.v[r.v.length - 1];
+    if (typeof v === "number" && (max === null || v > max)) max = v;
+  }
+  return max;
+}
+
+/**
+ * 从发现层的成员里筛出「活着的」——live 环里有数据的。
+ * `/metrics/series` 会保留拔掉的外置盘之类的孤儿序列,它们不该以一排「—」出现。
+ * 环还全空时(刚进页面)原样返回,避免把加载中误判成全员失踪。
+ */
+export function liveMembers(
+  rings: ReadonlyMap<string, Ring>,
+  metric: string,
+  labelKey: string,
+  discovered: readonly string[],
+): string[] {
+  const alive = discovered.filter((m) => rings.has(seriesKey(metric, `${labelKey}=${m}`)));
+  return alive.length > 0 ? alive : [...discovered];
+}
+
 /** 按指标名汇总最新值（多标签求和）。找不到返回 null。 */
 export function latestSum(rings: ReadonlyMap<string, Ring>, metric: string): number | null {
   let sum = 0;
