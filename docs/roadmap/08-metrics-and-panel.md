@@ -7,6 +7,11 @@
 > Linux 新增 sysfs GPU 采集器（`collect/linux/gpu.rs`）、macOS 采集器同步裁剪；
 > §4.4 的 `disk.inodes` 健康项在实施前已存在于 `providers/system/health.rs`。
 >
+> **2026-09-09 增补**：GPU 页信息量不足，评审后加 2 项到 36 项——
+> `gpu.engine.usage`（标签 `engine`+`gpu`，Apple AGX 报 renderer/tiler，
+> 其他平台测不到则不产出）与 `gpu.mem_alloc`（统一内存 Mac 没有
+> `gpu.mem_total`，已分配内存是显存条唯一诚实的分母）。
+>
 > §12 的决策记录：**Q1 按 (c) 实施**——sysfs 能读到 `gpu_busy_percent` 的卡才采，
 > NVIDIA 如实缺席。不选 (a) 的原因：helper 是**每会话一个**的 PAM 组件，而指标
 > 引擎常驻、与登录无关，照 (a) 实现则没人登录就没有 GPU 指标（此前记录在
@@ -97,7 +102,9 @@
 | | `cpu.steal` | percent | — | 探测到非虚拟化时整条隐藏 |
 | CPU 每核 | `cpu.core.usage` | percent | `core` | 唯一保留的每核指标 |
 | GPU | `gpu.usage` | percent | `gpu` | **新增** |
+| | `gpu.engine.usage` | percent | `engine`,`gpu` | **新增（2026-09-09）**；引擎细分,驱动给什么报什么（Apple AGX: renderer/tiler） |
 | | `gpu.mem_used` | bytes | `gpu` | **新增** |
+| | `gpu.mem_alloc` | bytes | `gpu` | **新增（2026-09-09）**；GPU 已向系统申请的内存,统一内存架构下显存条唯一诚实的分母 |
 | | `gpu.mem_total` | bytes | `gpu` | **新增** |
 | | `gpu.temp` | celsius | `gpu` | **新增**；`unit` 需新增常量 `CELSIUS = "celsius"` |
 | 内存 | `mem.total` | bytes | — | |

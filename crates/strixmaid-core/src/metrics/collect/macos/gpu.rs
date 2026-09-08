@@ -3,7 +3,9 @@
 //! Apple Silicon 的 GPU 驱动（`AGXAccelerator*`）在注册表里按秒级刷新
 //! `Device Utilization %` 与 `In use system memory`，普通用户可读
 //! （`ioreg -r -c IOAccelerator` 同源）。统一内存架构下没有「显存总量」——
-//! **不产出 `gpu.mem_total`**，也不拿整机内存假冒（spec §6：测不到就不出现）。
+//! **不产出 `gpu.mem_total`**，也不拿整机内存假冒（spec §6：测不到就不出现）；
+//! 显存条的分母用 `Alloc system memory`（GPU 已向系统申请的量，used ≤ alloc）。
+//! 引擎细分（`gpu.engine.usage`）取 `Renderer/Tiler Utilization %`。
 //!
 //! 标签 `gpu=<序号>`：枚举顺序在一次开机内稳定；多卡 Mac（Intel + 独显）
 //! 各占一个序号。全是瞬时量，无需差分。
@@ -44,12 +46,36 @@ impl Collector for GpuCollector {
                 id.clone(),
                 (usage.max(0) as f64).min(100.0),
             ));
+            for (key, engine) in [
+                ("Renderer Utilization %", "renderer"),
+                ("Tiler Utilization %", "tiler"),
+            ] {
+                if let Some(v) = stat(key) {
+                    out.push(Sample {
+                        metric: cat::GPU_ENGINE_USAGE,
+                        // 键序 = canonical 序（engine < gpu），与常量表 GPU_ENGINE 一致
+                        labels: vec![
+                            (label::ENGINE, engine.to_string()),
+                            (label::GPU, id.clone()),
+                        ],
+                        value: (v.max(0) as f64).min(100.0),
+                    });
+                }
+            }
             if let Some(mem) = stat("In use system memory") {
                 out.push(Sample::labeled(
                     cat::GPU_MEM_USED,
                     label::GPU,
-                    id,
+                    id.clone(),
                     mem.max(0) as f64,
+                ));
+            }
+            if let Some(alloc) = stat("Alloc system memory") {
+                out.push(Sample::labeled(
+                    cat::GPU_MEM_ALLOC,
+                    label::GPU,
+                    id,
+                    alloc.max(0) as f64,
                 ));
             }
         }
