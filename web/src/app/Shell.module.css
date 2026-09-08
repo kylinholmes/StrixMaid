@@ -3,129 +3,27 @@
   display: flex;
 }
 
-/* ---- 左栏：机器块 + 状态行 + 导航 + 底部动作 ---- */
-.rail {
-  width: var(--rail);
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  background: var(--surface-2);
-  border-right: 1px solid var(--line);
-}
-
-.machine {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  background: none;
-  border: 0;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.machine:hover {
-  background: var(--surface-3);
-}
-
-.machine .host {
-  flex: 1;
-  min-width: 0;
-  font: 600 13px var(--mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.machine .chev {
-  color: var(--ink-3);
-  flex: none;
-}
-
-.menuAnchor {
-  position: relative;
-}
-
-.hostat {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 10px 6px 34px;
-  color: var(--ink-3);
-  font-size: 11px;
-}
-
-.hostat i {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-style: normal;
-}
-
-.sq {
-  width: 7px;
-  height: 7px;
-  flex: none;
-  background: var(--ok);
-}
-
-.sqPending {
-  background: none;
-  border: 1px solid var(--line-strong);
-}
-
-.sqWarn {
-  background: var(--warn);
-}
-
-.sqBad {
-  background: var(--crit);
-}
-
-.hr {
-  flex: none;
-  border-top: 1px solid var(--line);
-}
-
-.foot {
-  flex: none;
-  border-top: 1px solid var(--line);
-}
-
-.frow {
-  height: var(--row);
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 12px;
-  color: var(--ink-2);
-  background: none;
-  border: 0;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.frow:hover {
-  background: var(--surface-3);
-  color: var(--ink);
-}
-
-.frow svg {
-  flex: none;
-}
-
-/* ---- 内容区 ---- */
+/* key 随锁定状态切换,登录表单⇄路由内容交替时整块淡入 */
 .content {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--ground);
+  animation: contentIn 240ms ease;
+}
+
+@keyframes contentIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content {
+    animation: none;
+  }
 }

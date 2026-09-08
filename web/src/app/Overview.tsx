@@ -14,7 +14,7 @@ import {
 import { fmtBytes, fmtPct, fmtRateBits, fmtUptime } from "@/lib/fmt";
 import { useSession } from "@/session/useSession";
 import s from "./PageChrome.module.css";
-import { healthQuery, snapshotQuery } from "./Shell";
+import { healthQuery, snapshotQuery } from "./queries";
 
 type UnitSummary = components["schemas"]["UnitSummary"];
 type MetricValue = components["schemas"]["MetricValue"];

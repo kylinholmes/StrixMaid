@@ -6,9 +6,9 @@ import { PerfPage } from "@/perf/PerfPage";
 import { useSession } from "@/session/useSession";
 import { useTheme } from "@/theme/useTheme";
 import { Overview } from "./Overview";
+import { capabilitiesQuery } from "./queries";
 import { Shell } from "./Shell";
 import { StubPage } from "./StubPage";
-import { capabilitiesQuery, Vault } from "./Vault";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -59,7 +59,6 @@ export function App() {
             <Route path="*" element={<Navigate to="/overview" replace />} />
           </Route>
         </Routes>
-        <Vault />
       </BrowserRouter>
     </QueryClientProvider>
   );
