@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Gallery } from "@/gallery/Gallery";
 import { PerfPage } from "@/perf/PerfPage";
+import { ProcPage } from "@/proc/ProcPage";
 import { useSession } from "@/session/useSession";
 import { useTheme } from "@/theme/useTheme";
 import { Overview } from "./Overview";
@@ -49,7 +50,7 @@ export function App() {
             <Route path="/performance" element={<PerfPage />} />
             <Route path="/performance/:res" element={<PerfPage />} />
             <Route path="/performance/:res/:member" element={<PerfPage />} />
-            <Route path="/processes" element={<StubPage title="进程" />} />
+            <Route path="/processes" element={<ProcPage />} />
             <Route path="/services" element={<StubPage title="服务" />} />
             <Route path="/logs" element={<StubPage title="日志" />} />
             <Route path="/terminal" element={<StubPage title="终端" />} />

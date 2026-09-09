@@ -2024,6 +2024,19 @@ export interface components {
             cpu_percent: number;
             /**
              * Format: double
+             * @description 磁盘读速率（bytes/s，最近一个采样窗口的差分）。
+             *
+             *     `None` = **测不到**（无权限，或平台不提供 per-process IO 计数）；
+             *     能测到但还没有第二轮采样时为 `Some(0.0)`。前端把 `None` 画成「—」而不是 0。
+             */
+            io_read_rate?: number | null;
+            /**
+             * Format: double
+             * @description 磁盘写速率（bytes/s）。语义同 [`Self::io_read_rate`]。
+             */
+            io_write_rate?: number | null;
+            /**
+             * Format: double
              * @description 内存占用比例，**百分比**，= `rss_bytes / MemTotal × 100`。
              * @example 0.4
              */
