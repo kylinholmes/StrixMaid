@@ -2,9 +2,11 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Gallery } from "@/gallery/Gallery";
+import { LogsPage } from "@/logs/LogsPage";
 import { PerfPage } from "@/perf/PerfPage";
 import { ProcPage } from "@/proc/ProcPage";
 import { useSession } from "@/session/useSession";
+import { SvcPage } from "@/svc/SvcPage";
 import { useTheme } from "@/theme/useTheme";
 import { Overview } from "./Overview";
 import { capabilitiesQuery } from "./queries";
@@ -51,8 +53,8 @@ export function App() {
             <Route path="/performance/:res" element={<PerfPage />} />
             <Route path="/performance/:res/:member" element={<PerfPage />} />
             <Route path="/processes" element={<ProcPage />} />
-            <Route path="/services" element={<StubPage title="服务" />} />
-            <Route path="/logs" element={<StubPage title="日志" />} />
+            <Route path="/services" element={<SvcPage />} />
+            <Route path="/logs" element={<LogsPage />} />
             <Route path="/terminal" element={<StubPage title="终端" />} />
             <Route path="/files" element={<StubPage title="文件" />} />
             <Route path="/audit" element={<StubPage title="审计" />} />

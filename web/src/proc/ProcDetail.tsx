@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "@/api/client";
 import { Button, Dialog, ErrorState, KeyValueGrid, type KeyValueItem } from "@/components";
 import { fmtBytes } from "@/lib/fmt";
@@ -99,8 +100,15 @@ export function ProcDetail({ pid, onClose }: { pid: number; onClose: () => void 
     if (d.exe) facts.push({ k: "可执行文件", v: d.exe, mono: true });
     if (d.cwd) facts.push({ k: "工作目录", v: d.cwd, mono: true });
     if (d.tty) facts.push({ k: "TTY", v: d.tty, mono: true });
-    if (d.unit) facts.push({ k: "服务单元", v: d.unit, mono: true });
-    else if (d.cgroup) facts.push({ k: "cgroup", v: d.cgroup, mono: true });
+    if (d.unit) {
+      // 进程 → 所属服务:点开服务页并直接选中该 unit
+      const u = d.unit;
+      facts.push({
+        k: "服务单元",
+        v: <Link to={`/services?unit=${encodeURIComponent(u)}`}>{u}</Link>,
+        mono: true,
+      });
+    } else if (d.cgroup) facts.push({ k: "cgroup", v: d.cgroup, mono: true });
     facts.push({ k: "虚拟内存", v: fmtBytes(d.vms_bytes) });
     if (d.io_read_bytes !== undefined && d.io_read_bytes !== null)
       facts.push({

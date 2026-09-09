@@ -1,0 +1,346 @@
+.crumb {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.crumbSub {
+  color: var(--ink-3);
+  font: 11px var(--mono);
+  font-weight: 400;
+  margin-left: 10px;
+}
+
+/* 权限提示条:结果被 ACL 裁剪不是错误,但必须说出来(types 文档要求) */
+.banner {
+  flex: none;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--warn);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+/* 工具栏下拉,同进程/服务页规格 */
+.pick {
+  position: relative;
+}
+
+.pickBtn {
+  height: 26px;
+  padding: 0 10px;
+  background: none;
+  border: 1px solid var(--line);
+  font: 12px inherit;
+  font-family: inherit;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pickBtn:hover {
+  background: var(--surface-2);
+}
+
+.pickBtnOn {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--sel);
+}
+
+/* unit 过滤:小号文本输入,和 pickBtn 同一规格 */
+.unitInput {
+  height: 26px;
+  width: 130px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: 11px var(--mono);
+}
+
+.unitInput::placeholder {
+  color: var(--ink-3);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.unitInputOn {
+  border-color: var(--line-strong);
+  background: var(--sel);
+}
+
+/* 来源列可点:下钻到该 unit。裸文本样式,悬停才显形 */
+.srcBtn {
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.srcBtn:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* ---- 布局 ---- */
+.page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+
+.tableArea {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 「N 条新日志」胶囊:浮在表格顶部中央 */
+.pill {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  height: 26px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pill:hover {
+  background: var(--surface-2);
+}
+
+/* ---- 表 ---- */
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.tbl th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--row);
+  padding: 0 12px;
+  text-align: left;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.tbl td {
+  height: var(--row);
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.row {
+  cursor: pointer;
+}
+
+.alt {
+  background: var(--surface-2);
+}
+
+.row:hover {
+  background: var(--surface-3);
+}
+
+.row.rowOn,
+.row.rowOn:hover {
+  background: var(--sel);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.time {
+  color: var(--ink-2);
+}
+
+/* 级别:色彩预算只给 warning+(spec §4) */
+.prio {
+  font: 600 10px var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.prioWarn {
+  color: var(--warn);
+}
+
+.prioCrit {
+  color: var(--crit);
+}
+
+.prioDim {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.src {
+  color: var(--ink-3);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 消息列吃掉剩余宽度并截断 */
+.msg {
+  max-width: 0;
+  width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.foot {
+  padding: 8px 12px;
+  color: var(--ink-3);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* ---- 详情抽屉 ---- */
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  width: 440px;
+  border-left: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.drawerHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawerTitle {
+  flex: 1;
+  font: 500 12px var(--mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.drawerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.msgBox {
+  font: 12px var(--mono);
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  margin-bottom: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.fields {
+  margin-top: 14px;
+  font-size: 12px;
+}
+
+.fields summary {
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.fieldList {
+  margin-top: 6px;
+  font: 11px var(--mono);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.fieldList b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ---- 清理对话框内部 ---- */
+.vacRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.vacInput {
+  width: 72px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: 12px var(--mono);
+}
+
+.vacNote {
+  color: var(--ink-3);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+.vacErr {
+  color: var(--crit);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+.eraseWarn {
+  color: var(--crit);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+/* 清理结果:工具栏下的一条细线 */
+.resultBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
