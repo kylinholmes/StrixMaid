@@ -62,6 +62,8 @@ pub const SERVICE_FILE: &str = "service.file";
 pub const SERVICE_DEPS: &str = "service.deps";
 /// unit 操作（写）。参数 [`UnitActionParams`]。
 pub const SERVICE_ACTION: &str = "service.action";
+/// 定时任务列表（读）。参数 [`ScopeParams`]，结果 [`crate::service::TimerEntry`] 数组。
+pub const SERVICE_TIMERS: &str = "service.timers";
 
 /// 日志查询（读）。参数 [`crate::log::LogQuery`]。
 pub const LOG_QUERY: &str = "log.query";
@@ -71,6 +73,10 @@ pub const LOG_ENTRY: &str = "log.entry";
 pub const LOG_BOOTS: &str = "log.boots";
 /// 日志跟随（订阅）。参数 [`crate::log::LogQuery`]。
 pub const LOG_FOLLOW: &str = "log.follow";
+/// 日志磁盘占用与清理能力（读）。参数无，结果 [`crate::log::LogUsage`]。
+pub const LOG_USAGE: &str = "log.usage";
+/// 清理日志（写）。参数 [`crate::log::VacuumReq`]，结果 [`crate::log::VacuumResp`]。
+pub const LOG_VACUUM: &str = "log.vacuum";
 
 /// user 层能力实测（读）。参数无，结果 [`crate::capability::UserProbe`]。
 pub const CAPS_PROBE_USER: &str = "caps.probe_user";
@@ -204,6 +210,12 @@ pub struct UnitParams {
     pub unit: String,
 }
 
+/// 只带作用域的参数（`service.timers`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScopeParams {
+    pub scope: UnitScope,
+}
+
 /// 对一个 unit 执行操作。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitActionParams {
@@ -276,10 +288,10 @@ mod tests {
         for m in [PROC_LIST, PROC_DETAIL, PROC_SIGNAL, PROC_RENICE, PROC_LIVE] {
             assert!(m.starts_with("proc."), "{m}");
         }
-        for m in [SERVICE_LIST, SERVICE_DETAIL, SERVICE_ACTION] {
+        for m in [SERVICE_LIST, SERVICE_DETAIL, SERVICE_ACTION, SERVICE_TIMERS] {
             assert!(m.starts_with("service."), "{m}");
         }
-        for m in [LOG_QUERY, LOG_ENTRY, LOG_BOOTS, LOG_FOLLOW] {
+        for m in [LOG_QUERY, LOG_ENTRY, LOG_BOOTS, LOG_FOLLOW, LOG_USAGE, LOG_VACUUM] {
             assert!(m.starts_with("log."), "{m}");
         }
         assert!(CAPS_PROBE_USER.starts_with("caps."));
@@ -307,10 +319,13 @@ mod tests {
             SERVICE_FILE,
             SERVICE_DEPS,
             SERVICE_ACTION,
+            SERVICE_TIMERS,
             LOG_QUERY,
             LOG_ENTRY,
             LOG_BOOTS,
             LOG_FOLLOW,
+            LOG_USAGE,
+            LOG_VACUUM,
             CAPS_PROBE_USER,
             FS_LIST,
             FS_READ,

@@ -260,6 +260,15 @@ fn register_service(d: &mut Dispatcher, provider: Option<Arc<dyn ServiceProvider
         }
     });
 
+    let p = provider.clone();
+    d.register_fn(rpc::SERVICE_TIMERS, move |v| {
+        let p = p.clone();
+        async move {
+            let q: rpc::ScopeParams = params(rpc::SERVICE_TIMERS, v)?;
+            result(get(&p)?.list_timers(q.scope).await?)
+        }
+    });
+
     d.register_fn(rpc::SERVICE_ACTION, move |v| {
         let p = provider.clone();
         async move {
@@ -297,6 +306,21 @@ fn register_log(d: &mut Dispatcher, provider: Option<Arc<dyn LogProvider>>) {
     d.register_fn(rpc::LOG_BOOTS, move |_| {
         let p = p.clone();
         async move { result(get(&p)?.boots().await?) }
+    });
+
+    let p = provider.clone();
+    d.register_fn(rpc::LOG_USAGE, move |_| {
+        let p = p.clone();
+        async move { result(get(&p)?.usage().await?) }
+    });
+
+    let p = provider.clone();
+    d.register_fn(rpc::LOG_VACUUM, move |v| {
+        let p = p.clone();
+        async move {
+            let q: strixmaid_types::log::VacuumReq = params(rpc::LOG_VACUUM, v)?;
+            result(get(&p)?.vacuum(&q).await?)
+        }
     });
 
     // `log.follow` 是订阅而不是调用：`journalctl -f` 的子进程必须跑在 worker 里，
@@ -391,9 +415,12 @@ mod tests {
             rpc::SERVICE_FILE,
             rpc::SERVICE_DEPS,
             rpc::SERVICE_ACTION,
+            rpc::SERVICE_TIMERS,
             rpc::LOG_QUERY,
             rpc::LOG_ENTRY,
             rpc::LOG_BOOTS,
+            rpc::LOG_USAGE,
+            rpc::LOG_VACUUM,
             rpc::CAPS_PROBE_USER,
             rpc::FS_LIST,
             rpc::FS_READ,
