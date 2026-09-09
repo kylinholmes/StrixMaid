@@ -53,7 +53,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use strixmaid_types::log::{BootInfo, LogEntry, LogEntryDetail, LogPage, LogPriority, LogQuery};
+use strixmaid_types::log::{
+    BootInfo, LogEntry, LogEntryDetail, LogPage, LogPriority, LogQuery, LogUsage, VacuumMode,
+    VacuumReq, VacuumResp,
+};
 use strixmaid_types::{ApiError, ApiResult, ErrorCode};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
@@ -121,6 +124,12 @@ struct FollowKey {
 #[derive(Debug, Default)]
 pub struct OsLog {
     follows: Mutex<HashMap<FollowKey, Weak<FollowShared>>>,
+    /// follow 流里最近解析出的条目,按到达顺序。
+    ///
+    /// 详情接口靠重放 `log show` + 游标哈希匹配,但**同一条事件在 `log stream`
+    /// 与 `log show` 里的序列化不保证逐字节相同**——流里点开的条目会 404。
+    /// 流经手的条目在这里留底,详情先查这里、再退回 `log show`。
+    recent: Arc<Mutex<VecDeque<LogEntry>>>,
 }
 
 impl OsLog {
@@ -149,7 +158,11 @@ impl OsLog {
     fn apply_predicate(cmd: &mut Command, q: &LogQuery) {
         let mut preds: Vec<String> = Vec::new();
         if let Some(unit) = &q.unit {
-            preds.push(format!("subsystem == {}", quote_predicate(unit)));
+            // API 契约里的 unit 名带 `.service` 后缀(launchd label 的对外形态,
+            // 见 service/launchd.rs 模块文档);统一日志的 subsystem 是裸 label。
+            // 不剥后缀的话「服务 → 它的日志」永远查不到东西。
+            let sub = unit.strip_suffix(".service").unwrap_or(unit);
+            preds.push(format!("subsystem == {}", quote_predicate(sub)));
         }
         if let Some(needle) = &q.q {
             preds.push(format!(
@@ -264,6 +277,9 @@ impl OsLog {
             .iter()
             .filter_map(|line| parse_line(line))
             .filter(|e| window.accepts(e))
+            // 级别下限必须在这里筛:`log` 只有「要不要 info/debug」的开关,
+            // 不筛的话「错误及以上」照样混进 Default/Notice
+            .filter(|e| priority_ok(q.priority, e))
             .collect();
         out.sort_unstable_by(|a, b| CursorKey::of(b).cmp(&CursorKey::of(a)));
         // 同一微秒里逐字节相同的记录会得到同一个游标。`log show` 偶尔真的会把
@@ -331,6 +347,20 @@ impl LogProvider for OsLog {
         let key = CursorKey::parse(cursor)
             .ok_or_else(|| ApiError::invalid_request(format!("游标格式不正确：{cursor}")))?;
 
+        // 先查 follow 留底:流里点开的条目在 `log show` 里的序列化可能不同、
+        // 哈希对不上,重放是查不到它的(见 `recent` 字段文档)。
+        if let Some(e) = self
+            .recent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .rev()
+            .find(|e| e.cursor == cursor)
+            .cloned()
+        {
+            return Ok(detail_from_entry(e));
+        }
+
         // 在游标时刻前后各一秒的窗口里找。统一日志没有「按 ID 取一条」的接口，
         // 只能用时间窗口逼近，再按游标串精确匹配。
         let window = Window {
@@ -352,32 +382,7 @@ impl LogProvider for OsLog {
             .into_iter()
             .find(|e| e.cursor == cursor)
             .ok_or_else(|| ApiError::not_found(format!("游标 {cursor} 对应的日志不存在")))?;
-
-        // 统一日志的原始 JSON 字段远多于 LogEntry；再查一次太贵，
-        // 这里只把 LogEntry 已有的东西摊平。fields 的契约是「全字段详情」，
-        // 在 macOS 上退化成「结构化字段」，不影响前端展示。
-        let mut fields = BTreeMap::new();
-        fields.insert("MESSAGE".to_owned(), entry.message.clone());
-        fields.insert("PRIORITY".to_owned(), entry.priority.as_u8().to_string());
-        if let Some(v) = &entry.unit {
-            fields.insert("SUBSYSTEM".to_owned(), v.clone());
-        }
-        if let Some(v) = &entry.identifier {
-            fields.insert("PROCESS".to_owned(), v.clone());
-        }
-        if let Some(v) = entry.pid {
-            fields.insert("PID".to_owned(), v.to_string());
-        }
-        if let Some(v) = entry.uid {
-            fields.insert("UID".to_owned(), v.to_string());
-        }
-        if let Some(v) = &entry.boot_id {
-            fields.insert("BOOT_UUID".to_owned(), v.clone());
-        }
-        if let Some(v) = &entry.transport {
-            fields.insert("EVENT_TYPE".to_owned(), v.clone());
-        }
-        Ok(LogEntryDetail { entry, fields })
+        Ok(detail_from_entry(entry))
     }
 
     async fn boots(&self) -> ApiResult<Vec<BootInfo>> {
@@ -421,28 +426,142 @@ impl LogProvider for OsLog {
             .ok_or_else(|| ApiError::internal("log stream 没有 stdout"))?;
 
         let (tx, rx) = broadcast::channel(FOLLOW_CAPACITY);
-        let task = tokio::spawn(follow_reader(child, stdout, tx.clone()));
+        let task = tokio::spawn(follow_reader(
+            child,
+            stdout,
+            tx.clone(),
+            q.priority,
+            Arc::clone(&self.recent),
+        ));
         let shared = Arc::new(FollowShared { tx, task });
         map.insert(key, Arc::downgrade(&shared));
         tracing::debug!(filter = ?q, "log stream 已启动");
         Ok(LogFollow::new(rx, Box::new(shared)))
     }
+
+    async fn usage(&self) -> ApiResult<LogUsage> {
+        Ok(LogUsage {
+            bytes: store_usage().await,
+            // 统一日志没有按期 / 按大小收缩,只有 log erase 的「全部抹掉」一档
+            modes: vec![VacuumMode::EraseAll],
+        })
+    }
+
+    async fn vacuum(&self, req: &VacuumReq) -> ApiResult<VacuumResp> {
+        match super::validate_vacuum(req)? {
+            VacuumMode::EraseAll => {}
+            VacuumMode::KeepDuration | VacuumMode::MaxSize => {
+                return Err(ApiError::capability_unavailable(
+                    "oslog",
+                    "统一日志不支持按保留期 / 目标大小收缩",
+                )
+                .with_detail("macOS 的 `log erase` 只有全部抹除一档(erase_all)"));
+            }
+        }
+        let before = store_usage().await;
+        let out = tokio::time::timeout(
+            QUERY_TIMEOUT,
+            Command::new(LOG_BIN)
+                .args(["erase", "--all"])
+                .stdin(Stdio::null())
+                .output(),
+        )
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::Timeout, "log erase 超时"))?
+        .map_err(spawn_error)?;
+        if !out.status.success() {
+            return Err(erase_error(&String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(VacuumResp {
+            before_bytes: before,
+            after_bytes: store_usage().await,
+            detail: Some("log erase --all 已执行,统一日志归档已全部抹除".to_owned()),
+        })
+    }
 }
+
+/// `log erase` 失败的分类。
+///
+/// 非 root 的实际措辞是 `log: Must be root to run 'erase' command`——不含
+/// permission/denied 字样。归错类不只是难看:`auth::exec` **只在
+/// `PermissionDenied` 时才走提权重试**,归成 Internal 等于把「提权本可以解决」
+/// 这条路堵死(journalctl 侧曾栽过同一个坑,见 `map_journalctl_error`)。
+fn erase_error(stderr: &str) -> ApiError {
+    let l = stderr.to_lowercase();
+    if l.contains("must be root")
+        || l.contains("not permitted")
+        || l.contains("permission")
+        || l.contains("denied")
+    {
+        return ApiError::permission_denied("抹除统一日志需要管理访问")
+            .with_detail(stderr.trim())
+            .retry_elevated();
+    }
+    ApiError::internal("log erase 失败").with_detail(stderr.trim())
+}
+
+/// 统一日志库的磁盘占用:`du -sk` 两个存储目录求和。
+/// 非 root 多半读不全或直接被拒——返回 `None`(测不到),不编。
+async fn store_usage() -> Option<u64> {
+    let out = Command::new("/usr/bin/du")
+        .args(["-sk", "/var/db/diagnostics", "/var/db/uuidtext"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    // du 对读不到的子目录报错并返回非零,但读到的部分仍会输出——
+    // 部分可读时给出的是**下界**,比「不知道」有用;完全没输出才算测不到
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut total: u64 = 0;
+    let mut seen = false;
+    for line in text.lines() {
+        if let Some(kib) = line.split_whitespace().next().and_then(|t| t.parse::<u64>().ok()) {
+            total += kib * 1024;
+            seen = true;
+        }
+    }
+    (seen && out.status.success()).then_some(total)
+}
+
+/// journald 语义的级别下限：严重程度 >= 要求（数字 <=）。
+///
+/// `log(1)` 只有「要不要 info/debug」的开关，没有「只要 error」——下限
+/// 必须在解析后自己筛。查询与 follow 流都用这一个判定。
+fn priority_ok(floor: Option<LogPriority>, e: &LogEntry) -> bool {
+    floor.is_none_or(|p| e.priority.as_u8() <= p.as_u8())
+}
+
+/// follow 留底的容量。追的是「用户刚刚在流里看到的东西」，几千条足够。
+const RECENT_CAP: usize = 4096;
 
 /// follow 读任务：逐行读、小窗口攒批、广播。
 ///
 /// `child` 由本任务持有，任务被 abort 时随之 drop → `kill_on_drop` 生效。
+/// 解析出的每条先留底进 `recent`（详情接口用），再按 `floor` 决定进不进批。
 async fn follow_reader(
     child: Child,
     stdout: ChildStdout,
     tx: broadcast::Sender<Arc<Vec<LogEntry>>>,
+    floor: Option<LogPriority>,
+    recent: Arc<Mutex<VecDeque<LogEntry>>>,
 ) {
     let _child = child;
+    let ingest = |line: &str| -> Option<LogEntry> {
+        let e = parse_line(line)?;
+        {
+            let mut r = recent.lock().unwrap_or_else(|p| p.into_inner());
+            if r.len() >= RECENT_CAP {
+                r.pop_front();
+            }
+            r.push_back(e.clone());
+        }
+        priority_ok(floor, &e).then_some(e)
+    };
     let mut lines = BufReader::new(stdout).lines();
     'outer: loop {
         let mut batch = Vec::new();
         match lines.next_line().await {
-            Ok(Some(line)) => batch.extend(parse_line(&line)),
+            Ok(Some(line)) => batch.extend(ingest(&line)),
             _ => break,
         }
         // 第一条到手后，在小窗口内把紧随其后的行一起带上，减少 WS 帧数。
@@ -451,7 +570,7 @@ async fn follow_reader(
         while batch.len() < FOLLOW_BATCH_MAX {
             tokio::select! {
                 l = lines.next_line() => match l {
-                    Ok(Some(line)) => batch.extend(parse_line(&line)),
+                    Ok(Some(line)) => batch.extend(ingest(&line)),
                     _ => {
                         if !batch.is_empty() { let _ = tx.send(Arc::new(batch)); }
                         break 'outer;
@@ -466,6 +585,33 @@ async fn follow_reader(
         }
     }
     tracing::debug!("log stream 结束");
+}
+
+/// [`LogEntry`] → 详情。统一日志的原始 JSON 字段远多于 `LogEntry`，再查一次太贵；
+/// `fields` 的契约是「全字段详情」，在 macOS 上退化成「结构化字段」，不影响前端展示。
+fn detail_from_entry(entry: LogEntry) -> LogEntryDetail {
+    let mut fields = BTreeMap::new();
+    fields.insert("MESSAGE".to_owned(), entry.message.clone());
+    fields.insert("PRIORITY".to_owned(), entry.priority.as_u8().to_string());
+    if let Some(v) = &entry.unit {
+        fields.insert("SUBSYSTEM".to_owned(), v.clone());
+    }
+    if let Some(v) = &entry.identifier {
+        fields.insert("PROCESS".to_owned(), v.clone());
+    }
+    if let Some(v) = entry.pid {
+        fields.insert("PID".to_owned(), v.to_string());
+    }
+    if let Some(v) = entry.uid {
+        fields.insert("UID".to_owned(), v.to_string());
+    }
+    if let Some(v) = &entry.boot_id {
+        fields.insert("BOOT_UUID".to_owned(), v.clone());
+    }
+    if let Some(v) = &entry.transport {
+        fields.insert("EVENT_TYPE".to_owned(), v.clone());
+    }
+    LogEntryDetail { entry, fields }
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +993,86 @@ fn map_log_error(stderr: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 用户实测:非 root 点「全部抹除」报了 500「log erase 失败」而不是 403,
+    /// 提权重试因此没被触发。钉住真实措辞的分类。
+    #[test]
+    fn erase_失败分类() {
+        use strixmaid_types::ErrorCode;
+        let e = erase_error("log: Must be root to run 'erase' command");
+        assert_eq!(e.code, ErrorCode::PermissionDenied);
+        assert!(e.can_retry_elevated);
+        let e = erase_error("Operation not permitted");
+        assert_eq!(e.code, ErrorCode::PermissionDenied);
+        // 说不清的失败仍是 500
+        let e = erase_error("Input/output error");
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert!(e.detail.is_some(), "要把 log 的原话带上");
+    }
+
+    #[test]
+    fn 级别下限判定() {
+        let entry = |t: &str| {
+            entry_from_json(
+                &serde_json::json!({
+                    "timestamp": "2026-09-10 12:00:00.000000+0800",
+                    "messageType": t,
+                    "eventMessage": "x",
+                }),
+                "raw",
+            )
+            .unwrap()
+        };
+        // err+ 只放行 Error / Fault
+        let floor = Some(LogPriority::Err);
+        assert!(priority_ok(floor, &entry("Error")));
+        assert!(priority_ok(floor, &entry("Fault")));
+        assert!(!priority_ok(floor, &entry("Default")), "Notice 不该混进错误及以上");
+        assert!(!priority_ok(floor, &entry("Info")));
+        // 不设下限全放行
+        assert!(priority_ok(None, &entry("Debug")));
+    }
+
+    /// 用户实测抓到的 bug:级别选「错误及以上」,Notice/Default 照样出现——
+    /// `log show` 没有级别下限参数,必须解析后筛。这条在真机上验证 show 管线。
+    #[tokio::test]
+    async fn 查询结果遵守级别下限() {
+        let l = OsLog::new();
+        let q = LogQuery {
+            priority: Some(LogPriority::Err),
+            ..Default::default()
+        };
+        let page = l.query(&q).await.unwrap();
+        for e in &page.entries {
+            assert!(
+                e.priority.as_u8() <= LogPriority::Err.as_u8(),
+                "{:?}: {}",
+                e.priority,
+                e.message
+            );
+        }
+        eprintln!("[oslog] err+ 过滤后 {} 条", page.entries.len());
+    }
+
+    #[test]
+    fn unit_过滤剥_service_后缀() {
+        let mut cmd = OsLog::base_command("show");
+        OsLog::apply_predicate(
+            &mut cmd,
+            &LogQuery {
+                unit: Some("com.apple.xpc.launchd.service".to_owned()),
+                ..Default::default()
+            },
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pred = args.last().unwrap();
+        assert!(pred.contains("com.apple.xpc.launchd"), "{pred}");
+        assert!(!pred.contains(".service"), "subsystem 是裸 label:{pred}");
+    }
 
     #[test]
     fn 解析时间戳() {

@@ -27,7 +27,9 @@ use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
-use strixmaid_types::log::{BootInfo, LogEntryDetail, LogPage, LogQuery};
+use strixmaid_types::log::{
+    BootInfo, LogEntryDetail, LogPage, LogQuery, LogUsage, VacuumReq, VacuumResp,
+};
 use strixmaid_types::rpc::{self, CursorParams};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -44,7 +46,66 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
         .routes(routes!(query_logs))
         .routes(routes!(log_entry))
         .routes(routes!(list_boots))
+        .routes(routes!(log_usage))
+        .routes(routes!(log_vacuum))
         .with_state(auth)
+}
+
+/// 日志磁盘占用与清理能力
+///
+/// `bytes` 为 `null` 表示测不到（如 macOS 的日志库目录对非 root 不可读）。
+/// `modes` 是本机支持的清理方式，清理对话框按它渲染：journald 支持按保留期 /
+/// 目标大小收缩，macOS 统一日志只有「全部抹除」。
+#[utoipa::path(
+    get,
+    path = "/logs/usage",
+    tag = "logs",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "占用与清理能力", body = LogUsage),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 501, description = "本机没有可用的日志后端", body = ApiError),
+    ),
+)]
+pub async fn log_usage(
+    State(auth): State<Arc<AuthState>>,
+    Extension(session): Extension<Session>,
+    origin: RequestOrigin,
+) -> ApiResult<Json<LogUsage>> {
+    Ok(Json(
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_USAGE, ()).await?,
+    ))
+}
+
+/// 清理日志
+///
+/// `keep_secs`（只留最近一段）/ `max_bytes`（收缩到目标大小）/ `erase_all`（全部抹除，
+/// 仅 macOS）**三选一**。journald 只清已归档文件，当前活跃文件不动，清理后占用不会
+/// 精确等于期望值。写操作：入审计；权限由底层裁决（journald 文件属主 / macOS root），
+/// 未提权被拒时返回 403 + `can_retry_elevated`，提权后自动以管理身份重试。
+#[utoipa::path(
+    post,
+    path = "/logs/vacuum",
+    tag = "logs",
+    security(("bearer" = [])),
+    request_body = VacuumReq,
+    responses(
+        (status = 200, description = "清理完成，带清理前后占用与工具摘要", body = VacuumResp),
+        (status = 400, description = "三个字段没有恰好给一个", body = ApiError),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "被拒且未提权；带 `can_retry_elevated`", body = ApiError),
+        (status = 501, description = "本机日志后端不支持所选清理方式", body = ApiError),
+    ),
+)]
+pub async fn log_vacuum(
+    State(auth): State<Arc<AuthState>>,
+    Extension(session): Extension<Session>,
+    origin: RequestOrigin,
+    Json(req): Json<VacuumReq>,
+) -> ApiResult<Json<VacuumResp>> {
+    Ok(Json(
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_VACUUM, req).await?,
+    ))
 }
 
 /// 查询日志

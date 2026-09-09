@@ -23,7 +23,10 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use strixmaid_types::log::{BootInfo, LogEntry, LogEntryDetail, LogPage, LogQuery};
+use strixmaid_types::log::{
+    BootInfo, LogEntry, LogEntryDetail, LogPage, LogQuery, LogUsage, VacuumMode, VacuumReq,
+    VacuumResp,
+};
 use strixmaid_types::{ApiError, ApiResult, ErrorCode};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
@@ -408,6 +411,23 @@ fn regex_literal(s: &str) -> String {
 }
 
 /// journalctl 的 stderr → 错误码。
+/// `journalctl --disk-usage` → 字节数。任何一步失败都返回 `None`——占用是锦上添花，
+/// 拿不到不该让整个 usage 接口失败。
+async fn disk_usage() -> Option<u64> {
+    let mut cmd = Journalctl::base_command();
+    cmd.arg("--disk-usage");
+    let out = tokio::time::timeout(QUERY_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // 形如 "Archived and active journals take up 56.0M in the file system."
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().find_map(super::parse_human_size)
+}
+
 fn map_journalctl_error(stderr: &str) -> ApiError {
     let l = stderr.to_lowercase();
     let detail = stderr.trim().to_owned();
@@ -490,6 +510,54 @@ impl LogProvider for Journalctl {
         tokio::time::timeout(QUERY_TIMEOUT, self.boots_inner())
             .await
             .map_err(|_| ApiError::new(ErrorCode::Timeout, "journalctl --list-boots 超时"))?
+    }
+
+    async fn usage(&self) -> ApiResult<LogUsage> {
+        Ok(LogUsage {
+            bytes: disk_usage().await,
+            modes: vec![VacuumMode::KeepDuration, VacuumMode::MaxSize],
+        })
+    }
+
+    async fn vacuum(&self, req: &VacuumReq) -> ApiResult<VacuumResp> {
+        let arg = match super::validate_vacuum(req)? {
+            VacuumMode::KeepDuration => {
+                // journalctl 的时间单位后缀最小是秒
+                format!("--vacuum-time={}s", req.keep_secs.unwrap_or(0))
+            }
+            VacuumMode::MaxSize => format!("--vacuum-size={}", req.max_bytes.unwrap_or(0)),
+            VacuumMode::EraseAll => {
+                return Err(ApiError::invalid_request(
+                    "journald 不做全量抹除;用 keep_secs / max_bytes 收缩",
+                )
+                .with_detail("全部抹掉等价于 keep_secs=0,但那多半不是你想要的"));
+            }
+        };
+        let before = disk_usage().await;
+        // vacuum 输出走 stderr(它不是日志数据);--output=json 等基础参数无害
+        let mut cmd = Self::base_command();
+        cmd.arg(&arg);
+        let out = tokio::time::timeout(QUERY_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| ApiError::new(ErrorCode::Timeout, "journalctl vacuum 超时"))?
+            .map_err(|e| {
+                ApiError::new(ErrorCode::Unavailable, "无法执行 journalctl").with_detail(e.to_string())
+            })?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            return Err(map_journalctl_error(&stderr));
+        }
+        // 摘要行形如 "Vacuuming done, freed 56.0M of archived journals from /var/log/journal/…"
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|l| l.contains("Vacuuming done"))
+            .map(|l| l.trim().to_owned());
+        Ok(VacuumResp {
+            before_bytes: before,
+            after_bytes: disk_usage().await,
+            detail,
+        })
     }
 
     async fn follow(&self, q: &LogQuery) -> ApiResult<LogFollow> {

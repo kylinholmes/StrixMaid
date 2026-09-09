@@ -393,6 +393,7 @@ const WRITE_METHODS: &[&str] = &[
     rpc::PROC_SIGNAL,
     rpc::PROC_RENICE,
     rpc::SERVICE_ACTION,
+    rpc::LOG_VACUUM,
 ];
 
 /// 可以当作 `target` 的参数名，按优先级排列。
