@@ -17,6 +17,7 @@ use strixmaid_types::{ApiError, ApiResult};
 use super::super::Probe;
 use super::super::system::linux::util::meminfo_value;
 use super::cpu::CpuSamples;
+use super::io::IoSamples;
 use super::{Context, cgroup, tty};
 
 /// `/proc/<pid>/stat` 的 `flags` 里的内核线程标志（`include/linux/sched.h`）。
@@ -60,20 +61,26 @@ impl Backend {
         meminfo_value(&meminfo, "MemTotal").unwrap_or(0)
     }
 
-    /// 遍历 `/proc`，顺带更新 CPU 快照并清理已消失的 pid。
-    pub fn list(&self, cpu: &mut CpuSamples, ctx: &Context) -> Vec<ProcessSummary> {
+    /// 遍历 `/proc`，顺带更新 CPU / IO 快照并清理已消失的 pid。
+    pub fn list(
+        &self,
+        cpu: &mut CpuSamples,
+        io: &mut IoSamples,
+        ctx: &Context,
+    ) -> Vec<ProcessSummary> {
         let mut all: Vec<ProcessSummary> = Vec::with_capacity(512);
         let mut seen: HashSet<u32> = HashSet::with_capacity(512);
         if let Ok(iter) = all_processes() {
             for proc in iter.flatten() {
                 let Ok(stat) = proc.stat() else { continue };
-                if let Some(s) = self.summarize(&proc, &stat, cpu, ctx) {
+                if let Some(s) = self.summarize(&proc, &stat, cpu, io, ctx) {
                     seen.insert(s.pid);
                     all.push(s);
                 }
             }
         }
         cpu.retain_seen(&seen);
+        io.retain_seen(&seen);
         all
     }
 
@@ -82,6 +89,7 @@ impl Backend {
         &self,
         raw_pid: i32,
         cpu: &mut CpuSamples,
+        io_samples: &mut IoSamples,
         ctx: &Context,
     ) -> ApiResult<ProcessDetail> {
         let pid = raw_pid as u32;
@@ -89,7 +97,7 @@ impl Backend {
         let proc = Process::new(raw_pid).map_err(|_| not_found())?;
         let stat = proc.stat().map_err(|_| not_found())?;
         let summary = self
-            .summarize(&proc, &stat, cpu, ctx)
+            .summarize(&proc, &stat, cpu, io_samples, ctx)
             .ok_or_else(not_found)?;
 
         let status = proc.status().ok();
@@ -125,12 +133,13 @@ impl Backend {
         })
     }
 
-    /// 把一个进程的 `stat` 转成 [`ProcessSummary`]，同时更新 CPU 快照。
+    /// 把一个进程的 `stat` 转成 [`ProcessSummary`]，同时更新 CPU / IO 快照。
     fn summarize(
         &self,
         proc: &Process,
         stat: &Stat,
         cpu: &mut CpuSamples,
+        io: &mut IoSamples,
         ctx: &Context,
     ) -> Option<ProcessSummary> {
         let pid = u32::try_from(stat.pid).ok().filter(|p| *p > 0)?;
@@ -149,6 +158,23 @@ impl Backend {
             .observe(pid, stat.starttime, ticks, ctx.now, self.hz)
             .unwrap_or(0.0);
         let rss_bytes = stat.rss.saturating_mul(self.page_size);
+        // `/proc/<pid>/io` 需要同 uid 或 root：读不到 → None（测不到），
+        // 读得到但首轮没基线 → Some(0.0)，与 types 文档一致
+        let (io_read_rate, io_write_rate) = match proc.io().ok() {
+            Some(counters) => {
+                let (r, w) = io
+                    .observe(
+                        pid,
+                        stat.starttime,
+                        counters.read_bytes,
+                        counters.write_bytes,
+                        ctx.now,
+                    )
+                    .unwrap_or((0.0, 0.0));
+                (Some(r), Some(w))
+            }
+            None => (None, None),
+        };
         Some(ProcessSummary {
             pid,
             ppid: u32::try_from(stat.ppid).unwrap_or(0),
@@ -164,6 +190,8 @@ impl Backend {
             threads: u32::try_from(stat.num_threads).unwrap_or(0),
             start_ts: self.boot_time as i64 + (stat.starttime / self.hz) as i64,
             nice: stat.nice as i32,
+            io_read_rate,
+            io_write_rate,
         })
     }
 }

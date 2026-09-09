@@ -204,6 +204,8 @@ mod tests {
             threads: 1,
             start_ts: 1000 + pid as i64,
             nice: 0,
+            io_read_rate: None,
+            io_write_rate: None,
         }
     }
 
