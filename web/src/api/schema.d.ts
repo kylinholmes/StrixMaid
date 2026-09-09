@@ -308,6 +308,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/logs/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 日志磁盘占用与清理能力
+         * @description `bytes` 为 `null` 表示测不到（如 macOS 的日志库目录对非 root 不可读）。
+         *     `modes` 是本机支持的清理方式，清理对话框按它渲染：journald 支持按保留期 /
+         *     目标大小收缩，macOS 统一日志只有「全部抹除」。
+         */
+        get: operations["log_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/logs/vacuum": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 清理日志
+         * @description `keep_secs`（只留最近一段）/ `max_bytes`（收缩到目标大小）/ `erase_all`（全部抹除，
+         *     仅 macOS）**三选一**。journald 只清已归档文件，当前活跃文件不动，清理后占用不会
+         *     精确等于期望值。写操作：入审计；权限由底层裁决（journald 文件属主 / macOS root），
+         *     未提权被拒时返回 403 + `can_retry_elevated`，提权后自动以管理身份重试。
+         */
+        post: operations["log_vacuum"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/metrics/current": {
         parameters: {
             query?: never;
@@ -526,6 +571,29 @@ export interface paths {
          *     是否开机自启 / 关键字过滤。`scope=user` 需要 user manager 可达。
          */
         get: operations["list_units"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/services/timers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 定时任务列表
+         * @description systemd `*.timer`（Linux）与 launchd 定时 job（macOS）统一成一张表。字段缺失都有含义：
+         *     `schedule` 为空数组 = 拿不到调度规则（systemctl 降级路径）；`next_ts` 为 `null` =
+         *     推算不了（timer 已停、launchd `StartInterval` 型）；`last_ts` 为 `null` = 来源不记录。
+         *     cron 是规划中的第三来源，实现前不出现。
+         */
+        get: operations["list_timers"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1687,6 +1755,17 @@ export interface components {
          * @enum {string}
          */
         LogPriority: "emerg" | "alert" | "crit" | "err" | "warning" | "notice" | "info" | "debug";
+        /** @description `GET /api/v1/logs/usage` 的响应体：日志磁盘占用与可用的清理方式。 */
+        LogUsage: {
+            /**
+             * Format: int64
+             * @description 日志占用的磁盘字节数。`None` = 测不到（macOS 的日志库目录对非 root 不可读）。
+             * @example 58720256
+             */
+            bytes?: number | null;
+            /** @description 本机支持的清理方式。空数组 = 完全不支持清理。 */
+            modes: components["schemas"]["VacuumMode"][];
+        };
         /** @description 内存与 swap 容量（`/proc/meminfo`）。这里只放**容量**，实时使用率走指标接口。 */
         MemoryInfo: {
             /**
@@ -2520,6 +2599,58 @@ export interface components {
              */
             utc_offset_secs: number;
         };
+        /** @description `GET /api/v1/services/timers` 列表项：一条定时任务。 */
+        TimerEntry: {
+            /**
+             * @description 定时器当前是否生效（systemd: timer unit active；launchd: job 已加载）。
+             *     `None` = 判定不了——非 root 读不到 launchd system 域的加载状态，不编（spec §6）。
+             */
+            active?: boolean | null;
+            /**
+             * Format: int64
+             * @description 上次触发，unix 秒。从未触发或来源不记录（launchd）为 `None`。
+             */
+            last_ts?: number | null;
+            /**
+             * @description unit 名。systemd 为 `*.timer`；launchd 为补了 `.service` 后缀的 label。
+             *     两者都可直接作为 `/services/{unit}` 的路径参数查详情。
+             * @example logrotate.timer
+             */
+            name: string;
+            /**
+             * Format: int64
+             * @description 下次触发，unix 秒。算不出为 `None`（timer 已停、launchd `StartInterval` 型）。
+             */
+            next_ts?: number | null;
+            /**
+             * @description 调度规则，人可读的原样表达（`OnCalendar=…`、`StartInterval=300s` 等）。
+             *     一条任务可以有多条规则；降级路径拿不到时为空数组（「未知」而非「无规则」）。
+             * @example [
+             *       "OnCalendar=*-*-* 00:00:00"
+             *     ]
+             */
+            schedule: string[];
+            /** @description 作用域。 */
+            scope: components["schemas"]["UnitScope"];
+            /** @description 来源。 */
+            source: components["schemas"]["TimerSource"];
+            /**
+             * @description 触发目标：systemd 是被拉起的 unit 名，launchd 是 program 路径。
+             * @example logrotate.service
+             */
+            target?: string | null;
+        };
+        /**
+         * @description 定时任务来源。
+         *
+         *     三种定时机制的底层完全不同（systemd bus / launchd plist / crontab 文件），
+         *     前端统一成一张表，靠本枚举解释字段缺失：launchd 没有「上次触发」，
+         *     `StartInterval` 型任务算不出「下次触发」。
+         *
+         *     cron 是规划中的第三来源（解析 crontab 文件族），实现后再加变体。
+         * @enum {string}
+         */
+        TimerSource: "systemd_timer" | "launchd";
         /**
          * @description unit 操作。
          *
@@ -2753,6 +2884,48 @@ export interface components {
              * @example 1000
              */
             uid: number;
+        };
+        /**
+         * @description 平台支持的日志清理方式。
+         *
+         *     journald 支持按保留期 / 目标大小收缩（`--vacuum-time` / `--vacuum-size`）；
+         *     macOS 统一日志没有等价物，只有 `log erase` 的「全部抹掉」一档。
+         *     前端按 [`LogUsage::modes`] 决定清理对话框长什么样，而不是按平台猜。
+         * @enum {string}
+         */
+        VacuumMode: "keep_duration" | "max_size" | "erase_all";
+        /** @description `POST /api/v1/logs/vacuum` 的请求体。**三个字段必须恰好给一个**。 */
+        VacuumReq: {
+            /** @description 全部抹除（macOS `log erase --all`）。必须显式传 `true`。 */
+            erase_all?: boolean | null;
+            /**
+             * Format: int64
+             * @description 只保留最近 N 秒的日志（`journalctl --vacuum-time`）。
+             *     注意 journald 只清**已归档**的日志文件，当前活跃文件不动——
+             *     清理后占用不会精确等于期望值。
+             * @example 604800
+             */
+            keep_secs?: number | null;
+            /**
+             * Format: int64
+             * @description 收缩到 N 字节以内（`journalctl --vacuum-size`）。同样只清已归档文件。
+             */
+            max_bytes?: number | null;
+        };
+        /** @description `POST /api/v1/logs/vacuum` 的响应体。 */
+        VacuumResp: {
+            /**
+             * Format: int64
+             * @description 清理后占用。
+             */
+            after_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description 清理前占用。测不到为 `None`。
+             */
+            before_bytes?: number | null;
+            /** @description 工具的原话摘要（如 journalctl 的 `Vacuuming done, freed …`）。 */
+            detail?: string | null;
         };
     };
     responses: never;
@@ -3460,6 +3633,104 @@ export interface operations {
             };
         };
     };
+    log_usage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 占用与清理能力 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogUsage"];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本机没有可用的日志后端 */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    log_vacuum: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VacuumReq"];
+            };
+        };
+        responses: {
+            /** @description 清理完成，带清理前后占用与工具摘要 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VacuumResp"];
+                };
+            };
+            /** @description 三个字段没有恰好给一个 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 被拒且未提权；带 `can_retry_elevated` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本机日志后端不支持所选清理方式 */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     current: {
         parameters: {
             query?: {
@@ -4080,6 +4351,56 @@ export interface operations {
             };
             /** @description systemd 无响应 */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_timers: {
+        parameters: {
+            query?: {
+                /** @description 作用域，缺省 `system`。`user` 指登录用户自己的 user manager。 */
+                scope?: components["schemas"]["UnitScope"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 定时任务列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimerEntry"][];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本机没有服务管理器 */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务管理器暂时不可达 */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
