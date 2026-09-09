@@ -6,7 +6,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # ci/** :打包与发布物相关的分支推上来就跑全流程,不必等 PR
+    branches: [main, "ci/**"]
   pull_request:
   workflow_dispatch:
 
@@ -148,6 +149,82 @@ jobs:
         with:
           name: strixmaid-dist-x86_64
           path: strixmaid-*-x86_64.tar.gz
+
+  # Ubuntu/Debian 包（scripts/package-deb.sh）。二进制与 tar.gz 发布物同源:
+  # server/agent 来自 build-musl(静态),helper 来自 build-helper(glibc 2.28)。
+  # 版本号带 git 短 sha,同一 Cargo 版本的多次构建可区分。
+  deb:
+    needs: [build-musl, build-helper]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 组装 deb
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          debver="${version}+git$(git rev-parse --short HEAD)"
+          mkdir -p bins
+          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid          bins/
+          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid-agent    bins/
+          install -m 0755 artifacts/strixmaid-helper-gnu228/strixmaid-helper bins/
+          scripts/package-deb.sh --bins bins --version "$debver" --out dist-deb
+      - name: 包内容自检
+        run: |
+          for deb in dist-deb/*.deb; do
+            echo "== $deb"
+            dpkg-deb --info "$deb"
+            dpkg-deb --contents "$deb"
+          done
+          # 主包必须带 unit、pam.d conffile 与两个二进制
+          c=$(dpkg-deb --contents dist-deb/strixmaid_*.deb)
+          for f in ./usr/bin/strixmaid ./usr/bin/strixmaid-helper \
+                   ./lib/systemd/system/strixmaid.service ./etc/pam.d/strixmaid; do
+            echo "$c" | grep -q " $f\$" || { echo "deb 缺 $f"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strixmaid-deb-amd64
+          path: dist-deb/*.deb
+
+  # deb 真装真跑:GitHub 的 runner 本身就是带 systemd 的 Ubuntu VM,
+  # apt 安装 → 起服务 → API 应答 → 卸载/purge 干净,整条路径都验。
+  deb-smoke:
+    needs: [deb]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: strixmaid-deb-amd64
+      - name: apt 安装(走依赖解析,顺带验 Depends 声明)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./strixmaid_*_amd64.deb ./strixmaid-agent_*_amd64.deb
+      - name: 安装后自检
+        run: |
+          strixmaid --version
+          test -e /etc/strixmaid/config.toml || { echo "postinst 没生成配置"; exit 1; }
+          test -e /etc/pam.d/strixmaid || { echo "缺 pam.d"; exit 1; }
+          dpkg -L strixmaid-agent | grep -q '/usr/bin/strixmaid-agent'
+      - name: 服务能起、API 能应答
+        run: |
+          sudo systemctl start strixmaid
+          ok=0
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:9700/api/v1/capabilities >/dev/null && { ok=1; break; }
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { sudo journalctl -u strixmaid --no-pager | tail -50; exit 1; }
+          curl -sf http://127.0.0.1:9700/api/v1/capabilities | head -c 300; echo
+          sudo systemctl stop strixmaid
+      - name: 卸载与 purge 干净
+        run: |
+          sudo apt-get remove -y strixmaid strixmaid-agent
+          test -e /etc/strixmaid/config.toml || { echo "remove 不该删配置"; exit 1; }
+          sudo apt-get purge -y strixmaid
+          test ! -e /etc/strixmaid/config.toml || { echo "purge 后配置还在"; exit 1; }
 
   # roadmap/07 的 root 环境验收（§1.2 / §5 / 05 §5.2）。
   #
