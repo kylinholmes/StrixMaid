@@ -37,11 +37,12 @@
   background: var(--sel);
 }
 
-/* ---- 布局:表 + 右侧抽屉 ---- */
+/* ---- 布局:表 + 右侧抽屉(抽屉悬浮,不挤表格) ---- */
 .page {
   flex: 1;
   min-height: 0;
   display: flex;
+  position: relative;
 }
 
 .tableArea {
@@ -214,12 +215,17 @@ button.twist:hover {
   font-weight: 400;
 }
 
-/* ---- 右侧抽屉 ---- */
+/* ---- 右侧抽屉:悬浮在表格之上,弹出层语言(同 Menu/Dialog 的 shadow-pop) ---- */
 .drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
   width: 360px;
-  flex: none;
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--line-strong);
   background: var(--surface);
+  box-shadow: var(--shadow-pop);
   display: flex;
   flex-direction: column;
   min-height: 0;
