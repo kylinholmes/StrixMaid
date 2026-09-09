@@ -40,6 +40,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: musl 工具链
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # web/dist 虽然提交在仓库里(本地无 bun 也能 cargo build),但那只是快照,
+      # 会落后于 web/src——曾经发生过:deb 装出来的 UI 停在几十个提交之前。
+      # 发布物的前端必须在这里现场构建,覆盖掉快照再嵌入。
+      - uses: oven-sh/setup-bun@v2
+      - name: 构建前端(嵌入用,覆盖仓库里的 dist 快照)
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
       - name: 静态构建
         run: cargo build --release --target x86_64-unknown-linux-musl -p strixmaid-server -p strixmaid-agent
       - name: 断言静态链接
