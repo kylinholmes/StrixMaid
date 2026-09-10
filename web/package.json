@@ -1,0 +1,37 @@
+{
+  "name": "strixmaid-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "check": "biome check src",
+    "fix": "biome check --write src",
+    "typecheck": "tsc -b --noEmit",
+    "test": "vitest run",
+    "api": "openapi-typescript http://127.0.0.1:9700/api/v1/openapi.json -o src/api/schema.d.ts"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.3",
+    "zustand": "^5.0.8",
+    "@tanstack/react-query": "^5.90.2",
+    "openapi-fetch": "^0.14.0",
+    "lucide-react": "^0.544.0",
+    "uplot": "^1.6.32"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.4",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.3",
+    "openapi-typescript": "^7.9.1",
+    "playwright": "^1.62.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}

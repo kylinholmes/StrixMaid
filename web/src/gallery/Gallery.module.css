@@ -1,0 +1,220 @@
+.page {
+  min-height: 100dvh;
+  background: var(--ground);
+}
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  align-items: center;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 2px solid var(--line-strong);
+}
+.ctl {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.ctl > span {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.wrap {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 28px 20px 120px;
+}
+.lede {
+  color: var(--ink-2);
+  max-width: 76ch;
+  margin: 0 0 30px;
+  font-size: 13px;
+}
+.lede b {
+  color: var(--ink);
+}
+.lede code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+}
+
+.sec {
+  margin: 0 0 44px;
+  border-top: 2px solid var(--line-strong);
+  padding-top: 14px;
+}
+.secHead {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.secNum {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+}
+.secHead h2 {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+.secNote {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: 0 0 12px;
+  max-width: 84ch;
+  line-height: 1.6;
+}
+.secNote b {
+  color: var(--ink-2);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.pad {
+  padding: 14px;
+}
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.col {
+  display: flex;
+  gap: 14px;
+  flex-direction: column;
+}
+.grid2 {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.grid3 {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.ramp {
+  display: flex;
+  height: 54px;
+  border: 1px solid var(--line);
+}
+.ramp > div {
+  flex: 1;
+  position: relative;
+}
+.ramp span {
+  position: absolute;
+  bottom: 3px;
+  left: 4px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  opacity: 0.85;
+}
+.swatches {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.sw {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.sw i {
+  width: 13px;
+  height: 13px;
+  display: block;
+  flex: none;
+}
+
+.label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 8px 12px 5px;
+}
+.menuHost {
+  position: relative;
+  height: 236px;
+  background: var(--surface-2);
+  padding: 12px;
+  overflow: hidden;
+}
+.menuBg {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 26px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 概念页 */
+.mock {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  height: 480px;
+  display: flex;
+  overflow: hidden;
+}
+.mockMain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.mockTop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex: none;
+}
+.mockTop b {
+  font-size: 12.5px;
+}
+.mockTop .os {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.mockBody {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  scrollbar-gutter: stable;
+}
+.mockDetail {
+  border-top: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  padding: 12px 14px;
+  flex: none;
+}

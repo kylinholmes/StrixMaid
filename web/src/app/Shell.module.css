@@ -1,0 +1,29 @@
+.shell {
+  height: 100dvh;
+  display: flex;
+}
+
+/* key 随锁定状态切换,登录表单⇄路由内容交替时整块淡入 */
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ground);
+  animation: contentIn 240ms ease;
+}
+
+@keyframes contentIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content {
+    animation: none;
+  }
+}

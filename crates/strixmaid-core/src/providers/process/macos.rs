@@ -25,7 +25,12 @@
 //! | `cwd` | 需要 `PROC_PIDVNODEPATHINFO`，`libc` 未声明其结构体 |
 //! | `fds` | 需要 `PROC_PIDLISTFDS` 再对每个 fd 单独取路径，代价与联调收益不匹配 |
 //! | `tty` | `e_tdev` 是设备号，映射回名字要扫 `/dev` |
-//! | `io_*` | 需要 `proc_pid_rusage`，`libc` 未声明 |
+//!
+//! # 磁盘 IO
+//!
+//! `proc_pid_rusage(pid, RUSAGE_INFO_V2, …)` 的 `ri_diskio_bytesread/written`
+//! 是累计磁盘字节数（`libc` 未声明，本文件手写 FFI）。**只有同 uid 或 root 能读**
+//! 别人的进程，读不到 → 速率为 `None`。差分见 [`super::io`]。
 //!
 //! `cmdline` 与 `environ` 走 `sysctl KERN_PROCARGS2`：**只有同 uid 或 root 能读**，
 //! 别人的进程会退化成 `None`（列表里则退回进程名）。这与 Linux 上读不到
@@ -38,6 +43,7 @@ use strixmaid_types::{ApiError, ApiResult};
 
 use super::super::Probe;
 use super::cpu::CpuSamples;
+use super::io::IoSamples;
 use super::{Context, users::UserTable};
 use crate::platform::macos::{c_array_to_string, sysctl_scalar};
 
@@ -90,8 +96,13 @@ impl Backend {
         self.mem_total
     }
 
-    /// 遍历全部 pid，顺带更新 CPU 快照并清理已消失的 pid。
-    pub fn list(&self, cpu: &mut CpuSamples, ctx: &Context) -> Vec<ProcessSummary> {
+    /// 遍历全部 pid，顺带更新 CPU / IO 快照并清理已消失的 pid。
+    pub fn list(
+        &self,
+        cpu: &mut CpuSamples,
+        io: &mut IoSamples,
+        ctx: &Context,
+    ) -> Vec<ProcessSummary> {
         let Some(pids) = list_pids() else {
             return Vec::new();
         };
@@ -107,11 +118,12 @@ impl Backend {
             let cmdline = ProcArgs::read_into(pid as i32, &mut buf)
                 .map(|a| a.argv.join(" "))
                 .filter(|s| !s.is_empty());
-            let summary = summarize(pid, &info, cmdline, cpu, ctx);
+            let summary = summarize(pid, &info, cmdline, cpu, io, ctx);
             seen.insert(summary.pid);
             all.push(summary);
         }
         cpu.retain_seen(&seen);
+        io.retain_seen(&seen);
         all
     }
 
@@ -120,6 +132,7 @@ impl Backend {
         &self,
         raw_pid: i32,
         cpu: &mut CpuSamples,
+        io: &mut IoSamples,
         ctx: &Context,
     ) -> ApiResult<ProcessDetail> {
         let pid = raw_pid as u32;
@@ -131,7 +144,8 @@ impl Backend {
             .as_ref()
             .map(|a| a.argv.join(" "))
             .filter(|s| !s.is_empty());
-        let summary = summarize(pid, &info, cmdline, cpu, ctx);
+        let summary = summarize(pid, &info, cmdline, cpu, io, ctx);
+        let disk = disk_io(pid);
 
         Ok(ProcessDetail {
             summary,
@@ -146,8 +160,8 @@ impl Backend {
             unit: None,
             environ: args.map(|a| a.environ),
             fds: None,
-            io_read_bytes: None,
-            io_write_bytes: None,
+            io_read_bytes: disk.map(|(r, _)| r),
+            io_write_bytes: disk.map(|(_, w)| w),
         })
     }
 }
@@ -161,6 +175,7 @@ fn summarize(
     info: &libc::proc_taskallinfo,
     cmdline: Option<String>,
     cpu: &mut CpuSamples,
+    io: &mut IoSamples,
     ctx: &Context,
 ) -> ProcessSummary {
     let bsd = &info.pbsd;
@@ -185,6 +200,18 @@ fn summarize(
     let rss_bytes = task.pti_resident_size;
     let uid = bsd.pbi_uid;
 
+    // 磁盘累计字节 → 差分成速率。读不到（别人的进程）→ None，
+    // 读得到但首轮没基线 → Some(0.0)，与 types 文档一致。
+    let (io_read_rate, io_write_rate) = match disk_io(pid) {
+        Some((r, w)) => {
+            let (rr, wr) = io
+                .observe(pid, bsd.pbi_start_tvsec, r, w, ctx.now)
+                .unwrap_or((0.0, 0.0));
+            (Some(rr), Some(wr))
+        }
+        None => (None, None),
+    };
+
     ProcessSummary {
         pid,
         ppid: bsd.pbi_ppid,
@@ -200,7 +227,58 @@ fn summarize(
         threads: u32::try_from(task.pti_threadnum).unwrap_or(0),
         start_ts: bsd.pbi_start_tvsec as i64,
         nice: bsd.pbi_nice,
+        io_read_rate,
+        io_write_rate,
     }
+}
+
+/// `rusage_info_v2`（`sys/resource.h`）。`libc` 没有导出，按头文件手写布局；
+/// 只用到最后两个字段，但前面的必须逐一列出才能对上偏移。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct RUsageInfoV2 {
+    ri_uuid: [u8; 16],
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_interrupt_wkups: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
+}
+
+/// `sys/resource.h` 的 `RUSAGE_INFO_V2`。
+const RUSAGE_INFO_V2: libc::c_int = 2;
+
+unsafe extern "C" {
+    /// `libproc.h`：`int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer)`。
+    /// `rusage_info_t` 是 `void *`，按 flavor 决定实际结构，这里恒用 V2。
+    fn proc_pid_rusage(pid: libc::c_int, flavor: libc::c_int, buffer: *mut RUsageInfoV2)
+    -> libc::c_int;
+}
+
+/// 进程累计磁盘（读, 写）字节数。别人的进程无权限 / 进程已退出 → `None`。
+fn disk_io(pid: u32) -> Option<(u64, u64)> {
+    let mut info = std::mem::MaybeUninit::<RUsageInfoV2>::zeroed();
+    // SAFETY: buffer 指向一整个 RUsageInfoV2，布局照 SDK 头文件逐字段抄写。
+    let rc = unsafe { proc_pid_rusage(pid as libc::c_int, RUSAGE_INFO_V2, info.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: rc == 0 表示内核已写满结构体。
+    let info = unsafe { info.assume_init() };
+    Some((info.ri_diskio_bytesread, info.ri_diskio_byteswritten))
 }
 
 /// uid → 用户名。
@@ -528,7 +606,9 @@ mod tests {
         assert_eq!(d.cgroup, None, "macOS 没有 cgroup");
         assert_eq!(d.unit, None);
         assert_eq!(d.fds, None);
-        assert_eq!(d.io_read_bytes, None);
+        // 自己的进程 rusage 可读:累计磁盘字节与速率都该在
+        assert!(d.io_read_bytes.is_some(), "proc_pid_rusage 对自己必须可读");
+        assert!(d.summary.io_read_rate.is_some());
         // 自己的进程，这些必须有
         assert!(d.environ.as_ref().is_some_and(|e| !e.is_empty()));
         assert!(d.summary.user.is_some(), "自己的用户名必须解析得出");

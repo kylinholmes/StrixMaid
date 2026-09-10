@@ -3,6 +3,13 @@ Description=StrixMaid agent
 Documentation=https://github.com/kylinholmes/Strix
 After=network-online.target
 Wants=network-online.target
+# 没写配置就不启动(status 显示 condition failed,而不是每 2 秒崩一次刷日志)。
+# server_url 与 token 没有可猜的默认值,起了也只会立即退出。
+# 纯环境变量部署(STRIXMAID_AGENT_*)可用 drop-in 覆盖掉这行。
+ConditionPathExists=/etc/strixmaid/agent.toml
+# 配置错误是确定性失败,重启多少次都一样:一分钟内崩 5 次就停下等人来修
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

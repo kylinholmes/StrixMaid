@@ -123,6 +123,23 @@ launchd 与 systemd 的模型只重合一半。完整映射表见
 > 那才是它该待的地方。`polkit` 在 macOS 上恒为 `false`——它的授权走
 > Authorization Services / TCC，与 polkit 的「按 action id 询问策略」模型对不上。
 
+### 3.7 PAM 服务配置(认证成功路径的前提)
+
+OpenPAM 在**服务文件不存在**时整体回退到 `/etc/pam.d/other`,而 macOS 的 `other`
+是四行 `pam_deny`——表现为「密码正确也认证失败」,helper 日志只有一句
+`认证失败: pam_authenticate`,极具迷惑性(2026-09-09 实测踩中)。两种解法:
+
+1. **正规**:装 macOS 模板(骨架取自系统自带 `/etc/pam.d/login`,认证走 `pam_opendirectory`):
+
+   ```sh
+   sudo install -m 0644 packaging/pam.d/strixmaid.macos /etc/pam.d/strixmaid
+   ```
+
+2. **免 sudo 的开发期权宜**:配置里 `pam_service = "login"`,借用系统自带的
+   `login` 服务栈。语义上是冒名,只该出现在本机联调的临时配置里。
+
+`install.sh` 依赖 `/etc/os-release`,是 Linux 专属;macOS 模板只提供文件、手工安装。
+
 ## 4. 平台 API 差异的几个坑
 
 这几条不是设计选择，是 macOS 内核 / 库与 Linux 的既有差异，**记下来以免重复踩**：

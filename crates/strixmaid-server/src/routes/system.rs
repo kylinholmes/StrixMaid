@@ -50,7 +50,7 @@ use crate::error::ApiResult;
 pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
     OpenApiRouter::new()
         .routes(routes!(info))
-        .routes(routes!(health))
+        .routes(routes!(system_health))
         .routes(routes!(time))
         .routes(routes!(set_hostname))
         .routes(routes!(set_timezone))
@@ -99,7 +99,7 @@ pub async fn info(
         (status = 500, description = "采集任务异常", body = ApiError),
     ),
 )]
-pub async fn health(
+pub async fn system_health(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
 ) -> ApiResult<Json<HealthReport>> {

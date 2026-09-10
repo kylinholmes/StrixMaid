@@ -358,22 +358,39 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn 本机_list_proc_self_不炸() {
+        // procfs 是 Linux 专有的。按 roadmap/README §7，依赖真实系统的用例用运行期
+        // 探测跳过而非 #[ignore]，这样在有 procfs 的机器上它永远是跑着的。
+        if !Path::new("/proc/self").exists() {
+            eprintln!("本机无 procfs，跳过 /proc/self 用例");
+            return;
+        }
         let fs = FsProvider::new();
         let listing = fs.list("/proc/self", &roots(&["/"])).await.unwrap();
         assert!(!listing.entries.is_empty());
         // /proc/self 下必有 status 这个普通文件与 fd 这个目录。
         assert!(listing.entries.iter().any(|e| e.name == "status"));
-        // 排序：目录都在非目录之前。
-        let first_file = listing
-            .entries
-            .iter()
-            .position(|e| e.kind != FileKind::Dir);
-        if let Some(i) = first_file {
-            assert!(
-                listing.entries[i..].iter().all(|e| e.kind != FileKind::Dir),
-                "目录必须都排在前面"
-            );
-        }
+    }
+
+    /// 排序规则（目录在前、组内按名）不依赖任何系统路径，单独用临时目录测，
+    /// 这样它在无 procfs 的平台上也照跑。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_目录在前组内按名排序() {
+        let dir = std::env::temp_dir().join(format!("strixmaid-fs-sort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("z_dir")).unwrap();
+        std::fs::create_dir_all(dir.join("a_dir")).unwrap();
+        std::fs::write(dir.join("b_file"), b"x").unwrap();
+        std::fs::write(dir.join("a_file"), b"x").unwrap();
+
+        let fs = FsProvider::new();
+        let listing = fs
+            .list(&dir.to_string_lossy(), &roots(&["/"]))
+            .await
+            .unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a_dir", "z_dir", "a_file", "b_file"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -381,15 +398,18 @@ mod tests {
         let fs = FsProvider::new();
         let all = roots(&["/"]);
 
-        let c = fs.read("/etc/hostname", &all).await.unwrap();
+        // 用 /etc/passwd 而不是 /etc/hostname：后者是 Linux 惯例，macOS 上不存在。
+        let c = fs.read("/etc/passwd", &all).await.unwrap();
         assert!(!c.content.is_empty());
         assert!(!c.lossy);
         assert!(!c.truncated);
         assert_eq!(c.size_bytes as usize, c.content.len());
 
-        // stat 大小为 0 的 procfs 文件也要能读。
-        let c = fs.read("/proc/self/status", &all).await.unwrap();
-        assert!(c.content.contains("Pid"));
+        // stat 大小为 0 的 procfs 文件也要能读（procfs 只有 Linux 有）。
+        if Path::new("/proc/self/status").exists() {
+            let c = fs.read("/proc/self/status", &all).await.unwrap();
+            assert!(c.content.contains("Pid"));
+        }
 
         let err = fs.read("/bin/ls", &all).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest, "{err:?}");
@@ -401,7 +421,7 @@ mod tests {
         let err = fs.read("/no/such/strixmaid-file", &all).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
 
-        let err = fs.list("/etc/hostname", &all).await.unwrap_err();
+        let err = fs.list("/etc/passwd", &all).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest, "对文件 list 应报不是目录");
     }
 
@@ -456,9 +476,24 @@ mod tests {
             eprintln!("以 root 运行，跳过无权限用例");
             return;
         }
+        // 不用 /etc/shadow：那是 Linux 专有路径，macOS 上不存在，会得到 NotFound
+        // 而不是 PermissionDenied——断言看着是过了权限判断，其实测的是另一条分支。
+        // 自己造一个 0o000 的文件，两个平台语义一致。
+        let dir = std::env::temp_dir().join(format!("strixmaid-fs-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("secret");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+
         let fs = FsProvider::new();
-        let err = fs.read("/etc/shadow", &roots(&["/"])).await.unwrap_err();
-        assert_eq!(err.code, ErrorCode::PermissionDenied);
+        let err = fs
+            .read(&secret.to_string_lossy(), &roots(&["/"]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

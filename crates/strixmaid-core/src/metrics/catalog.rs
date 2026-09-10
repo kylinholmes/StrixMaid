@@ -3,9 +3,10 @@
 //! 采集器只引用这里的 `pub const` 名字常量，不写字面量；`GET /api/v1/metrics/series`
 //! 用 [`MetricDef::series_meta`] 把表项导出成 [`SeriesMeta`]。
 //!
-//! # 34 项的口径（roadmap/08 §4）
+//! # 36 项的口径（roadmap/08 §4）
 //!
-//! 本表在 2026-08-28 由 58 项裁到 34 项，裁剪按三条规则执行（§4.1）：
+//! 本表在 2026-08-28 由 58 项裁到 34 项，2026-09-09 为 GPU 页补 2 项
+//! （`gpu.engine.usage` / `gpu.mem_alloc`）。裁剪按三条规则执行（§4.1）：
 //! 派生量不存（`cpu.idle` = 100 − 其余）、同向计数器合成一条异常信号
 //! （`net.errors`）、慢变量进健康检查而非时序库（inode → `disk.inodes`）。
 //! 四个**合并项**的加法在采集器里做：`cpu.irq` = 硬 + 软中断、`mem.cached` =
@@ -63,6 +64,8 @@ pub mod label {
     pub const IFACE: &str = "iface";
     /// DRM 卡名，如 `card0`。
     pub const GPU: &str = "gpu";
+    /// GPU 引擎名，驱动给什么报什么（Apple AGX：`renderer` / `tiler`）。
+    pub const ENGINE: &str = "engine";
 }
 
 // ============================ 指标名 ============================
@@ -78,7 +81,13 @@ pub const CPU_STEAL: &str = "cpu.steal";
 pub const CPU_CORE_USAGE: &str = "cpu.core.usage";
 // --- GPU（标签 gpu） ---
 pub const GPU_USAGE: &str = "gpu.usage";
+/// 各引擎利用率（标签 engine + gpu）。统一内存 Mac 上是 renderer/tiler；
+/// 测不到引擎细分的平台不产出（spec §6）。
+pub const GPU_ENGINE_USAGE: &str = "gpu.engine.usage";
 pub const GPU_MEM_USED: &str = "gpu.mem_used";
+/// GPU 已向系统申请的内存。统一内存架构没有「显存总量」，
+/// 这是显存条唯一诚实的分母（used ≤ alloc）。
+pub const GPU_MEM_ALLOC: &str = "gpu.mem_alloc";
 pub const GPU_MEM_TOTAL: &str = "gpu.mem_total";
 pub const GPU_TEMP: &str = "gpu.temp";
 // --- 内存 ---
@@ -191,8 +200,10 @@ const DEV: &[&str] = &[label::DEV];
 const MOUNT: &[&str] = &[label::MOUNT];
 const IFACE: &[&str] = &[label::IFACE];
 const GPU: &[&str] = &[label::GPU];
+// 键序即 canonical 序（按字母排）：engine < gpu
+const GPU_ENGINE: &[&str] = &[label::ENGINE, label::GPU];
 
-/// 全部 P0 指标（roadmap/08 §4.2，34 项）。顺序即 API 里的展示顺序。
+/// 全部 P0 指标（roadmap/08 §4.2，36 项）。顺序即 API 里的展示顺序。
 pub const CATALOG: &[MetricDef] = &[
     // CPU 总
     def(
@@ -234,7 +245,21 @@ pub const CATALOG: &[MetricDef] = &[
     ),
     // GPU
     def(GPU_USAGE, PCT, "GPU 利用率", GPU, Panel::Gpu),
+    def(
+        GPU_ENGINE_USAGE,
+        PCT,
+        "各引擎利用率（engine=renderer/tiler…，按驱动提供）",
+        GPU_ENGINE,
+        Panel::Gpu,
+    ),
     def(GPU_MEM_USED, BYTES, "已用显存", GPU, Panel::Gpu),
+    def(
+        GPU_MEM_ALLOC,
+        BYTES,
+        "GPU 已向系统申请的内存（统一内存架构下显存条的分母）",
+        GPU,
+        Panel::Gpu,
+    ),
     def(GPU_MEM_TOTAL, BYTES, "显存总量", GPU, Panel::Gpu),
     def(GPU_TEMP, DEG, "GPU 温度", GPU, Panel::Gpu),
     // 内存
@@ -414,10 +439,11 @@ mod tests {
         }
     }
 
-    /// roadmap/08 §4.2 的 34 项快照，防止误删误增。改动 CATALOG 必须同步改这里，
+    /// roadmap/08 §4.2 的 36 项快照，防止误删误增。改动 CATALOG 必须同步改这里，
     /// 且新增名不得与 `migrations/0002_metrics_trim.sql` 的删除名单重合。
+    /// （2026-09-09 由 34 增到 36：GPU 页补 `gpu.engine.usage` / `gpu.mem_alloc`。）
     #[test]
-    fn 常量表与_roadmap_08_的_34_项快照一致() {
+    fn 常量表与_roadmap_08_的_36_项快照一致() {
         let expected: HashSet<&str> = [
             "cpu.usage",
             "cpu.system",
@@ -426,7 +452,9 @@ mod tests {
             "cpu.steal",
             "cpu.core.usage",
             "gpu.usage",
+            "gpu.engine.usage",
             "gpu.mem_used",
+            "gpu.mem_alloc",
             "gpu.mem_total",
             "gpu.temp",
             "mem.total",
@@ -457,7 +485,7 @@ mod tests {
         .into();
         let actual: HashSet<&str> = CATALOG.iter().map(|d| d.name).collect();
         assert_eq!(actual, expected);
-        assert_eq!(CATALOG.len(), 34, "34 项之外的增删必须走 roadmap/08 的评审");
+        assert_eq!(CATALOG.len(), 36, "36 项之外的增删必须走 roadmap/08 的评审");
     }
 
     #[test]

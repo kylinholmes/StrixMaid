@@ -30,7 +30,9 @@ pub mod oslog;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use strixmaid_types::log::{BootInfo, LogEntry, LogEntryDetail, LogPage, LogQuery};
+use strixmaid_types::log::{
+    BootInfo, LogEntry, LogEntryDetail, LogPage, LogQuery, LogUsage, VacuumReq, VacuumResp,
+};
 use strixmaid_types::{ApiError, ApiResult};
 use tokio::sync::broadcast;
 
@@ -92,6 +94,54 @@ pub trait LogProvider: Provider {
 
     /// 从「现在」开始跟随。`q.cursor` / `q.limit` / `q.since` / `q.until` 被忽略。
     async fn follow(&self, q: &LogQuery) -> ApiResult<LogFollow>;
+
+    /// 磁盘占用与本机支持的清理方式。占用测不到时 `bytes` 为 `None`，不报错。
+    async fn usage(&self) -> ApiResult<LogUsage>;
+
+    /// 清理日志。请求必须恰好指定一种方式（[`validate_vacuum`]），
+    /// 且该方式在 [`LogUsage::modes`] 里——否则 `InvalidRequest`。
+    /// 权限由底层工具裁决（journald 文件属主 / macOS root），被拒映射
+    /// `PermissionDenied` + `can_retry_elevated`。
+    async fn vacuum(&self, req: &VacuumReq) -> ApiResult<VacuumResp>;
+}
+
+/// 校验清理请求：三个字段恰好给一个。返回给了哪一个。
+pub fn validate_vacuum(req: &VacuumReq) -> ApiResult<strixmaid_types::log::VacuumMode> {
+    use strixmaid_types::log::VacuumMode;
+    let picked = [
+        req.keep_secs.map(|_| VacuumMode::KeepDuration),
+        req.max_bytes.map(|_| VacuumMode::MaxSize),
+        // erase_all: false 视同没给,不许拿 false 当占位
+        req.erase_all.filter(|v| *v).map(|_| VacuumMode::EraseAll),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    match picked.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(ApiError::invalid_request(
+            "keep_secs / max_bytes / erase_all 必须恰好给一个",
+        )),
+        _ => Err(ApiError::invalid_request(
+            "keep_secs / max_bytes / erase_all 只能给一个",
+        )),
+    }
+}
+
+/// 解析 `journalctl` 输出里的人类可读容量（`56.0M` / `1.5G` / `823B`），二进制底。
+/// 认不出返回 `None`——上层把「测不到」如实传下去，不编数字。
+pub fn parse_human_size(token: &str) -> Option<u64> {
+    let t = token.trim().trim_end_matches('B');
+    let (num, mult) = match t.chars().last()? {
+        'K' => (&t[..t.len() - 1], 1024f64),
+        'M' => (&t[..t.len() - 1], 1024f64 * 1024.0),
+        'G' => (&t[..t.len() - 1], 1024f64 * 1024.0 * 1024.0),
+        'T' => (&t[..t.len() - 1], 1024f64 * 1024.0 * 1024.0 * 1024.0),
+        c if c.is_ascii_digit() || c == '.' => (t, 1.0),
+        _ => return None,
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    (v >= 0.0).then_some((v * mult) as u64)
 }
 
 /// 归一化 `limit`：缺省 [`DEFAULT_LIMIT`]，`0` 或超过 [`MAX_LIMIT`] 报 400。
@@ -183,11 +233,67 @@ impl LogProvider for FileLogs {
         // todo!: inotify 监听追加。
         todo!("FileLogs::follow 未实现")
     }
+
+    async fn usage(&self) -> ApiResult<LogUsage> {
+        // todo!: du /var/log/*.log。
+        todo!("FileLogs::usage 未实现")
+    }
+
+    async fn vacuum(&self, _req: &VacuumReq) -> ApiResult<VacuumResp> {
+        // todo!: logrotate 才是正道,这里最多做截断。
+        todo!("FileLogs::vacuum 未实现")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 容量解析() {
+        assert_eq!(parse_human_size("823B"), Some(823));
+        assert_eq!(parse_human_size("56.0M"), Some(58_720_256));
+        assert_eq!(parse_human_size("1.5G"), Some(1_610_612_736));
+        assert_eq!(parse_human_size("16K"), Some(16_384));
+        assert_eq!(parse_human_size("0"), Some(0));
+        assert_eq!(parse_human_size("garbage"), None);
+        assert_eq!(parse_human_size(""), None);
+    }
+
+    #[test]
+    fn 清理请求校验() {
+        use strixmaid_types::log::VacuumMode;
+        let ok = validate_vacuum(&VacuumReq {
+            keep_secs: Some(86_400),
+            ..Default::default()
+        });
+        assert_eq!(ok.unwrap(), VacuumMode::KeepDuration);
+        assert_eq!(
+            validate_vacuum(&VacuumReq {
+                erase_all: Some(true),
+                ..Default::default()
+            })
+            .unwrap(),
+            VacuumMode::EraseAll
+        );
+        // 什么都不给 / 给两个 / erase_all=false 都不行
+        assert!(validate_vacuum(&VacuumReq::default()).is_err());
+        assert!(
+            validate_vacuum(&VacuumReq {
+                keep_secs: Some(1),
+                max_bytes: Some(1),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_vacuum(&VacuumReq {
+                erase_all: Some(false),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn limit_normalization() {

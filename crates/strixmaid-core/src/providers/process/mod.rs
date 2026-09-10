@@ -30,6 +30,7 @@
 
 pub mod cpu;
 pub mod filter;
+pub mod io;
 pub mod users;
 
 #[cfg(target_os = "linux")]
@@ -61,6 +62,7 @@ use strixmaid_types::{ApiError, ApiResult};
 
 use super::{Probe, Provider};
 use cpu::CpuSamples;
+use io::IoSamples;
 use users::{UserDb, UserTable};
 
 /// 进程 provider。内部是 `Arc`，`Clone` 廉价，便于丢进 `spawn_blocking`。
@@ -70,7 +72,8 @@ pub struct ProcProvider {
 }
 
 struct Inner {
-    cpu: Mutex<CpuSamples>,
+    /// CPU 与 IO 的差分基线放同一把锁下:一轮列表对两者的读改是同一临界区。
+    samples: Mutex<(CpuSamples, IoSamples)>,
     users: UserDb,
     sys: sys::Backend,
 }
@@ -86,7 +89,7 @@ impl ProcProvider {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
-                cpu: Mutex::new(CpuSamples::new()),
+                samples: Mutex::new((CpuSamples::new(), IoSamples::new())),
                 users: UserDb::new(),
                 sys: sys::Backend::new(),
             }),
@@ -96,9 +99,10 @@ impl ProcProvider {
     /// 是否已有一轮 CPU 快照（否则下一次列表的 CPU% 全为 0）。
     pub fn has_baseline(&self) -> bool {
         self.inner
-            .cpu
+            .samples
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .0
             .has_baseline()
     }
 
@@ -118,8 +122,9 @@ impl ProcProvider {
     pub fn list_blocking(&self, query: &ProcessListQuery) -> Vec<ProcessSummary> {
         let ctx = self.context();
         let all = {
-            let mut cpu = self.inner.cpu.lock().unwrap_or_else(|e| e.into_inner());
-            self.inner.sys.list(&mut cpu, &ctx)
+            let mut guard = self.inner.samples.lock().unwrap_or_else(|e| e.into_inner());
+            let (cpu, io) = &mut *guard;
+            self.inner.sys.list(cpu, io, &ctx)
         };
         filter::apply(all, query, |name| ctx.users.uid_of(name))
     }
@@ -128,8 +133,9 @@ impl ProcProvider {
     pub fn detail_blocking(&self, pid: u32) -> ApiResult<ProcessDetail> {
         let raw_pid = checked_pid(pid)?;
         let ctx = self.context();
-        let mut cpu = self.inner.cpu.lock().unwrap_or_else(|e| e.into_inner());
-        self.inner.sys.detail(raw_pid, &mut cpu, &ctx)
+        let mut guard = self.inner.samples.lock().unwrap_or_else(|e| e.into_inner());
+        let (cpu, io) = &mut *guard;
+        self.inner.sys.detail(raw_pid, cpu, io, &ctx)
     }
 
     /// `POST /processes/{pid}/signal`：`kill(2)`。

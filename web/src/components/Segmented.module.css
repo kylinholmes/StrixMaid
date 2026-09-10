@@ -1,0 +1,49 @@
+.wrap {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  /* fieldset 默认带 margin/padding，且 min-inline-size 为 min-content，会撑破 flex 布局 */
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+}
+/* 视觉隐藏但仍被读屏读到 */
+.legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.item {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 11px;
+  background: transparent;
+  color: var(--ink-2);
+  border: 0;
+  border-left: 1px solid var(--line);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--t-color),
+    color var(--t-color);
+}
+.item:first-child {
+  border-left: 0;
+}
+.item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.on {
+  background: var(--ink);
+  color: var(--ground);
+}
+.on:hover {
+  background: var(--ink);
+  color: var(--ground);
+}

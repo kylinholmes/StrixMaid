@@ -27,13 +27,15 @@ use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
-use strixmaid_types::log::{BootInfo, LogEntryDetail, LogPage, LogQuery};
+use strixmaid_types::log::{
+    BootInfo, LogEntryDetail, LogPage, LogQuery, LogUsage, VacuumReq, VacuumResp,
+};
 use strixmaid_types::rpc::{self, CursorParams};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::AuthState;
-use crate::auth::exec::{self, Privilege};
+use crate::auth::exec::{self, RequestOrigin};
 use crate::error::ApiResult;
 
 /// 构建日志路由。挂到 `/api/v1` 之下（路径已含 `/logs` 前缀）。
@@ -44,7 +46,66 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
         .routes(routes!(query_logs))
         .routes(routes!(log_entry))
         .routes(routes!(list_boots))
+        .routes(routes!(log_usage))
+        .routes(routes!(log_vacuum))
         .with_state(auth)
+}
+
+/// 日志磁盘占用与清理能力
+///
+/// `bytes` 为 `null` 表示测不到（如 macOS 的日志库目录对非 root 不可读）。
+/// `modes` 是本机支持的清理方式，清理对话框按它渲染：journald 支持按保留期 /
+/// 目标大小收缩，macOS 统一日志只有「全部抹除」。
+#[utoipa::path(
+    get,
+    path = "/logs/usage",
+    tag = "logs",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "占用与清理能力", body = LogUsage),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 501, description = "本机没有可用的日志后端", body = ApiError),
+    ),
+)]
+pub async fn log_usage(
+    State(auth): State<Arc<AuthState>>,
+    Extension(session): Extension<Session>,
+    origin: RequestOrigin,
+) -> ApiResult<Json<LogUsage>> {
+    Ok(Json(
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_USAGE, ()).await?,
+    ))
+}
+
+/// 清理日志
+///
+/// `keep_secs`（只留最近一段）/ `max_bytes`（收缩到目标大小）/ `erase_all`（全部抹除，
+/// 仅 macOS）**三选一**。journald 只清已归档文件，当前活跃文件不动，清理后占用不会
+/// 精确等于期望值。写操作：入审计；权限由底层裁决（journald 文件属主 / macOS root），
+/// 未提权被拒时返回 403 + `can_retry_elevated`，提权后自动以管理身份重试。
+#[utoipa::path(
+    post,
+    path = "/logs/vacuum",
+    tag = "logs",
+    security(("bearer" = [])),
+    request_body = VacuumReq,
+    responses(
+        (status = 200, description = "清理完成，带清理前后占用与工具摘要", body = VacuumResp),
+        (status = 400, description = "三个字段没有恰好给一个", body = ApiError),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "被拒且未提权；带 `can_retry_elevated`", body = ApiError),
+        (status = 501, description = "本机日志后端不支持所选清理方式", body = ApiError),
+    ),
+)]
+pub async fn log_vacuum(
+    State(auth): State<Arc<AuthState>>,
+    Extension(session): Extension<Session>,
+    origin: RequestOrigin,
+    Json(req): Json<VacuumReq>,
+) -> ApiResult<Json<VacuumResp>> {
+    Ok(Json(
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_VACUUM, req).await?,
+    ))
 }
 
 /// 查询日志
@@ -52,6 +113,11 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
 /// 由新到旧一页；翻页带上 `cursor`（上一页的 `next_cursor`）与**相同的过滤条件**。
 /// `limit` 缺省 100、上限 1000。`q` 是字面量关键字（不是正则），大小写不敏感。
 /// 结果集只含登录用户可见的条目（见模块文档）。
+///
+/// **提权会扩大可见范围**：先以登录用户的身份读，被 journald 拒绝时，若会话已提权
+/// 就换管理身份重试（`auth::exec::escalate`）——与用户在终端里 `sudo journalctl`
+/// 得到的结果一致。未提权时返回 403 并带 `can_retry_elevated`，前端据此提示提权。
+/// 升级成功的那次会留审计（以管理身份读系统日志不是无痕操作）；未升级的读不审计。
 #[utoipa::path(
     get,
     path = "/logs",
@@ -59,9 +125,10 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
     params(LogQuery),
     security(("bearer" = [])),
     responses(
-        (status = 200, description = "一页日志（范围已由 journald ACL 按登录用户裁剪）", body = LogPage),
+        (status = 200, description = "一页日志（范围按登录用户或已提权的管理身份裁剪）", body = LogPage),
         (status = 400, description = "参数不合法（limit 越界、since > until、boot / cursor 格式错）", body = ApiError),
         (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "读不到日志且会话未提权；带 `can_retry_elevated`", body = ApiError),
         (status = 501, description = "本机没有 journalctl", body = ApiError),
         (status = 504, description = "journalctl 超时", body = ApiError),
     ),
@@ -69,10 +136,11 @@ pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
 pub async fn query_logs(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
     Query(query): Query<LogQuery>,
 ) -> ApiResult<Json<LogPage>> {
     Ok(Json(
-        exec::call(&auth, &session, Privilege::User, rpc::LOG_QUERY, query).await?,
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_QUERY, query).await?,
     ))
 }
 
@@ -100,13 +168,14 @@ pub async fn query_logs(
 pub async fn log_entry(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
     Path(cursor): Path<String>,
 ) -> ApiResult<Json<LogEntryDetail>> {
     Ok(Json(
-        exec::call(
+        exec::call_escalating_from(
             &auth,
             &session,
-            Privilege::User,
+            &origin,
             rpc::LOG_ENTRY,
             CursorParams { cursor },
         )
@@ -132,8 +201,9 @@ pub async fn log_entry(
 pub async fn list_boots(
     State(auth): State<Arc<AuthState>>,
     Extension(session): Extension<Session>,
+    origin: RequestOrigin,
 ) -> ApiResult<Json<Vec<BootInfo>>> {
     Ok(Json(
-        exec::call(&auth, &session, Privilege::User, rpc::LOG_BOOTS, ()).await?,
+        exec::call_escalating_from(&auth, &session, &origin, rpc::LOG_BOOTS, ()).await?,
     ))
 }

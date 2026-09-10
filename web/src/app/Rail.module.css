@@ -1,0 +1,236 @@
+/*
+ * 一体化侧栏:锁定 = 322px 恒暗的「门」,开 = 184px 跟随主题的导航栏。
+ * 解锁时原地收窄(440ms),锁定时撑宽合上(320ms,关箱要干脆)。
+ * 顶部 4px 发行版色带两种形态都在——它是这根栏的身份标记(spec §2.1 身份层)。
+ */
+.rail {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: var(--rail);
+  background: var(--surface-2);
+  border-top: 4px solid var(--accent);
+  border-right: 1px solid var(--line);
+  /* 不设 overflow: hidden——机器菜单的下拉要伸出栏外;宽度动画期间内容自然回流 */
+  transition:
+    width 440ms cubic-bezier(0.3, 0, 0.1, 1),
+    background-color 440ms cubic-bezier(0.3, 0, 0.1, 1),
+    border-color 440ms cubic-bezier(0.3, 0, 0.1, 1);
+}
+
+.locked {
+  width: 322px;
+  transition-duration: 320ms;
+  background: oklch(19% 0 0);
+  border-right-color: oklch(45% 0 0);
+  /* 门内重设中性阶:锁定形态不跟主题走,永远是这块暗色 */
+  --surface: oklch(19% 0 0);
+  --surface-2: oklch(23% 0 0);
+  --surface-3: oklch(27.5% 0 0);
+  --line: oklch(30% 0 0);
+  --line-strong: oklch(45% 0 0);
+  --sel: oklch(31% 0 0);
+  --ink: oklch(93% 0 0);
+  --ink-2: oklch(80% 0 0);
+  --ink-3: oklch(62% 0 0);
+  --accent: var(--accent-dark);
+  /* 状态色同理取暗档:亮色主题下全局 --ok/--crit 是深色档,在恒暗底上会糊掉 */
+  --ok: #4bb07a;
+  --warn: #d9a227;
+  --crit: #e86b60;
+  color: var(--ink);
+}
+
+/* 形态切换时内容整块淡入 */
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: bodyIn 240ms ease;
+}
+
+@keyframes bodyIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail {
+    transition: none;
+  }
+  .body {
+    animation: none;
+  }
+}
+
+/* ---- 共用:状态方块 / 发丝线 ---- */
+.sq {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--ok);
+}
+
+.sqPending {
+  background: none;
+  border: 1px solid var(--line-strong);
+}
+
+.sqWarn {
+  background: var(--warn);
+}
+
+.sqBad {
+  background: var(--crit);
+}
+
+.sqNa {
+  background: none;
+  border: 1px solid var(--line-strong);
+}
+
+.hr {
+  flex: none;
+  border-top: 1px solid var(--line);
+}
+
+/* ---- 锁定形态:机器头 + 页面目录 + 认证行 ---- */
+.head {
+  flex: none;
+  padding: 22px 24px 0;
+}
+
+.meta {
+  color: var(--ink-3);
+  font: 11px var(--mono);
+  margin: 2px 0 12px;
+  padding-left: 27px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dir {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.sec {
+  height: 24px;
+  display: flex;
+  align-items: flex-end;
+  padding: 0 24px 3px;
+  margin: 8px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+.pg {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 28px;
+  padding: 0 24px;
+  color: var(--ink-2);
+}
+
+.pg .nm {
+  font-size: 13px;
+}
+
+.pg .via {
+  margin-left: auto;
+  font: 11px var(--mono);
+  color: var(--ink-3);
+}
+
+.pgNa {
+  color: var(--ink-3);
+}
+
+.pgNa .nm {
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+
+.auth {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 24px;
+  color: var(--ink-2);
+  border-top: 1px solid var(--line);
+}
+
+.auth .via {
+  margin-left: auto;
+  font: 11px var(--mono);
+  color: var(--ink-3);
+}
+
+.lockFoot {
+  flex: none;
+  padding: 12px 24px;
+  color: var(--ink-3);
+  font: 11px var(--mono);
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ---- 导航形态:实时/健康行 + 底部动作 ---- */
+.hostat {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px 6px 34px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.hostat i {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-style: normal;
+}
+
+.foot {
+  flex: none;
+  border-top: 1px solid var(--line);
+}
+
+.frow {
+  height: var(--row);
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  color: var(--ink-2);
+  background: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.frow:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.frow svg {
+  flex: none;
+}

@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use strixmaid_types::service::{
-    CgroupUsage, UnitAction, UnitActionResp, UnitActiveState, UnitDetail, UnitFile, UnitListQuery,
-    UnitScope, UnitSummary,
+    CgroupUsage, TimerEntry, TimerSource, UnitAction, UnitActionResp, UnitActiveState, UnitDetail,
+    UnitFile, UnitListQuery, UnitScope, UnitSummary,
 };
 use strixmaid_types::{ApiError, ApiResult, ErrorCode};
 use tokio::sync::{OnceCell, broadcast};
@@ -116,6 +116,10 @@ struct Props(HashMap<String, OwnedValue>);
 impl Props {
     fn take<T: TryFrom<OwnedValue>>(&mut self, key: &str) -> Option<T> {
         self.0.remove(key).and_then(|v| T::try_from(v).ok())
+    }
+    /// 取原始值（复合类型自己拆）。
+    fn value(&mut self, key: &str) -> Option<OwnedValue> {
+        self.0.remove(key)
     }
     fn string(&mut self, key: &str) -> String {
         self.take::<String>(key).unwrap_or_default()
@@ -871,6 +875,61 @@ impl ServiceProvider for SystemdBus {
         .await
     }
 
+    async fn list_timers(&self, scope: UnitScope) -> ApiResult<Vec<TimerEntry>> {
+        with_timeout("ListTimers", async {
+            let conn = self.conn(scope).await?;
+            let mgr = Self::manager(&conn).await?;
+            let loaded = mgr
+                .list_units()
+                .await
+                .map_err(|e| map_zbus_error(e, "list"))?;
+            let mut out = Vec::new();
+            for (name, _desc, _load, active, _sub, _following, path, ..) in loaded {
+                if !name.ends_with(".timer") {
+                    continue;
+                }
+                let mut t =
+                    match Self::get_all(&conn, &path, "org.freedesktop.systemd1.Timer").await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            // 单个 timer 在查询间隙被 GC 不该让整个列表失败
+                            tracing::debug!(unit = %name, error = %e, "读 Timer 属性失败，跳过");
+                            continue;
+                        }
+                    };
+                let mut schedule = Vec::new();
+                if let Some(v) = t.value("TimersCalendar") {
+                    schedule.extend(timer_spec_lines(&v));
+                }
+                if let Some(v) = t.value("TimersMonotonic") {
+                    schedule.extend(timer_spec_lines(&v));
+                }
+                let next_ts = t
+                    .u64("NextElapseUSecRealtime")
+                    .and_then(opt_u64)
+                    .and_then(usec_to_ts)
+                    .or_else(|| {
+                        t.u64("NextElapseUSecMonotonic")
+                            .and_then(opt_u64)
+                            .and_then(monotonic_usec_to_ts)
+                    });
+                out.push(TimerEntry {
+                    source: TimerSource::SystemdTimer,
+                    schedule,
+                    next_ts,
+                    last_ts: t.u64("LastTriggerUSec").and_then(usec_to_ts),
+                    target: t.opt_string("Unit"),
+                    active: Some(active == "active"),
+                    scope,
+                    name,
+                });
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(out)
+        })
+        .await
+    }
+
     async fn subscribe(&self) -> broadcast::Receiver<ServiceEvent> {
         // 先拿 receiver 再注册监听：注册期间到达的事件也不会丢。
         let rx = self.shared.events.subscribe();
@@ -881,6 +940,56 @@ impl ServiceProvider for SystemdBus {
         }
         rx
     }
+}
+
+/// Timer 的 `TimersCalendar`（`a(sst)`）/ `TimersMonotonic`（`a(stt)`）→ `Base=spec` 行。
+///
+/// 第二个字段是日历表达式（字符串）或相对偏移（微秒）；第三个字段（下次触发）
+/// 由 `NextElapseUSec*` 统一给出，不进调度行。手工拆 `Value` 而不是 `TryFrom` 成元组，
+/// 属性形状对不上时得到的是空数组而不是错误——调度规则「拿不到」不该毁掉整条记录。
+fn timer_spec_lines(v: &zbus::zvariant::Value<'_>) -> Vec<String> {
+    use zbus::zvariant::Value;
+    let Value::Array(arr) = v else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let Value::Structure(s) = item else {
+                return None;
+            };
+            let f = s.fields();
+            let Value::Str(base) = f.first()? else {
+                return None;
+            };
+            match f.get(1)? {
+                Value::Str(spec) => Some(format!("{base}={spec}")),
+                Value::U64(usec) => Some(format!("{base}={}s", usec / 1_000_000)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// `NextElapseUSecMonotonic`（CLOCK_MONOTONIC 微秒）→ unix 秒。
+///
+/// monotonic 时钟不含 epoch 信息，换算靠「现在的 monotonic 读数」对齐：
+/// `unix_now + (next_mono - now_mono)`。已过期（差为负）视为「马上」，报当前时刻。
+fn monotonic_usec_to_ts(next_mono_usec: u64) -> Option<i64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: 只写入栈上的 timespec。
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return None;
+    }
+    let now_mono_usec = ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000;
+    let delta_secs = (next_mono_usec as i64 - now_mono_usec) / 1_000_000;
+    let unix_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(unix_now + delta_secs.max(0))
 }
 
 /// 直读缺失的字段用 systemd 属性补齐。

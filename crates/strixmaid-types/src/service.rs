@@ -292,6 +292,53 @@ pub struct UnitActionResp {
     pub active_state: Option<UnitActiveState>,
 }
 
+/// 定时任务来源。
+///
+/// 三种定时机制的底层完全不同（systemd bus / launchd plist / crontab 文件），
+/// 前端统一成一张表，靠本枚举解释字段缺失：launchd 没有「上次触发」，
+/// `StartInterval` 型任务算不出「下次触发」。
+///
+/// cron 是规划中的第三来源（解析 crontab 文件族），实现后再加变体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerSource {
+    /// systemd `*.timer` unit（Linux）。
+    SystemdTimer,
+    /// launchd 里带 `StartCalendarInterval` / `StartInterval` 的 job（macOS）。
+    Launchd,
+}
+
+/// `GET /api/v1/services/timers` 列表项：一条定时任务。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TimerEntry {
+    /// unit 名。systemd 为 `*.timer`；launchd 为补了 `.service` 后缀的 label。
+    /// 两者都可直接作为 `/services/{unit}` 的路径参数查详情。
+    #[schema(example = "logrotate.timer")]
+    pub name: String,
+    /// 来源。
+    pub source: TimerSource,
+    /// 调度规则，人可读的原样表达（`OnCalendar=…`、`StartInterval=300s` 等）。
+    /// 一条任务可以有多条规则；降级路径拿不到时为空数组（「未知」而非「无规则」）。
+    #[schema(example = json!(["OnCalendar=*-*-* 00:00:00"]))]
+    pub schedule: Vec<String>,
+    /// 下次触发，unix 秒。算不出为 `None`（timer 已停、launchd `StartInterval` 型）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_ts: Option<i64>,
+    /// 上次触发，unix 秒。从未触发或来源不记录（launchd）为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ts: Option<i64>,
+    /// 触发目标：systemd 是被拉起的 unit 名，launchd 是 program 路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "logrotate.service")]
+    pub target: Option<String>,
+    /// 定时器当前是否生效（systemd: timer unit active；launchd: job 已加载）。
+    /// `None` = 判定不了——非 root 读不到 launchd system 域的加载状态，不编（spec §6）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// 作用域。
+    pub scope: UnitScope,
+}
+
 /// `GET /api/v1/services` 的查询参数。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema, IntoParams)]
 #[into_params(parameter_in = Query)]

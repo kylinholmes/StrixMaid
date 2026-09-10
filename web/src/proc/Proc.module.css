@@ -1,0 +1,367 @@
+.crumb {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.crumbSub {
+  color: var(--ink-3);
+  font: 11px var(--mono);
+  font-weight: 400;
+  margin-left: 10px;
+}
+
+/* ---- 工具栏:用户筛选 ---- */
+.userPick {
+  position: relative;
+}
+
+.userBtn {
+  height: 26px;
+  padding: 0 10px;
+  background: none;
+  border: 1px solid var(--line);
+  font: 12px inherit;
+  font-family: inherit;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.userBtn:hover {
+  background: var(--surface-2);
+}
+
+.userBtnOn {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--sel);
+}
+
+/* ---- 布局:表 + 右侧抽屉(抽屉悬浮,不挤表格) ---- */
+.page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+
+.tableArea {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+/* ---- 进程表:斑马纹、表头下沿 line-strong,同挂载点表的规格(spec §5.2) ---- */
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.tbl th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--row);
+  padding: 0;
+  text-align: left;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+
+.thBtn {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  height: var(--row);
+  align-items: center;
+  padding: 0 12px;
+  background: none;
+  border: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  cursor: default;
+}
+
+button.thBtn {
+  cursor: pointer;
+}
+
+button.thBtn:hover {
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.thOn .thBtn {
+  color: var(--ink);
+}
+
+/* 表头总量(Win10:列头带整机占用) */
+.thTotal {
+  font: 11px var(--mono);
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.thArrow {
+  font-size: 9px;
+  width: 1em;
+}
+
+.num .thBtn {
+  justify-content: flex-end;
+}
+
+.tbl td {
+  height: var(--row);
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.row {
+  cursor: pointer;
+}
+
+/* 斑马纹按数据行的绝对序号上色(虚拟化的 spacer 行会打乱 nth-child) */
+.alt {
+  background: var(--surface-2);
+}
+
+.row:hover {
+  background: var(--surface-3);
+}
+
+/* 与上面同特异性,靠声明顺序压过斑马纹与 hover */
+.row.rowOn,
+.row.rowOn:hover {
+  background: var(--sel);
+}
+
+.num {
+  text-align: right;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* 名称列:进程名 + 灰色命令行,单元格内截断,不许撑开表 */
+.name {
+  max-width: 0;
+  width: 40%;
+}
+
+.nameWrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nameWrap b {
+  font-weight: 600;
+  flex: none;
+}
+
+.cmd {
+  font: 11px var(--mono);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* 树的折叠钮:固定占位,叶子也留白保持对齐。热区撑满行高,别让人瞄准 9px 的三角 */
+.twist {
+  flex: none;
+  width: 20px;
+  height: var(--row);
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  text-align: center;
+}
+
+button.twist:hover {
+  color: var(--ink);
+  background: var(--sel);
+}
+
+.user {
+  color: var(--ink-2);
+}
+
+/* 状态单字母(htop 式),异常态才上警示色 */
+.state {
+  font: 600 11px var(--mono);
+}
+
+.stateWarn {
+  color: var(--warn);
+}
+
+.stateDim {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+/* ---- 右侧抽屉:悬浮在表格之上,弹出层语言(同 Menu/Dialog 的 shadow-pop) ---- */
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  width: 360px;
+  border-left: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.drawerHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawerTitle {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawerPid {
+  flex: 1;
+  font: 11px var(--mono);
+  color: var(--ink-3);
+}
+
+.drawerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* 动态读数:裸文本网格,同性能页数字区的语言 */
+.drawerStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 96px);
+  gap: 12px 10px;
+  margin-bottom: 14px;
+}
+
+.drawerStats .k {
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+}
+
+.drawerStats .v {
+  font: 500 15px var(--mono);
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.drawerStats .v small {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.cmdBox {
+  font: 11px var(--mono);
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.env {
+  margin-top: 14px;
+  font-size: 12px;
+}
+
+.env summary {
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.envList {
+  margin-top: 6px;
+  font: 11px var(--mono);
+  color: var(--ink-2);
+  max-height: 200px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.envList b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ---- 动作区 ---- */
+.actions {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.actionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.niceLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.niceInput {
+  width: 56px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: 12px var(--mono);
+}
+
+.actionErr {
+  color: var(--crit);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.actionNote {
+  color: var(--ink-3);
+  font-size: 12px;
+  margin: 6px 0 0;
+}

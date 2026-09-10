@@ -202,6 +202,64 @@ pub struct LogPage {
     pub prev_cursor: Option<String>,
 }
 
+/// 平台支持的日志清理方式。
+///
+/// journald 支持按保留期 / 目标大小收缩（`--vacuum-time` / `--vacuum-size`）；
+/// macOS 统一日志没有等价物，只有 `log erase` 的「全部抹掉」一档。
+/// 前端按 [`LogUsage::modes`] 决定清理对话框长什么样，而不是按平台猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VacuumMode {
+    /// 只保留最近一段时间（[`VacuumReq::keep_secs`]）。
+    KeepDuration,
+    /// 收缩到目标大小以内（[`VacuumReq::max_bytes`]）。
+    MaxSize,
+    /// 全部抹除（[`VacuumReq::erase_all`]）。破坏性最强，前端必须双重确认。
+    EraseAll,
+}
+
+/// `GET /api/v1/logs/usage` 的响应体：日志磁盘占用与可用的清理方式。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LogUsage {
+    /// 日志占用的磁盘字节数。`None` = 测不到（macOS 的日志库目录对非 root 不可读）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 58_720_256_u64)]
+    pub bytes: Option<u64>,
+    /// 本机支持的清理方式。空数组 = 完全不支持清理。
+    pub modes: Vec<VacuumMode>,
+}
+
+/// `POST /api/v1/logs/vacuum` 的请求体。**三个字段必须恰好给一个**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+pub struct VacuumReq {
+    /// 只保留最近 N 秒的日志（`journalctl --vacuum-time`）。
+    /// 注意 journald 只清**已归档**的日志文件，当前活跃文件不动——
+    /// 清理后占用不会精确等于期望值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 604_800_u64)]
+    pub keep_secs: Option<u64>,
+    /// 收缩到 N 字节以内（`journalctl --vacuum-size`）。同样只清已归档文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// 全部抹除（macOS `log erase --all`）。必须显式传 `true`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub erase_all: Option<bool>,
+}
+
+/// `POST /api/v1/logs/vacuum` 的响应体。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct VacuumResp {
+    /// 清理前占用。测不到为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_bytes: Option<u64>,
+    /// 清理后占用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_bytes: Option<u64>,
+    /// 工具的原话摘要（如 journalctl 的 `Vacuuming done, freed …`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// `GET /api/v1/logs/boots` 的列表项（对应 `journalctl --list-boots`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BootInfo {

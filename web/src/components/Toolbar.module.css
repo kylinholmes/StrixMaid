@@ -1,0 +1,45 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-toolbar);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+}
+.spacer {
+  flex: 1;
+}
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  height: 26px;
+  padding: 0 9px;
+  min-width: 200px;
+  transition: border-color var(--t-color);
+}
+.search:focus-within {
+  border-color: var(--accent);
+}
+.search svg {
+  color: var(--ink-3);
+  flex: none;
+  display: block;
+}
+.search input {
+  font: inherit;
+  font-size: 12.5px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  min-width: 0;
+}
+.search input::placeholder {
+  color: var(--ink-3);
+}

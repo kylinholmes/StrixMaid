@@ -224,12 +224,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // 与 REST 的 `GET /processes` 共享（roadmap/04 §B.3）。
     hub.register(Arc::new(ws::channels::ProcessesLive::new(auth.clone())));
 
+    // 未认证可见的主机身份（登录页展示 + 发行版主题色）。取不到不算致命：
+    // 登录页仍能工作，只是身份区退化为空、主题色回落中性灰。
+    let host_identity = match HostProvider::new().system_info().await {
+        Ok(info) => strixmaid_types::capability::HostIdentity {
+            hostname: info.hostname,
+            os_id: info.os.id,
+            os_name: info.os.pretty_name,
+            kernel: info.kernel,
+        },
+        Err(e) => {
+            tracing::warn!(error = %e.message, "主机身份获取失败，登录页身份区将为空");
+            strixmaid_types::capability::HostIdentity::default()
+        }
+    };
+
     // ---- 路由 ----
     let states = routes::ApiStates {
         app: AppState::new(),
         auth: auth.clone(),
         capabilities: Arc::new(routes::capabilities::CapabilityState::new(
             report.system,
+            host_identity,
             config.session.elevate_groups.clone(),
             auth.clone(),
         )),

@@ -11,11 +11,11 @@
 //! | 采集项 | macOS | 说明 |
 //! |---|---|---|
 //! | CPU | ✅ 部分 | mach 只统计 user / system / idle / nice，产出 usage / system + 每核 usage；iowait / irq / steal 不存在 |
-//! | GPU | ❌ | sysfs 的 `gpu_busy_percent` 是 Linux DRM 的接口；IOKit 对接留待面板实施时评估（roadmap/08 §9） |
+//! | GPU | ✅ 部分 | IOKit `IOAccelerator` 的 `PerformanceStatistics`；统一内存无「显存总量」，不产出 `gpu.mem_total` / `gpu.temp` |
 //! | 内存 | ✅ 部分 | 没有 `Buffers` 的对应概念，`mem.cached` 只含 external 页；`available` 是估算值，见 [`mem`] |
 //! | 负载 | ✅ | `getloadavg(3)`；运行队列长度无对应数据源，只产出 `procs.total` |
 //! | PSI | ❌ | `/proc/pressure` 是 Linux 独有的内核特性，无任何等价物 |
-//! | 磁盘 IO | ❌ | 需要走 IOKit 逐设备取 statistics，成本高、与联调目的不匹配 |
+//! | 磁盘 IO | ✅ | IOKit `IOBlockStorageDriver` 的 `Statistics` 差分（`iostat` 同源），见 [`disk`] |
 //! | 文件系统 | ✅ | `getfsstat(2)` |
 //! | 网络 | ✅ 部分 | `sysctl NET_RT_IFLIST2`，`net.errors` 缺发送方向的丢包计数 |
 //!
@@ -40,13 +40,17 @@
 pub(crate) use super::{CollectError, Collector, Sample, elapsed_secs, rate, sanitize_label};
 
 pub mod cpu;
+pub mod disk;
 pub mod fs;
+pub mod gpu;
 pub mod load;
 pub mod mem;
 pub mod net;
 
 pub use cpu::CpuCollector;
+pub use disk::DiskCollector;
 pub use fs::FsCollector;
+pub use gpu::GpuCollector;
 pub use load::LoadCollector;
 pub use mem::MemCollector;
 pub use net::NetCollector;
@@ -55,8 +59,10 @@ pub use net::NetCollector;
 pub fn default_collectors() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(CpuCollector::new()),
+        Box::new(GpuCollector::new()),
         Box::new(MemCollector::new()),
         Box::new(LoadCollector::new()),
+        Box::new(DiskCollector::new()),
         Box::new(FsCollector::new()),
         Box::new(NetCollector::new()),
     ]

@@ -1,0 +1,83 @@
+/*
+ * 斑马纹，不画行线（spec §5.2）。四级明度阶梯：
+ *   奇数行 surface (L26.4) → 偶数行 surface-2 (L30.4)
+ *   划过   surface-3 (L35.4) → 选中 sel (L44)
+ * 奇偶只差 4%，是全套语言里最紧的一处，改任何一个值都要重新核对。
+ */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.table th {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 400;
+  text-align: left;
+  padding: 0 10px;
+  height: 26px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.table th.num {
+  text-align: right;
+}
+
+.table td {
+  padding: 0 10px;
+  height: var(--row);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+}
+.table td.num {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.table td.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.table td.dim {
+  color: var(--ink-3);
+}
+
+.row {
+  background: var(--surface);
+  transition: background-color var(--t-color);
+}
+.row:nth-child(even) {
+  background: var(--surface-2);
+}
+.row:hover {
+  background: var(--surface-3);
+}
+.row[aria-selected="true"] {
+  background: var(--sel);
+}
+/* 左缘 3px accent 条：选中是「你正在操作的行」，身份层的领地 */
+.row[aria-selected="true"] td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* 选中行额外加粗主字段（spec §5.3） */
+.row[aria-selected="true"] td:first-child {
+  font-weight: 600;
+}
+.clickable {
+  cursor: pointer;
+}
+
+.empty td {
+  height: auto;
+  padding: 0;
+}

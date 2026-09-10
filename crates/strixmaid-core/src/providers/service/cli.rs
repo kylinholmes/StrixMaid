@@ -14,8 +14,8 @@ use std::process::Stdio;
 use async_trait::async_trait;
 use serde::Deserialize;
 use strixmaid_types::service::{
-    CgroupUsage, UnitAction, UnitActionResp, UnitDetail, UnitFile, UnitListQuery, UnitScope,
-    UnitSummary,
+    CgroupUsage, TimerEntry, TimerSource, UnitAction, UnitActionResp, UnitActiveState, UnitDetail,
+    UnitFile, UnitListQuery, UnitScope, UnitSummary,
 };
 use strixmaid_types::{ApiError, ApiResult, ErrorCode};
 use tokio::process::Command;
@@ -25,7 +25,8 @@ use super::cgroup::CgroupReader;
 use super::{
     EVENT_CAPACITY, ServiceEvent, ServiceProvider, UnitDeps, apply_list_query, lookup_enable_state,
     parse_active_state, parse_enable_state, parse_load_state, read_unit_fragment,
-    summary_for_unloaded_file, unit_file_basename, unit_type_of, validate_unit_name, with_timeout,
+    summary_for_unloaded_file, unit_file_basename, unit_type_of, usec_to_ts, validate_unit_name,
+    with_timeout,
 };
 use crate::providers::log::parse::parse_utc_timestamp;
 use crate::providers::{Probe, Provider};
@@ -46,6 +47,19 @@ struct ListUnitRow {
 struct UnitFileRow {
     unit_file: String,
     state: String,
+}
+
+/// `systemctl list-timers --all --output=json` 的一行。
+/// `next` / `last` 是 CLOCK_REALTIME 微秒，从未触发 / 不再触发时为 null。
+#[derive(Debug, Deserialize)]
+struct ListTimerRow {
+    unit: String,
+    #[serde(default)]
+    next: Option<u64>,
+    #[serde(default)]
+    last: Option<u64>,
+    #[serde(default)]
+    activates: Option<String>,
 }
 
 /// 详情要取的属性。不存在于该类型的属性 systemctl 会直接省略。
@@ -414,6 +428,43 @@ impl ServiceProvider for SystemctlCli {
                 job: None,
                 active_state,
             })
+        })
+        .await
+    }
+
+    async fn list_timers(&self, scope: UnitScope) -> ApiResult<Vec<TimerEntry>> {
+        with_timeout("list-timers", async {
+            let mut cmd = self.command(scope);
+            cmd.args(["list-timers", "--all", "--output=json"]);
+            let out = Self::run(cmd, "list-timers").await?;
+            let rows: Vec<ListTimerRow> = serde_json::from_str(&out).map_err(|e| {
+                ApiError::internal("解析 systemctl list-timers 输出失败").with_detail(e.to_string())
+            })?;
+            // active 状态 list-timers 不给，另拉一次 unit 列表对上
+            let active: HashMap<String, bool> = self
+                .list_raw(scope)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| (u.name, u.active_state == UnitActiveState::Active))
+                .collect();
+            let mut timers: Vec<TimerEntry> = rows
+                .into_iter()
+                .map(|r| TimerEntry {
+                    source: TimerSource::SystemdTimer,
+                    // list-timers 不输出 OnCalendar 表达式；逐个 show 代价高，
+                    // 降级路径如实报「未知」（空数组）
+                    schedule: Vec::new(),
+                    next_ts: r.next.and_then(usec_to_ts),
+                    last_ts: r.last.and_then(usec_to_ts),
+                    target: r.activates,
+                    active: Some(active.get(&r.unit).copied().unwrap_or(r.next.is_some())),
+                    scope,
+                    name: r.unit,
+                })
+                .collect();
+            timers.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(timers)
         })
         .await
     }

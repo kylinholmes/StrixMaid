@@ -38,7 +38,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use strixmaid_types::service::{
-    UnitAction, UnitActionResp, UnitActiveState, UnitDetail, UnitEnableState, UnitFile,
+    TimerEntry, UnitAction, UnitActionResp, UnitActiveState, UnitDetail, UnitEnableState, UnitFile,
     UnitListQuery, UnitLoadState, UnitScope, UnitSummary,
 };
 use strixmaid_types::{ApiError, ApiResult};
@@ -138,6 +138,13 @@ pub trait ServiceProvider: Provider {
         unit: &str,
         action: UnitAction,
     ) -> ApiResult<UnitActionResp>;
+
+    /// 列出定时任务。
+    ///
+    /// systemd 侧是全部**已加载**的 `*.timer` unit（含 inactive 的）；launchd 侧是
+    /// plist 里带 `StartCalendarInterval` / `StartInterval` 的 job。cron 是规划中的
+    /// 第三来源，实现前不出现在结果里——不编数据（`roadmap/08` §6 状态语言）。
+    async fn list_timers(&self, scope: UnitScope) -> ApiResult<Vec<TimerEntry>>;
 
     /// 订阅变更事件（`services.changed`）。
     ///

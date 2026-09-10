@@ -4,6 +4,8 @@
 #   podman build --build-arg BASE=rockylinux:9  -t strix-verify:rocky  -f scripts/verify/Containerfile .
 #
 # 一份 Containerfile 兼顾 apt 与 dnf：装 systemd + polkit + PAM + sudo + 验证工具，
+# dnf 侧要 --allowerasing：rockylinux:9 预装 curl-minimal，与完整的 curl 冲突，
+# 不加就直接构建失败（「cannot install the best candidate for the job」）。
 # 建两个用户 alice（普通）与 bob（sudo/wheel），并放一个可安全重启的测试 unit。
 # 需要能访问软件源；国内可用镜像见 README。密码在 run-in-podman.sh 里运行时设置。
 ARG BASE=ubuntu:24.04
@@ -25,7 +27,7 @@ RUN set -eux; \
             polkitd sudo curl jq sqlite3 procps iproute2 hostname passwd bash ca-certificates; \
         apt-get clean; rm -rf /var/lib/apt/lists/*; \
     else \
-        dnf -y install \
+        dnf -y --allowerasing install \
             systemd polkit sudo curl jq sqlite procps-ng iproute hostname passwd bash; \
         dnf clean all; \
     fi; \

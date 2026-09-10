@@ -30,7 +30,9 @@ use axum::Json;
 use axum::extract::{Extension, State};
 use strixmaid_core::capability::UserIdentity;
 use strixmaid_core::session::Session;
-use strixmaid_types::capability::{Capabilities, SystemCapabilities, UserCapabilities, UserProbe};
+use strixmaid_types::capability::{
+    Capabilities, HostIdentity, SystemCapabilities, UserCapabilities, UserProbe,
+};
 use strixmaid_types::rpc;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -48,6 +50,8 @@ const PROBE_TTL: Duration = Duration::from_secs(60);
 /// 若两边取值不同，用户就会看到一个点了必被拒的按钮。
 pub struct CapabilityState {
     pub system: SystemCapabilities,
+    /// 未认证可见的主机身份，启动时从 host provider 取一次（[`Capabilities::identity`]）。
+    pub identity: HostIdentity,
     pub elevate_groups: Vec<String>,
     /// 会话身份 → (实测时刻, 结果)。见模块文档「为什么要缓存」。
     probes: Mutex<HashMap<ProbeKey, (Instant, UserProbe)>>,
@@ -78,11 +82,13 @@ impl std::fmt::Debug for CapabilityState {
 impl CapabilityState {
     pub fn new(
         system: SystemCapabilities,
+        identity: HostIdentity,
         elevate_groups: Vec<String>,
         auth: Arc<AuthState>,
     ) -> Self {
         Self {
             system,
+            identity,
             elevate_groups,
             probes: Mutex::new(HashMap::new()),
             auth,
@@ -135,9 +141,15 @@ impl CapabilityState {
 }
 
 /// 把实测结果合并进推导结果。**实测值覆盖推导值；`None` 表示没测出结论，沿用推导。**
+///
+/// `can_read_journal` 有一处例外：实测在 **user worker** 里做（`worker/probe.rs`——
+/// 必须如此，`user_units` 与 `uid` 只有在那里测才有意义），而日志读取走
+/// `auth::exec::escalate`，**已提权的会话被 journald 拒绝后会换 admin worker 重试**。
+/// 所以 user worker 里测出的「读不到」对已提权的会话不成立，不能拿它盖掉提权带来的
+/// 可见性——否则前端会给一个已经是管理员的人灰掉日志页，而他点进去其实是能看的。
 pub fn merge(mut derived: UserCapabilities, probe: &UserProbe) -> UserCapabilities {
     if let Some(v) = probe.can_read_journal {
-        derived.can_read_journal = v;
+        derived.can_read_journal = v || derived.elevated;
     }
     if let Some(v) = probe.can_manage_units {
         derived.can_manage_units = v;
@@ -188,6 +200,7 @@ pub async fn capabilities(
     Json(Capabilities {
         system: state.system,
         user,
+        identity: state.identity.clone(),
     })
 }
 
@@ -218,6 +231,42 @@ mod tests {
         };
         let merged = merge(derived(), &probe);
         assert!(!merged.can_read_journal, "实测结果必须覆盖推导");
+    }
+
+    /// 提权是这条覆盖规则的唯一例外：实测在 user worker 里做，而已提权的会话
+    /// 读日志会被 `auth::exec::escalate` 换到 admin worker 重试，所以那个「读不到」
+    /// 不适用。roadmap/07 在 Rocky 9 上撞到的正是这一幕：bob 提权后 elevated=true，
+    /// 日志页却被灰掉。
+    #[test]
+    fn 已提权时实测的读不到不应盖掉提权带来的可见性() {
+        let mut d = derived();
+        d.elevated = true;
+        d.can_read_journal = true; // 推导：elevated ⇒ 可读
+        let probe = UserProbe {
+            // user worker 里 bob 确实读不到内核日志——但那不是提权后的实际处境
+            can_read_journal: Some(false),
+            can_manage_units: None,
+            user_units: None,
+            uid: 1000,
+        };
+        assert!(
+            merge(d, &probe).can_read_journal,
+            "已提权的会话不该因 user worker 的实测而被判定读不到日志"
+        );
+    }
+
+    /// 未提权时不受影响：实测说读不到就是读不到，不能借这条例外放宽。
+    #[test]
+    fn 未提权时实测的读不到仍然生效() {
+        let probe = UserProbe {
+            can_read_journal: Some(false),
+            can_manage_units: None,
+            user_units: None,
+            uid: 1000,
+        };
+        let merged = merge(derived(), &probe);
+        assert!(!merged.elevated);
+        assert!(!merged.can_read_journal);
     }
 
     #[test]

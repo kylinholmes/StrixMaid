@@ -88,6 +88,15 @@ pub struct ProcessSummary {
     /// nice 值，范围 -20..=19。越小优先级越高。
     #[schema(example = 0)]
     pub nice: i32,
+    /// 磁盘读速率（bytes/s，最近一个采样窗口的差分）。
+    ///
+    /// `None` = **测不到**（无权限，或平台不提供 per-process IO 计数）；
+    /// 能测到但还没有第二轮采样时为 `Some(0.0)`。前端把 `None` 画成「—」而不是 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_read_rate: Option<f64>,
+    /// 磁盘写速率（bytes/s）。语义同 [`Self::io_read_rate`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_write_rate: Option<f64>,
 }
 
 /// `GET /api/v1/processes/{pid}` 的响应体。

@@ -1,0 +1,18 @@
+# strixmaid: auth account password session
+# StrixMaid 的 PAM 服务配置 —— macOS(开发平台)模板。
+# 安装到 /etc/pam.d/strixmaid(config.toml 的 pam_service 默认即 "strixmaid"):
+#   sudo install -m 0644 packaging/pam.d/strixmaid.macos /etc/pam.d/strixmaid
+#
+# macOS 是 OpenPAM:没有 @include/substack,也没有 common-*/system-auth 这类公共栈,
+# 各服务文件互相独立。本模板取自系统自带 /etc/pam.d/login 的骨架:
+# 认证走 pam_opendirectory(目录服务查本机账户口令,非 root 也能验自己的密码)。
+#
+# 注意 OpenPAM 的回退语义:服务文件**不存在**时整体落到 /etc/pam.d/other
+# (系统默认四行 pam_deny,全拒——这就是没装本文件时"密码正确也认证失败"的原因)。
+auth       required       pam_opendirectory.so try_first_pass
+account    required       pam_nologin.so
+account    required       pam_opendirectory.so
+password   required       pam_opendirectory.so
+# 会话:pam_launchd 把会话挂进用户的 launchd 域。helper 对 open_session 失败降级继续,
+# 开发平台上即使这行不生效也不阻塞登录。
+session    required       pam_launchd.so

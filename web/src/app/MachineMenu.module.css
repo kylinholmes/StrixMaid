@@ -1,0 +1,56 @@
+.anchor {
+  position: relative;
+  flex: none;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--surface-3);
+}
+
+.host {
+  flex: 1;
+  min-width: 0;
+  font: 600 13px var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chev {
+  color: var(--ink-3);
+  flex: none;
+}
+
+/* ---- 登录门里的大号形态:更大的字、无悬停底、下划线提示可点 ---- */
+.wide {
+  gap: 9px;
+  padding: 2px 0;
+}
+
+.wide:hover {
+  background: none;
+}
+
+.wide .host {
+  font: 600 15px var(--mono);
+  flex: initial;
+}
+
+.wide:hover .host {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

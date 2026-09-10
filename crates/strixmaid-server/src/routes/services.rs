@@ -30,9 +30,10 @@ use serde::{Deserialize, Serialize};
 use strixmaid_core::providers::service::UnitDeps as CoreUnitDeps;
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
-use strixmaid_types::rpc::{self, UnitActionParams, UnitParams};
+use strixmaid_types::rpc::{self, ScopeParams, UnitActionParams, UnitParams};
 use strixmaid_types::service::{
-    UnitActionReq, UnitActionResp, UnitDetail, UnitFile, UnitListQuery, UnitScope, UnitSummary,
+    TimerEntry, UnitActionReq, UnitActionResp, UnitDetail, UnitFile, UnitListQuery, UnitScope,
+    UnitSummary,
 };
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -48,6 +49,9 @@ use crate::error::ApiResult;
 pub fn router(auth: Arc<AuthState>) -> OpenApiRouter<()> {
     OpenApiRouter::new()
         .routes(routes!(list_units))
+        // 静态段 `/services/timers` 与 `{unit}` 同层：axum(matchit) 静态优先，
+        // 不会被当成 unit 名
+        .routes(routes!(list_timers))
         .routes(routes!(unit_detail))
         .routes(routes!(unit_file))
         .routes(routes!(unit_deps))
@@ -151,6 +155,45 @@ pub async fn list_units(
 ) -> ApiResult<Json<Vec<UnitSummary>>> {
     Ok(Json(
         exec::call(&auth, &session, Privilege::User, rpc::SERVICE_LIST, query).await?,
+    ))
+}
+
+/// 定时任务列表
+///
+/// systemd `*.timer`（Linux）与 launchd 定时 job（macOS）统一成一张表。字段缺失都有含义：
+/// `schedule` 为空数组 = 拿不到调度规则（systemctl 降级路径）；`next_ts` 为 `null` =
+/// 推算不了（timer 已停、launchd `StartInterval` 型）；`last_ts` 为 `null` = 来源不记录。
+/// cron 是规划中的第三来源，实现前不出现。
+#[utoipa::path(
+    get,
+    path = "/services/timers",
+    tag = "services",
+    params(ScopeQuery),
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "定时任务列表", body = Vec<TimerEntry>),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 501, description = "本机没有服务管理器", body = ApiError),
+        (status = 503, description = "服务管理器暂时不可达", body = ApiError),
+    ),
+)]
+pub async fn list_timers(
+    State(auth): State<Arc<AuthState>>,
+    Extension(session): Extension<Session>,
+    Query(q): Query<ScopeQuery>,
+) -> ApiResult<Json<Vec<TimerEntry>>> {
+    let params = ScopeParams {
+        scope: q.scope.unwrap_or_default(),
+    };
+    Ok(Json(
+        exec::call(
+            &auth,
+            &session,
+            Privilege::User,
+            rpc::SERVICE_TIMERS,
+            params,
+        )
+        .await?,
     ))
 }
 
