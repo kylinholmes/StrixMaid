@@ -115,6 +115,21 @@ install -D -m 0755 "$bins/strixmaid-agent" "$root/usr/bin/strixmaid-agent"
 install -D -m 0644 "$here/packaging/strixmaid-agent.service" "$root/lib/systemd/system/strixmaid-agent.service"
 install -D -m 0644 "$here/LICENSE" "$root/usr/share/doc/strixmaid-agent/LICENSE"
 
+# 示例配置放 doc 而不是直接落 /etc:server_url/token 没有可猜的默认值,
+# 生成一个残缺的 /etc 配置只会让 unit 的 ConditionPathExists 放行然后照样崩
+mkdir -p "$root/usr/share/doc/strixmaid-agent"
+cat > "$root/usr/share/doc/strixmaid-agent/agent.toml.example" <<'EOF'
+# StrixMaid agent 配置。抄到 /etc/strixmaid/agent.toml 并填好两个必填项。
+# 环境变量同名覆盖:STRIXMAID_AGENT_SERVER_URL 等(嵌套键用 __)。
+
+# 指标推给哪台 StrixMaid server(仅 ws://;跨公网走服务端前的反向代理终结 TLS)
+server_url = "ws://<server>:9700"
+
+# 预共享 token:在服务端注册节点(POST /nodes)时返回。
+# 不想写进本文件可改用 token_file = "/etc/strixmaid/agent.token"(读首行)。
+token = "<node token>"
+EOF
+
 mkdir -p "$root/DEBIAN"
 cat > "$root/DEBIAN/control" <<EOF
 Package: strixmaid-agent
@@ -132,8 +147,19 @@ EOF
 cat > "$root/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
-if [ "$1" = "configure" ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload || true
+if [ "$1" = "configure" ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+    if [ ! -e /etc/strixmaid/agent.toml ]; then
+        cat <<'TIP'
+strixmaid-agent 需要配置才会启动:
+    mkdir -p /etc/strixmaid
+    cp /usr/share/doc/strixmaid-agent/agent.toml.example /etc/strixmaid/agent.toml
+    # 填好 server_url 与 token 后:
+    systemctl enable --now strixmaid-agent
+TIP
+    fi
 fi
 EOF
 

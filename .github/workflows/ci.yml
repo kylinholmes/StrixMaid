@@ -217,6 +217,14 @@ jobs:
           test -e /etc/strixmaid/config.toml || { echo "postinst 没生成配置"; exit 1; }
           test -e /etc/pam.d/strixmaid || { echo "缺 pam.d"; exit 1; }
           dpkg -L strixmaid-agent | grep -q '/usr/bin/strixmaid-agent'
+      - name: agent 无配置时被条件拦下,不是崩溃循环
+        # 用户实测踩过:没配 server_url 时 agent 每 2 秒崩一次刷日志。
+        # 现在 unit 有 ConditionPathExists,start 应当直接跳过(inactive)。
+        run: |
+          sudo systemctl start strixmaid-agent
+          sleep 2
+          state=$(systemctl is-active strixmaid-agent || true)
+          [ "$state" = "inactive" ] || { echo "预期 inactive(条件拦截),实际 $state"; systemctl status strixmaid-agent --no-pager || true; exit 1; }
       - name: 服务能起、API 能应答
         run: |
           sudo systemctl start strixmaid
