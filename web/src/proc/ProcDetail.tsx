@@ -173,7 +173,7 @@ export function ProcDetail({ pid, onClose }: { pid: number; onClose: () => void 
                 </div>
               )}
 
-              <KeyValueGrid items={facts} />
+              <KeyValueGrid items={facts} columns={1} />
 
               {d.environ && Object.keys(d.environ).length > 0 && (
                 <details className={s.env}>

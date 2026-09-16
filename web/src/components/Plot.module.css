@@ -9,10 +9,10 @@
   z-index: 2;
   pointer-events: none;
   font-family: var(--mono);
-  font-size: 10px;
-  line-height: 1.4;
+  font-size: var(--fs-200);
+  line-height: var(--lh-snug);
   color: var(--ink-3);
-  padding: 2px 4px;
+  padding: var(--sp-1) var(--sp-2);
 }
 
 .tl {
@@ -37,7 +37,7 @@
 
 /* 游标线：压掉 uPlot 默认的蓝灰，换成资源色虚线（08 §8.1） */
 .wrap :global(.u-cursor-x) {
-  border-right: 1px dashed var(--plot-hue);
+  border-right: var(--stroke) dashed var(--plot-hue);
 }
 
 /* 跟随鼠标的数值提示（08 §8.1 setCursor → HTML tooltip）。浮层规格照 spec §5.5 */
@@ -47,12 +47,13 @@
   display: none;
   pointer-events: none;
   white-space: nowrap;
-  font: 11px var(--mono);
-  line-height: 16px;
+  font: var(--fs-300) var(--mono);
+  line-height: var(--lh-300);
   color: var(--ink-2);
   background: var(--surface);
-  border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-pop);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-raised);
   padding: 4px 7px;
 }
 

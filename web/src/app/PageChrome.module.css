@@ -3,13 +3,13 @@
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-6);
+  padding: 0 var(--sp-7);
+  border-bottom: var(--stroke) solid var(--line);
 }
 
 .head h1 {
-  font-size: 15px;
+  font-size: var(--fs-700);
   font-weight: 600;
   margin: 0;
 }
@@ -22,22 +22,22 @@
   flex: 1;
   overflow-y: auto;
   scrollbar-gutter: stable;
-  padding: 16px;
+  padding: var(--sp-7);
 }
 
 .section {
-  margin-bottom: 16px;
+  margin-bottom: var(--sp-7);
 }
 
 .sectionTitle {
-  font-size: 13px;
+  font-size: var(--fs-500);
   font-weight: 600;
-  margin: 0 0 6px;
+  margin: 0 0 var(--sp-3);
 }
 
 /* 数据到达时的一次淡入。骨架只出现在首次加载（spec §6）。 */
 .arrive {
-  animation: arrive 150ms ease-out;
+  animation: arrive var(--t-arrive) var(--ease-out);
 }
 
 @keyframes arrive {
@@ -55,35 +55,35 @@
 .meters {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 16px;
+  gap: var(--sp-7);
 }
 
 .meterCell b {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-500);
 }
 
 .meterRow {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 4px;
+  margin-bottom: var(--sp-2);
 }
 
 .meterVal {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-400);
   color: var(--ink-2);
 }
 
 .healthRow {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  min-height: 24px;
+  gap: var(--sp-4);
+  min-height: var(--row-xs);
 }
 
 .healthDetail {
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: var(--fs-400);
 }

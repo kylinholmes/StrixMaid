@@ -112,6 +112,43 @@ export const DISTROS: readonly Distro[] = [
     brand: "#504D4B",
     accent: { light: "#504D4B", dark: "#C8CACD" },
   },
+  {
+    // Windows 是正式支持的运行平台（docs/windows-platform.md），后端的
+    // `SystemInfo.os.id` 固定给 "windows"。缺这一条时 findDistro 会回落到
+    // UNKNOWN_DISTRO——界面变成中性灰、方块显示「?」、名字写「通用」，
+    // 看起来像「认不出这台机器」，而实际上认得出。
+    //
+    // **这一条不走本文件顶部那套 OKLCH 实算，直接取 Fluent 官方色阶的原值。**
+    // 理由是「按各平台自己的惯例来」比「三个平台套同一条公式」更像那台机器：
+    // Communication Blue 是 Windows 用户每天看见的那个蓝，算出来的近似色不是。
+    //
+    // accent 不跟着设计语言走（它是身份，不是样式），而设计语言是用户选的，
+    // 所以这两个值会落在**任意一套**已注册语言的面板上，六套都得算：
+    //
+    // | 主题 | Fluent 档位 | 色值 | StrixMaid | Fluent | macOS | Adwaita | Breeze | Yaru |
+    // |---|---|---|---|---|---|---|---|---|
+    // | light | Primary | #0078D4 | 3.70 | 4.15 | 4.53 | 4.53 | 4.53 | 4.53 |
+    // | dark | Tint10 | #2B88D8 | 4.10 | 3.89 | 3.73 | 4.24 | 4.22 | 3.73 |
+    //
+    // 暗色取浅一档也是 Fluent 自己的惯例（暗主题上用品牌色的 tint）。
+    //
+    // 这张表由 tokens.test.ts 遍历 `THEMES` 守着，加一套语言自动覆盖新面板；
+    // 上面的数字是手抄的，改了色值要回来重算。
+    //
+    // 最低那几个达不到 4.5:1，但那个门槛对 accent 是**定错了**：
+    // `--accent` 在本项目里一次都没用在文字上（4px 上边框、3px 内阴影边条、
+    // 边框色、焦点轮廓，以及进度条填充——上面都没有字），适用的是
+    // WCAG 1.4.11 非文字对比度 **3:1**，不是正文的 4.5:1。两档都过 3:1。
+    //
+    // 这条依赖写进了 tokens.test.ts 的断言注释：**一旦 accent 被用到文字上，
+    // 门槛就要退回 4.5:1**，那时这两个值需要重新选（Fluent 的 Shade20 #005A9E
+    // 对亮面板是 5.78:1，可作替换）。
+    id: "windows",
+    name: "Windows",
+    initial: "W",
+    brand: "#0078D4",
+    accent: { light: "#0078D4", dark: "#2B88D8" },
+  },
 ];
 
 export const UNKNOWN_DISTRO: Distro = {

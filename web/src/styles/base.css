@@ -1,21 +1,163 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: prefers-reduced-motion 的降级必须
    压过组件自身的 transition，这是 !important 少数正当的用途之一。 */
+/*
+ * 自托管字体。**声明一个字族名不等于那台机器上有这个字族。**
+ *
+ * 六套设计语言各自声明了自己的字族（fluent → Segoe UI、macos → SF Pro Text、
+ * adwaita → Adwaita Sans、breeze → Noto Sans、yaru → Ubuntu）。字族名只是
+ * 一个查找键，浏览器拿它去**看面板的那台机器**上找——不是去被管的那台。
+ * 于是在 Windows 上换到 Adwaita，字形一个都没变，变的只有颜色和圆角：
+ * Adwaita Sans 没装，整条栈一路落到 sans-serif。
+ *
+ * 所以把许可允许随产品再分发的那几套收进仓库，剩下两套只能靠本机：
+ *
+ * | 设计语言 | 字族 | 处理 |
+ * |---|---|---|
+ * | adwaita | Adwaita Sans / Adwaita Mono | 自托管（OFL 1.1） |
+ * | breeze | Noto Sans / Hack | 自托管（OFL 1.1 / MIT + Bitstream Vera） |
+ * | yaru | Ubuntu / Ubuntu Mono | 自托管（UFL 1.0） |
+ * | fluent | Segoe UI | **不自托管**，微软只许可随 Windows 使用 |
+ * | macos | SF Pro / SF Mono | **不自托管**，苹果只许可在 Apple 平台开发中使用 |
+ *
+ * 后两套在没装对应字体的机器上仍然只换颜色与几何，不换字形。这是许可决定的，
+ * 不是没做完；界面上不为此写说明文字，知道这件事的地方就是这张表。
+ *
+ * 版权声明、逐个文件的出处 URL 与许可全文见 `../assets/fonts/NOTICE.txt`
+ * 与 `../assets/fonts/licenses/`——OFL 第 2 条与 UFL 第 1 条都要求许可随字体走。
+ *
+ * **六套全声明不等于六套全下载。** `@font-face` 只是往浏览器的字体数据库里
+ * 登记一条规则，规则本身不触发请求；只有当某段文字最终匹配到这一条时才去取
+ * 那个 URL（CSS Fonts 4 §5：字体加载是惰性的）。同一时刻 `:root` 上只有一套
+ * 语言的 `--ui` / `--mono` 生效，能匹配上的至多是那一套的两三个字面。
+ * 这件事有一个前提：字体必须是 URL 引用。一旦被打包器内联成 data URI，
+ * 它就成了 CSS 字节流的一部分，跟着样式表无条件下载，惰性就没有了——
+ * 所以 `vite.config.ts` 里把 woff2 排除在 `assetsInlineLimit` 之外，
+ * 见那里的注释。
+ *
+ * 三条共同的约定：woff2、拉丁子集、`font-display: swap`。
+ * 中文**不**自托管：一个中文子集就是几 MB，`--cjk` 继续走本机字体。
+ * swap 的含义是「先用回落字形把字排出来，字体到了再换」——换字形时会闪一下，
+ * 但比 `block` 那三秒空白好：这是一块随时在刷新的监控面板，不是一篇文章。
+ */
+
+/* StrixMaid 那套自己的等宽字体。 */
 @font-face {
   font-family: "IBM Plex Mono";
   font-weight: 400;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/IBMPlexMono-Regular.latin.woff2") format("woff2");
+  src: url("../assets/fonts/IBMPlexMono-Regular.latin.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Mono";
   font-weight: 600;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/IBMPlexMono-SemiBold.latin.woff2") format("woff2");
+  src: url("../assets/fonts/IBMPlexMono-SemiBold.latin.woff2") format("woff2");
 }
 
-/* border-radius: 0 全局无例外（spec §4） */
+/*
+ * Adwaita Sans 是可变字体，一个文件就把 400–700 这一段全覆盖了，
+ * 所以 `font-weight` 写的是区间而不是单值——界面上的 600 拿到的是真正的 600，
+ * 不是从相邻字重里挑一个最近的。
+ */
+@font-face {
+  font-family: "Adwaita Sans";
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaSans-Variable.latin.woff2") format("woff2");
+}
+/*
+ * Adwaita Mono（Iosevka 的定制版）上游只发静态字重，没有 600 这一档。
+ * 于是照实声明 400 与 700，界面上那些 `font-weight: 600` 由 CSS 的字体匹配
+ * 算法接过去——目标大于 500 时先朝上找，于是落在 700。这与仓库里 IBM Plex Mono
+ * 只发 400 / 600 两档、让 700 自己落到 600 是同一套规则，不额外编一档出来。
+ */
+@font-face {
+  font-family: "Adwaita Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaMono-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Adwaita Mono";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaMono-Bold.latin.woff2") format("woff2");
+}
+
+/* Noto Sans 同样是可变字体，一个文件覆盖 400–700。 */
+@font-face {
+  font-family: "Noto Sans";
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/NotoSans-Variable.latin.woff2") format("woff2");
+}
+/* Hack 只有 Regular 与 Bold，理由同 Adwaita Mono。 */
+@font-face {
+  font-family: "Hack";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Hack-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Hack";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Hack-Bold.latin.woff2") format("woff2");
+}
+
+/*
+ * Ubuntu 有 Light 300 / Regular 400 / Medium 500 / Bold 700 四档，没有 600。
+ * 取 Medium 而不是 Bold：界面上 32 处 `font-weight: 600` 表达的是「强调」
+ * 而不是「加粗」，Ubuntu Bold 压在 12–15px 的密排表格里太重。
+ * 按 CSS 的字体匹配算法，目标 600 与 700 在只有 400 / 500 两档时都朝下落到
+ * Medium——`DistroMark` 那一处 700 因此也是 Medium，这是已知的、可接受的差一档。
+ */
+@font-face {
+  font-family: "Ubuntu";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Ubuntu-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Ubuntu";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Ubuntu-Medium.latin.woff2") format("woff2");
+}
+/* Ubuntu Mono 只有 Regular 与 Bold，理由同 Adwaita Mono。 */
+@font-face {
+  font-family: "Ubuntu Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/UbuntuMono-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Ubuntu Mono";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/UbuntuMono-Bold.latin.woff2") format("woff2");
+}
+
+/*
+ * 圆角归零是**重置**，不是主张。
+ *
+ * 浏览器给 input / button / fieldset 各自带着一点默认圆角，各家还不一样。
+ * 这一条把它们抹平，之后由各控件按 `--radius-*` 自己说要多圆：StrixMaid 那套
+ * 四档全是 0（spec §4 的「无例外」在那套语言里仍然成立），Fluent 那套是
+ * 2 / 4 / 8 / 胶囊。所以这里写 0 不等于全站方角，只等于「没人表态时方角」。
+ */
 *,
 *::before,
 *::after {
@@ -34,8 +176,8 @@ body {
   background: var(--ground);
   color: var(--ink);
   font-family: var(--ui);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: var(--fs-500);
+  line-height: var(--lh-normal);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -47,13 +189,15 @@ body {
 }
 
 /* 焦点：全站唯一样式（spec §5.4）。
-   留 2px 空是必需的——贴边会和控件自己的 1px 边框糊成「边框变粗了」。
-   用 accent：焦点是「你正在操作的地方」，正是身份层的领地。
+   三条轴都交给设计语言：环色 `--focus`、环宽 `--focus-width`、与控件的间距
+   `--focus-offset`。StrixMaid 是 accent 色、2px、外推 2px——贴边会和控件自己的
+   1px 边框糊成「边框变粗了」，而焦点是「你正在操作的地方」，正是身份层的领地。
+   Fluent 是黑白双色、2px、内收 2px，见下面那条唯一的作用域覆盖。
    唯一的例外是文本输入：它们的焦点表达是所在盒子的边框变 accent
    （Field/SearchBox 的 :focus-within），再套外环就是两层框。 */
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 input:focus-visible,
 textarea:focus-visible,
@@ -62,6 +206,30 @@ select:focus-visible {
 }
 :focus:not(:focus-visible) {
   outline: none;
+}
+
+/*
+ * **全站唯一一处 `[data-design]` 作用域覆盖。**
+ *
+ * Fluent 的焦点环是两层：外层 2px `colorStrokeFocus2`，内侧再叠一层 1px 的
+ * `colorStrokeFocus1`，两色互为反色，于是不论控件是深底还是浅底，总有一层
+ * 与底色形成对比（`react-tabster → createFocusOutlineStyle.ts` 画外层，
+ * 内层由各控件自己叠，例如 `react-button → useButtonStyles.styles.ts`
+ * 的 inset 内阴影）。
+ *
+ * 这一处 token 表达不了：`outline` 只能画一层，两层不同色的环必须再借一个
+ * 绘制通道（这里是 inset 内阴影）。环的颜色、宽度、偏移仍然全部走 token，
+ * 覆盖里只有「多画一层」这一件结构上的事。
+ *
+ * 用 `:where()` 把特异性压到 0，与被覆盖的 `:focus-visible` 同级：
+ * 控件自己的 box-shadow（NavRail 选中行的 3px accent 边条、Table 选中行）
+ * 特异性都更高，不会被这一条吃掉。
+ *
+ * 排除文本输入，理由同上面那条基础规则：它们的焦点表达是盒子边框变色，
+ * 不画环，那么内环也不该有。
+ */
+:where([data-design="fluent"]) :focus-visible:not(input, textarea, select) {
+  box-shadow: inset 0 0 0 var(--stroke) var(--focus-inner);
 }
 
 /*
@@ -75,21 +243,22 @@ select:focus-visible {
   stroke-linejoin: miter;
 }
 
-/* 方头滚动条 */
+/* 方头滚动条。滑块的圆角跟着设计语言走：StrixMaid 是 0，Fluent 是胶囊。 */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
 ::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+  width: var(--sp-6);
+  height: var(--sp-6);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--line-strong);
-  border: 3px solid var(--ground);
+  border: var(--stroke-thicker) solid var(--ground);
+  border-radius: var(--radius-pill);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--ink-3);

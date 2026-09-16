@@ -1,14 +1,14 @@
 .crumb {
   color: var(--ink);
-  font-size: 15px;
+  font-size: var(--fs-700);
   font-weight: 600;
 }
 
 .crumbSub {
   color: var(--ink-3);
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   font-weight: 400;
-  margin-left: 10px;
+  margin-left: var(--sp-5);
 }
 
 /* ---- 工具栏下拉(同进程页用户筛选的规格) ---- */
@@ -17,10 +17,11 @@
 }
 
 .pickBtn {
-  height: 26px;
-  padding: 0 10px;
+  height: var(--row-sm);
+  padding: 0 var(--sp-5);
   background: none;
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
   font: 12px inherit;
   font-family: inherit;
   color: var(--ink-2);
@@ -56,7 +57,7 @@
 .tbl {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
 
 .tbl th {
@@ -67,20 +68,20 @@
   padding: 0;
   text-align: left;
   background: var(--surface);
-  border-bottom: 1px solid var(--line-strong);
+  border-bottom: var(--stroke) solid var(--line-strong);
   white-space: nowrap;
 }
 
 .thBtn {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-3);
   width: 100%;
   height: var(--row);
   align-items: center;
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   background: none;
   border: 0;
-  font-size: 11px;
+  font-size: var(--fs-300);
   font-weight: 600;
   font-family: inherit;
   letter-spacing: 0.04em;
@@ -102,13 +103,13 @@ button.thBtn:hover {
 }
 
 .thArrow {
-  font-size: 9px;
+  font-size: var(--fs-100);
   width: 1em;
 }
 
 .tbl td {
   height: var(--row);
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   white-space: nowrap;
 }
 
@@ -132,7 +133,7 @@ button.thBtn:hover {
 
 .mono {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-300);
 }
 
 .num {
@@ -148,7 +149,7 @@ button.thBtn:hover {
 .nameWrap {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-4);
   min-width: 0;
 }
 
@@ -161,8 +162,8 @@ button.thBtn:hover {
    行高与名称列的排布都不变——否则图标陆续到达时整张表会抖。 */
 .icon {
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: var(--icon);
+  height: var(--icon);
 }
 
 .iconImg {
@@ -200,7 +201,7 @@ button.thBtn:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
 }
 
@@ -212,7 +213,7 @@ button.thBtn:hover {
   bottom: 0;
   z-index: 20;
   width: 400px;
-  border-left: 1px solid var(--line-strong);
+  border-left: var(--stroke) solid var(--line-strong);
   background: var(--surface);
   box-shadow: var(--shadow-pop);
   display: flex;
@@ -224,13 +225,13 @@ button.thBtn:hover {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: var(--stroke) solid var(--line);
 }
 
 .drawerTitle {
-  font-size: 13px;
+  font-size: var(--fs-500);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -239,7 +240,7 @@ button.thBtn:hover {
 
 .drawerSub {
   flex: 1;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
   white-space: nowrap;
 }
@@ -247,39 +248,67 @@ button.thBtn:hover {
 .drawerBody {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--sp-6);
 }
 
 /* cgroup 读数网格,同进程抽屉的裸文本语言 */
 .drawerStats {
   display: grid;
   grid-template-columns: repeat(auto-fill, 110px);
-  gap: 12px 10px;
+  gap: var(--sp-6) var(--sp-5);
   margin-bottom: 14px;
 }
 
 .drawerStats .k {
-  font-size: 11px;
+  font-size: var(--fs-300);
   color: var(--ink-3);
   letter-spacing: 0.04em;
 }
 
 .drawerStats .v {
-  font: 500 15px var(--mono);
-  margin-top: 2px;
+  font: 500 var(--fs-700) var(--mono);
+  margin-top: var(--sp-1);
   white-space: nowrap;
 }
 
 .drawerStats .v small {
-  font-size: 11px;
+  font-size: var(--fs-300);
   font-weight: 400;
   color: var(--ink-3);
+}
+
+/* 启用方式下拉。三个取值互斥,照 Windows 服务管理器的「启动类型」做成下拉,
+   而不是「开机自启」「屏蔽」两个开关按钮。
+   焦点不画环:base.css 把 select 归在文本输入一类(outline: none),
+   焦点表达统一成边框变 accent,与 Field 一致。 */
+.enableSel {
+  font: inherit;
+  font-size: var(--fs-400);
+  color: inherit;
+  background: var(--surface-2);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 2px var(--sp-4);
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.enableSel:focus-visible {
+  border-color: var(--accent);
+}
+
+/* 禁用态本身就是「这个 unit 改不了启用方式」的信号,不另加说明文字;
+   原因(static / indirect / …)走 title。 */
+.enableSel:disabled {
+  background: none;
+  color: var(--ink-3);
+  cursor: default;
 }
 
 /* 折叠块:依赖 / unit 文件 */
 .fold {
   margin-top: 14px;
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
 
 .fold summary {
@@ -288,38 +317,39 @@ button.thBtn:hover {
 }
 
 .foldBody {
-  margin-top: 6px;
+  margin-top: var(--sp-3);
 }
 
 .depGroup {
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-4);
 }
 
 .depGroup .k {
-  font-size: 11px;
+  font-size: var(--fs-300);
   color: var(--ink-3);
   letter-spacing: 0.04em;
 }
 
 .depGroup .v {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
   overflow-wrap: anywhere;
 }
 
 .filePath {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
-  margin: 8px 0 4px;
+  margin: var(--sp-4) 0 var(--sp-2);
   overflow-wrap: anywhere;
 }
 
 .fileBody {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  padding: 8px;
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-4);
   margin: 0;
   max-height: 260px;
   overflow: auto;
@@ -329,11 +359,11 @@ button.thBtn:hover {
 /* ---- 最近日志块 ---- */
 .logLine {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-4);
   align-items: baseline;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
-  padding: 2px 0;
+  padding: var(--sp-1) 0;
   min-width: 0;
 }
 
@@ -345,7 +375,7 @@ button.thBtn:hover {
 .logPrio {
   flex: none;
   font-weight: 600;
-  font-size: 10px;
+  font-size: var(--fs-200);
 }
 
 .logPrioWarn {
@@ -365,8 +395,8 @@ button.thBtn:hover {
 
 .logAll {
   display: inline-block;
-  margin-top: 6px;
-  font-size: 12px;
+  margin-top: var(--sp-3);
+  font-size: var(--fs-400);
   color: var(--ink-2);
   text-decoration: none;
 }
@@ -378,28 +408,28 @@ button.thBtn:hover {
 
 /* ---- 动作区 ---- */
 .actions {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
+  margin-top: var(--sp-7);
+  padding-top: var(--sp-6);
+  border-top: var(--stroke) solid var(--line);
 }
 
 .actionRow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-5);
   flex-wrap: wrap;
 }
 
 .actionErr {
   color: var(--crit);
-  font-size: 12px;
-  margin: 6px 0 0;
+  font-size: var(--fs-400);
+  margin: var(--sp-3) 0 0;
   overflow-wrap: anywhere;
 }
 
 .actionNote {
   color: var(--ink-3);
-  font-size: 12px;
-  margin: 6px 0 0;
+  font-size: var(--fs-400);
+  margin: var(--sp-3) 0 0;
 }

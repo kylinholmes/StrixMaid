@@ -4,8 +4,8 @@
 .rail {
   width: var(--rail);
   background: var(--surface-2);
-  border-right: 1px solid var(--line);
-  padding: 6px 0;
+  border-right: var(--stroke) solid var(--line);
+  padding: var(--sp-3) 0;
   overflow-y: auto;
   flex: none;
   display: flex;
@@ -22,11 +22,11 @@
 }
 
 .groupLabel {
-  height: 24px;
+  height: var(--row-xs);
   display: flex;
   align-items: flex-end;
   padding: 0 12px 3px;
-  font-size: 11px;
+  font-size: var(--fs-300);
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--ink-3);
@@ -34,27 +34,27 @@
 
 .groupSep {
   display: none;
-  border-top: 1px solid var(--line);
-  margin: 4px 0;
+  border-top: var(--stroke) solid var(--line);
+  margin: var(--sp-2) 0;
 }
 
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-5);
   height: var(--row);
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   color: var(--ink-2);
   background: transparent;
   border: 0;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-500);
   cursor: pointer;
   text-align: left;
   width: 100%;
   transition:
-    background-color var(--t-color),
-    color var(--t-color);
+    background-color var(--t-color) var(--ease),
+    color var(--t-color) var(--ease);
 }
 .row:hover {
   background: var(--surface-3);
@@ -64,7 +64,7 @@
   background: var(--sel);
   color: var(--ink);
   font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset var(--stroke-thicker) 0 0 var(--accent);
 }
 .row svg {
   flex: none;
@@ -77,10 +77,11 @@
 
 .count {
   font-family: var(--mono);
-  font-size: 10px;
-  line-height: 15px;
+  font-size: var(--fs-200);
+  line-height: var(--lh-200);
   color: var(--ink-3);
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-sm);
   padding: 0 5px;
 }
 .countBad {
@@ -98,7 +99,7 @@
   color: var(--ink-3);
 }
 .lock {
-  font-size: 10px;
+  font-size: var(--fs-200);
   color: var(--ink-3);
 }
 

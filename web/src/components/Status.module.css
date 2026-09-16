@@ -1,7 +1,7 @@
 .dot {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-3);
   white-space: nowrap;
 }
 .mark {
@@ -27,10 +27,11 @@
 
 .tag {
   font-family: var(--mono);
-  font-size: 10px;
-  line-height: 15px;
+  font-size: var(--fs-200);
+  line-height: var(--lh-200);
   color: var(--ink-3);
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-sm);
   padding: 0 5px;
   white-space: nowrap;
   display: inline-block;

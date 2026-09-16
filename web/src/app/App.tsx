@@ -22,14 +22,19 @@ const queryClient = new QueryClient({
   },
 });
 
-/** 发行版主题联动：capabilities 的 identity 一到就把 accent 切到这台机器的发行版。 */
-function DistroSync() {
+/**
+ * 平台联动：capabilities 的 identity 一到就把设计语言与发行版身份都切到这台机器。
+ *
+ * 传的是 `PlatformIdentity` 而不是裸的 id，将来后端加上桌面环境时
+ * 只在这里多带一个字段，`pickTheme` 那边不用改调用形状。
+ */
+function PlatformSync() {
   const caps = useQuery(capabilitiesQuery());
-  const setDistroById = useTheme((t) => t.setDistroById);
+  const setPlatform = useTheme((t) => t.setPlatform);
   const osId = caps.data?.identity?.os_id;
   useEffect(() => {
-    if (osId !== undefined) setDistroById(osId);
-  }, [osId, setDistroById]);
+    if (osId !== undefined) setPlatform({ osId });
+  }, [osId, setPlatform]);
   return null;
 }
 
@@ -42,7 +47,7 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <DistroSync />
+        <PlatformSync />
         <Routes>
           {/* 组件合集页保留为开发入口，不进导航 */}
           <Route path="/gallery" element={<Gallery />} />

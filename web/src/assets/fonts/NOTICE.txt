@@ -1,0 +1,136 @@
+随本产品分发的字体：版权声明、许可与出处
+========================================
+
+这个文件存在的理由是许可条款本身要求它存在。
+
+SIL Open Font License 1.1 第 2 条与 Ubuntu Font Licence 1.0 第 1 条措辞几乎
+一样：字体的每一份副本都必须带着版权声明与许可全文，可以是独立的文本文件、
+可读的文件头，或者二进制文件里用户查得到的元数据字段。woff2 子集的 name 表
+在子集化过程中会被裁剪，不能指望它继续承载这些声明，所以声明落在这里，
+许可全文落在 `./licenses/`。
+
+下面每一段记的是：字族名、版权行（逐字抄自上游的许可文件或字体 name 表，
+不是转述）、许可、取得该文件的确切地址、以及本仓库里的这份 woff2 是怎么来的。
+
+只收拉丁子集。中文不自托管——一个中文子集就是几 MB，而设计语言里的
+`--cjk` 一直走被管机器上的本机字体，这一条没有改。
+
+
+Ubuntu / Ubuntu Mono
+--------------------
+版权：Copyright 2011 Canonical Ltd. Licensed under the Ubuntu Font Licence 1.0
+商标：Ubuntu and Canonical are registered trademarks of Canonical Ltd.
+      （许可不授予任何商标权利，全部保留。）
+许可：Ubuntu Font Licence 1.0 —— ./licenses/UFL-1.0-Ubuntu.txt
+      （google/fonts 仓库里 `ufl/ubuntu/UFL.txt` 与 `ufl/ubuntumono/UFL.txt`
+      两份逐字节相同，因此只留一份。）
+上游：https://github.com/google/fonts/tree/main/ufl/ubuntu
+      https://github.com/google/fonts/tree/main/ufl/ubuntumono
+文件：
+  Ubuntu-Regular.latin.woff2
+    https://fonts.gstatic.com/s/ubuntu/v21/4iCs6KVjbNBYlgoKfw72.woff2
+  Ubuntu-Medium.latin.woff2
+    https://fonts.gstatic.com/s/ubuntu/v21/4iCv6KVjbNBYlgoCjC3jsGyN.woff2
+  UbuntuMono-Regular.latin.woff2
+    https://fonts.gstatic.com/s/ubuntumono/v19/KFOjCneDtsqEr0keqCMhbCc6CsQ.woff2
+  UbuntuMono-Bold.latin.woff2
+    https://fonts.gstatic.com/s/ubuntumono/v19/KFO-CneDtsqEr0keqCMhbC-BL9H1tY0.woff2
+来源：Google Fonts 自己构建并分发的 `latin` 子集，原样取回，本仓库没有再动过。
+
+关于 UFL 第 2(c) 条的一点说明（不回避，留给后来人判断）：
+UFL 把「改变格式」也算作 Modified Version，而 2(c) 要求非实质性改动的
+Modified Version 在原名后面追加 "derivative X"。按字面读，任何 Ubuntu 的
+网页字体子集都该改名——但版权持有人 Canonical 自己在 assets.ubuntu.com 上
+就是以 "Ubuntu" 这个名字分发 woff2 子集的，Google Fonts 亦然。本项目沿用
+上游与版权持有人的既成做法，保留原名，并在此写明这一条的存在。
+需要改动时请回到 UFL 原文，不要依赖这段转述。
+
+
+Noto Sans
+---------
+版权：Copyright 2022 The Noto Project Authors
+      (https://github.com/notofonts/latin-greek-cyrillic)
+许可：SIL Open Font License 1.1 —— ./licenses/OFL-1.1-NotoSans.txt
+      版权行里**没有** Reserved Font Name，因此子集保留 "Noto Sans" 这个名字
+      不触发 OFL 第 3 条。
+上游：https://github.com/google/fonts/tree/main/ofl/notosans
+文件：
+  NotoSans-Variable.latin.woff2
+    https://fonts.gstatic.com/s/notosans/v42/o-0bIpQlx3QUlC5A4PNB6Ryti20_6n1iPHjc5a7duw.woff2
+来源：Google Fonts 构建的 `latin` 子集，原样取回。这一份是可变字体
+      （wght 轴，wdth 已被上游定在 100%），一个文件覆盖 400–700 全部字重。
+
+
+Hack
+----
+版权：The work in the Hack project is Copyright 2018 Source Foundry Authors
+      and licensed under the MIT License
+      The work in the DejaVu project was committed to the public domain.
+      Bitstream Vera Sans Mono Copyright 2003 Bitstream Inc. and licensed
+      under the Bitstream Vera License with Reserved Font Names "Bitstream"
+      and "Vera"
+许可：MIT + Bitstream Vera License —— ./licenses/LICENSE-Hack.md
+      Bitstream Vera 那部分要求：改动过的字体不得使用含 "Bitstream" 或
+      "Vera" 的名字。Hack 本身早已改名，子集沿用 "Hack"，不触发这一条。
+上游：https://github.com/source-foundry/Hack/releases/tag/v3.003
+      https://github.com/source-foundry/Hack/releases/download/v3.003/Hack-v3.003-webfonts.zip
+文件：
+  Hack-Regular.latin.woff2   ← 发行包里的 web/fonts/hack-regular.woff2
+  Hack-Bold.latin.woff2      ← 发行包里的 web/fonts/hack-bold.woff2
+来源：上游发行包里的完整 woff2，在本仓库用 harfbuzz 的 hb-subset 裁成拉丁子集
+      （字符集见本文件末尾）。旁证：上游自己也发了一份 `-subset` 构建，
+      23 244 / 23 512 字节，与这里裁出来的 23 476 / 23 960 字节同一量级。
+
+
+Adwaita Sans / Adwaita Mono
+---------------------------
+版权：Copyright (c) 2016, The Inter Project Authors
+      (https://github.com/rsms/inter)
+      Copyright (c) 2015-2025, Renzhi Li (aka. Belleve Invis, belleve@typeof.net)
+      Copyright (c) 2025, Jamie Gravendeel (https://jamie.garden)
+      Copyright (c) 2025, Florian Müllner
+许可：SIL Open Font License 1.1 —— ./licenses/OFL-1.1-Adwaita.txt
+      同样**没有** Reserved Font Name，子集保留原名不触发 OFL 第 3 条。
+      （Adwaita Sans 的 name 表里带着 "Inter UI and Inter is a trademark of
+      rsms." 这一行商标声明；子集不使用 Inter 这个名字。）
+上游：https://gitlab.gnome.org/GNOME/adwaita-fonts
+文件：
+  AdwaitaSans-Variable.latin.woff2  ← sans/AdwaitaSans-Regular.ttf
+  AdwaitaMono-Regular.latin.woff2   ← mono/AdwaitaMono-Regular.ttf
+  AdwaitaMono-Bold.latin.woff2      ← mono/AdwaitaMono-Bold.ttf
+来源：上游 TTF，在本仓库用 harfbuzz 的 hb-subset 裁成拉丁子集。
+      AdwaitaSans-Regular.ttf 是可变字体，两条轴：opsz 14–32、wght 100–900。
+      子集时把 opsz 钉在 14（上游默认值，正文光学尺寸），wght 收窄到
+      400–700（界面只用得到这一段）。
+
+
+IBM Plex Mono
+-------------
+版权：Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+许可：SIL Open Font License 1.1 —— ./licenses/OFL-1.1-IBMPlexMono.txt
+上游：https://github.com/IBM/plex
+文件：
+  IBMPlexMono-Regular.latin.woff2
+  IBMPlexMono-SemiBold.latin.woff2
+来源：**不确定**。这两个文件在本次改动之前就在仓库里（`web/src/assets/`），
+      当时没有随附许可，也没有留下出处。逐字节比对过 Google Fonts 今天的
+      `latin` 子集（14 708 字节），与仓库里这份（10 052 字节）不是同一个构建，
+      所以无法断言它来自哪条分发渠道。这里补上 OFL 全文，是因为 IBM Plex 的
+      每一个版本都在 OFL 1.1 之下，许可本身没有疑问，而 OFL 第 2 条要求许可
+      随字体分发——先把确定的部分补齐。
+      仍待确认的是：这份构建是不是 Modified Version。若是，它用了保留字名
+      "Plex"，触发 OFL 第 3 条，应当换成 IBM 官方的 woff2 构建，或者改名。
+
+
+拉丁子集的字符集
+----------------
+本仓库自己裁的那几份，字符集逐段照抄 Google Fonts 的 `latin` 子集，
+好让全部自托管字体的覆盖范围一致：
+
+  U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+  U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+  U+2212, U+2215, U+FEFF, U+FFFD
+
+工具是 harfbuzz 的 hb-subset（经 npm 上的 `subset-font`，即 harfbuzzjs 的
+wasm 构建）。它没有进 package.json：子集是一次性产物，产物已经在仓库里，
+把一个只在改字体时才跑一次的依赖挂进日常构建不划算。要重做时装一次即可。

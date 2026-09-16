@@ -1,14 +1,14 @@
 .crumb {
   color: var(--ink);
-  font-size: 15px;
+  font-size: var(--fs-700);
   font-weight: 600;
 }
 
 .crumbSub {
   color: var(--ink-3);
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   font-weight: 400;
-  margin-left: 10px;
+  margin-left: var(--sp-5);
 }
 
 /* ---- 工具栏:用户筛选 ---- */
@@ -17,10 +17,11 @@
 }
 
 .userBtn {
-  height: 26px;
-  padding: 0 10px;
+  height: var(--row-sm);
+  padding: 0 var(--sp-5);
   background: none;
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
   font: 12px inherit;
   font-family: inherit;
   color: var(--ink-2);
@@ -56,7 +57,7 @@
 .tbl {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
 
 .tbl th {
@@ -67,20 +68,20 @@
   padding: 0;
   text-align: left;
   background: var(--surface);
-  border-bottom: 1px solid var(--line-strong);
+  border-bottom: var(--stroke) solid var(--line-strong);
   white-space: nowrap;
 }
 
 .thBtn {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-3);
   width: 100%;
   height: var(--row);
   align-items: center;
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   background: none;
   border: 0;
-  font-size: 11px;
+  font-size: var(--fs-300);
   font-weight: 600;
   font-family: inherit;
   letter-spacing: 0.04em;
@@ -103,13 +104,13 @@ button.thBtn:hover {
 
 /* 表头总量(Win10:列头带整机占用) */
 .thTotal {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   font-weight: 400;
   color: var(--ink-2);
 }
 
 .thArrow {
-  font-size: 9px;
+  font-size: var(--fs-100);
   width: 1em;
 }
 
@@ -119,7 +120,7 @@ button.thBtn:hover {
 
 .tbl td {
   height: var(--row);
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   white-space: nowrap;
 }
 
@@ -148,7 +149,7 @@ button.thBtn:hover {
 
 .mono {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-300);
 }
 
 /* 名称列:进程名 + 灰色命令行,单元格内截断,不许撑开表 */
@@ -160,7 +161,7 @@ button.thBtn:hover {
 .nameWrap {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-3);
   min-width: 0;
 }
 
@@ -173,8 +174,8 @@ button.thBtn:hover {
    行高与名称列的排布都不变——否则图标陆续到达时整张表会抖。 */
 .icon {
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: var(--icon);
+  height: var(--icon);
 }
 
 .iconImg {
@@ -186,7 +187,7 @@ button.thBtn:hover {
 }
 
 .cmd {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -202,7 +203,7 @@ button.thBtn:hover {
   padding: 0;
   background: none;
   border: 0;
-  font-size: 11px;
+  font-size: var(--fs-300);
   color: var(--ink-2);
   cursor: pointer;
   text-align: center;
@@ -219,7 +220,7 @@ button.twist:hover {
 
 /* 状态单字母(htop 式),异常态才上警示色 */
 .state {
-  font: 600 11px var(--mono);
+  font: 600 var(--fs-300) var(--mono);
 }
 
 .stateWarn {
@@ -239,7 +240,7 @@ button.twist:hover {
   bottom: 0;
   z-index: 20;
   width: 360px;
-  border-left: 1px solid var(--line-strong);
+  border-left: var(--stroke) solid var(--line-strong);
   background: var(--surface);
   box-shadow: var(--shadow-pop);
   display: flex;
@@ -251,13 +252,13 @@ button.twist:hover {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: var(--stroke) solid var(--line);
 }
 
 .drawerTitle {
-  font-size: 13px;
+  font-size: var(--fs-500);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -266,48 +267,49 @@ button.twist:hover {
 
 .drawerPid {
   flex: 1;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
 }
 
 .drawerBody {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: var(--sp-6);
 }
 
 /* 动态读数:裸文本网格,同性能页数字区的语言 */
 .drawerStats {
   display: grid;
   grid-template-columns: repeat(auto-fill, 96px);
-  gap: 12px 10px;
+  gap: var(--sp-6) var(--sp-5);
   margin-bottom: 14px;
 }
 
 .drawerStats .k {
-  font-size: 11px;
+  font-size: var(--fs-300);
   color: var(--ink-3);
   letter-spacing: 0.04em;
 }
 
 .drawerStats .v {
-  font: 500 15px var(--mono);
-  margin-top: 2px;
+  font: 500 var(--fs-700) var(--mono);
+  margin-top: var(--sp-1);
   white-space: nowrap;
 }
 
 .drawerStats .v small {
-  font-size: 11px;
+  font-size: var(--fs-300);
   font-weight: 400;
   color: var(--ink-3);
 }
 
 .cmdBox {
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  padding: 6px 8px;
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
   margin-bottom: 14px;
   overflow-wrap: anywhere;
   max-height: 80px;
@@ -316,7 +318,7 @@ button.twist:hover {
 
 .env {
   margin-top: 14px;
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
 
 .env summary {
@@ -325,8 +327,8 @@ button.twist:hover {
 }
 
 .envList {
-  margin-top: 6px;
-  font: 11px var(--mono);
+  margin-top: var(--sp-3);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-2);
   max-height: 200px;
   overflow-y: auto;
@@ -340,44 +342,45 @@ button.twist:hover {
 
 /* ---- 动作区 ---- */
 .actions {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
+  margin-top: var(--sp-7);
+  padding-top: var(--sp-6);
+  border-top: var(--stroke) solid var(--line);
 }
 
 .actionRow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-5);
 }
 
 .niceLabel {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: var(--sp-3);
+  font-size: var(--fs-400);
   color: var(--ink-2);
 }
 
 .niceInput {
   width: 56px;
-  height: 26px;
-  padding: 0 6px;
-  border: 1px solid var(--line);
+  height: var(--row-sm);
+  padding: 0 var(--sp-3);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--ink);
-  font: 12px var(--mono);
+  font: var(--fs-400) var(--mono);
 }
 
 .actionErr {
   color: var(--crit);
-  font-size: 12px;
-  margin: 6px 0 0;
+  font-size: var(--fs-400);
+  margin: var(--sp-3) 0 0;
 }
 
 .actionNote {
   color: var(--ink-3);
-  font-size: 12px;
-  margin: 6px 0 0;
+  font-size: var(--fs-400);
+  margin: var(--sp-3) 0 0;
 }

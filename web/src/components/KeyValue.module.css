@@ -1,24 +1,29 @@
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px 20px;
+  gap: var(--sp-5) var(--sp-8);
+}
+/* 强制单列。用 `.grid.one` 而不是单靠书写顺序压过 .grid,特异性高一级,
+   不依赖 CSS Modules 输出的规则次序。 */
+.grid.one {
+  grid-template-columns: 1fr;
 }
 .item {
   min-width: 0;
 }
 .k {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-200);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-3);
 }
 .v {
-  font-size: 13px;
+  font-size: var(--fs-500);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 .mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
