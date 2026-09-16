@@ -1,20 +1,21 @@
 .btn {
   font: inherit;
-  font-size: 13px;
-  line-height: 1;
+  font-size: var(--fs-500);
+  line-height: var(--lh-none);
   padding: 6px 13px;
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--ink);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-3);
   white-space: nowrap;
   transition:
-    background-color var(--t-color),
-    border-color var(--t-color),
-    color var(--t-color);
+    background-color var(--t-color) var(--ease),
+    border-color var(--t-color) var(--ease),
+    color var(--t-color) var(--ease);
 }
 .btn:hover:not(:disabled) {
   background: var(--surface-2);
@@ -54,11 +55,11 @@
 }
 
 .sm {
-  font-size: 12px;
-  padding: 4px 10px;
+  font-size: var(--fs-400);
+  padding: var(--sp-2) var(--sp-5);
 }
 .icon {
-  padding: 6px;
+  padding: var(--sp-3);
 }
 .icon svg {
   display: block;

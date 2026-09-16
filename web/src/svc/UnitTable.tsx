@@ -49,8 +49,10 @@ export function enableLabel(u: Unit): { text: string; tone?: "dim" | "warn" } {
     case "disabled":
       return { text: "手动", tone: "dim" };
     case "masked":
-    case "masked_runtime":
       return { text: "已屏蔽", tone: "warn" };
+    // 只在本次启动内有效,与持久化的 masked 不是一回事:重启后自行消失。
+    case "masked_runtime":
+      return { text: "已屏蔽（本次）", tone: "warn" };
     case "static":
       return { text: "static", tone: "dim" };
     case "indirect":

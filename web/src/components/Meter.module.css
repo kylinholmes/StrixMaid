@@ -1,12 +1,13 @@
 .wrap {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-4);
 }
 .track {
   width: var(--meter-w, 104px);
   height: 9px;
   background: var(--surface-3);
+  border-radius: var(--radius-sm);
   position: relative;
   flex: none;
 }
@@ -14,11 +15,12 @@
   position: absolute;
   inset: 0 auto 0 0;
   display: block;
-  transition: width var(--t-color);
+  border-radius: var(--radius-sm);
+  transition: width var(--t-color) var(--ease);
 }
 .value {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: var(--fs-350);
   font-variant-numeric: tabular-nums;
 }
 .srOnly {

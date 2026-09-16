@@ -9,41 +9,41 @@
   width: 300px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--sp-6);
 }
 
 .form h1 {
-  font-size: 17px;
+  font-size: var(--fs-900);
   font-weight: 600;
   margin: 0;
 }
 
 .formSub {
   color: var(--ink-3);
-  font: 12px var(--mono);
+  font: var(--fs-400) var(--mono);
   margin: 0;
 }
 
 .errMsg {
   color: var(--crit);
-  font-size: 12px;
+  font-size: var(--fs-400);
   margin: 0;
 }
 
 .promptInfo {
   color: var(--ink-2);
-  font-size: 12px;
+  font-size: var(--fs-400);
   margin: 0;
 }
 
 .promptError {
   color: var(--crit);
-  font-size: 12px;
+  font-size: var(--fs-400);
   margin: 0;
 }
 
 .hint {
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: var(--fs-400);
   margin: 0;
 }

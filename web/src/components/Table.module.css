@@ -7,21 +7,21 @@
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: var(--fs-450);
 }
 
 .table th {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-200);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-3);
   font-weight: 400;
   text-align: left;
-  padding: 0 10px;
-  height: 26px;
+  padding: 0 var(--sp-5);
+  height: var(--row-sm);
   white-space: nowrap;
-  border-bottom: 1px solid var(--line-strong);
+  border-bottom: var(--stroke) solid var(--line-strong);
   background: var(--surface);
   position: sticky;
   top: 0;
@@ -32,7 +32,7 @@
 }
 
 .table td {
-  padding: 0 10px;
+  padding: 0 var(--sp-5);
   height: var(--row);
   white-space: nowrap;
   overflow: hidden;
@@ -46,7 +46,7 @@
 }
 .table td.mono {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-400);
 }
 .table td.dim {
   color: var(--ink-3);
@@ -54,7 +54,7 @@
 
 .row {
   background: var(--surface);
-  transition: background-color var(--t-color);
+  transition: background-color var(--t-color) var(--ease);
 }
 .row:nth-child(even) {
   background: var(--surface-2);
@@ -67,7 +67,7 @@
 }
 /* 左缘 3px accent 条：选中是「你正在操作的行」，身份层的领地 */
 .row[aria-selected="true"] td:first-child {
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset var(--stroke-thicker) 0 0 var(--accent);
 }
 /* 选中行额外加粗主字段（spec §5.3） */
 .row[aria-selected="true"] td:first-child {
