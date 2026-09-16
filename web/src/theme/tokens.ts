@@ -19,7 +19,15 @@
  */
 
 import type { Theme } from "./design";
-import { FLUENT_THEME, GENERIC_THEME, THEMES } from "./designs";
+import {
+  ADWAITA_THEME,
+  BREEZE_THEME,
+  FLUENT_THEME,
+  GENERIC_THEME,
+  MACOS_THEME,
+  THEMES,
+  YARU_THEME,
+} from "./designs";
 
 export type {
   Design,
@@ -58,7 +66,15 @@ export {
 export type { Ramp } from "./designs/strixmaid";
 /** 通用主题的中性色明度阶。属于 StrixMaid 那套语言，从它那里再导出。 */
 export { RAMP } from "./designs/strixmaid";
-export { FLUENT_THEME, GENERIC_THEME, THEMES };
+export {
+  ADWAITA_THEME,
+  BREEZE_THEME,
+  FLUENT_THEME,
+  GENERIC_THEME,
+  MACOS_THEME,
+  THEMES,
+  YARU_THEME,
+};
 
 /** 已注册的设计语言 id。从 `THEMES` 推导，不要另写一份。 */
 export type ThemeId = (typeof THEMES)[number]["id"];
@@ -73,30 +89,70 @@ export interface PlatformIdentity {
   /** 后端 `SystemInfo.os.id`，今天就有 */
   readonly osId?: string | null;
   /**
-   * 桌面环境（`gnome` / `kde` / `xfce` …）。**今天后端还不报这个字段**，
-   * 所以恒为 undefined，行为与只看 `osId` 完全一致。
+   * 桌面环境。取的是 Linux 上 `XDG_CURRENT_DESKTOP` 那个值的形状，
+   * 所以既可能是 `KDE` 这样的单值，也可能是 `ubuntu:GNOME` 这样的冒号分隔表。
+   *
+   * **今天后端还不报这个字段**，所以恒为 undefined，行为与只看 `osId` 完全一致。
+   * 这三套桌面语言（Adwaita / Breeze / Yaru）今天只能在设置里手动选中，
+   * 自动识别那条路要等后端补上这个字段——那是 `crates/` 的改动，单独一轮。
    */
   readonly desktop?: string | null;
 }
 
-/** 桌面环境 → 设计语言。今天是空的，Adwaita / Breeze / Yaru 将来加在这里。 */
-const THEME_BY_DESKTOP: Readonly<Record<string, Theme>> = {};
+/**
+ * 桌面环境 → 设计语言。
+ *
+ * 键是**小写之后**的 `XDG_CURRENT_DESKTOP` 的某一段，匹配在 `pickTheme` 里做，
+ * 见那里对冒号分隔的处理。
+ *
+ * 收哪些键是按「这个值在真机上真的会出现」来定的，不求全：
+ *
+ * - GNOME 在不同发行版上会报 `GNOME`、`GNOME-Classic`、`GNOME-Flashback`；
+ * - KDE Plasma 报 `KDE`；`plasma` 是 wayland 会话名里常见的另一种拼法；
+ * - Ubuntu 的 GNOME 会话报 `ubuntu:GNOME`，`ubuntu` 那一段排在前面，
+ *   所以 Ubuntu 装 GNOME 拿到的是 Yaru 而不是 Adwaita——这正是要的：
+ *   那台机器上的 GNOME 长的就是 Yaru 的样子。Unity 会话报 `Unity`，同样归 Yaru。
+ *
+ * 认不出的桌面（XFCE、Cinnamon、MATE、i3……）不收：它们各有各的主题，
+ * 硬塞给其中一套等于在界面上假装认识这台机器。落回通用主题。
+ */
+const THEME_BY_DESKTOP: Readonly<Record<string, Theme>> = {
+  gnome: ADWAITA_THEME,
+  "gnome-classic": ADWAITA_THEME,
+  "gnome-flashback": ADWAITA_THEME,
+  kde: BREEZE_THEME,
+  "kde-plasma": BREEZE_THEME,
+  plasma: BREEZE_THEME,
+  ubuntu: YARU_THEME,
+  unity: YARU_THEME,
+};
 
-/** 操作系统 → 设计语言。只有 Windows 有专属的一套，其余落回通用。 */
-const THEME_BY_OS: Readonly<Record<string, Theme>> = { windows: FLUENT_THEME };
+/**
+ * 操作系统 → 设计语言。
+ *
+ * macOS 不走桌面环境那一档：它只有一套界面，`osId` 一档就够。
+ * Linux 反过来，界面长什么样由桌面环境决定、不由发行版决定，所以 Linux 的
+ * 各个 `osId` 一个都不在这张表里，全靠 `THEME_BY_DESKTOP`。
+ */
+const THEME_BY_OS: Readonly<Record<string, Theme>> = {
+  windows: FLUENT_THEME,
+  macos: MACOS_THEME,
+};
 
 /**
  * 设计语言偏好：**用户自己选的那一档**，不是被管机器的属性。
  *
- * - `system`：跟随被管机器的平台（今天 Windows → Fluent，将来 macOS → HIG、
+ * - `system`：跟随被管机器的平台（Windows → Fluent，macOS → macOS，
  *   Linux 按桌面环境 → Adwaita / Breeze / Yaru）；
  * - 其余取值是某套设计语言的 `Theme.id`：强制用那一套，不看对面是什么机器。
  *
  * 可选的具体语言**从 `THEMES` 推导**，不是写死的联合类型。界面上只应当出现
  * 真的实现了的那几套：列一个选了没反应、或者静默回落的选项，等于在界面上编能力。
  *
- * 默认取 `system`。今天在 Linux 与 macOS 上这一档的结果就是 StrixMaid 那套，
- * 与加这个设置之前零差异；只有 Windows 用户会看见 Fluent，而那正是要的效果。
+ * 默认取 `system`。**桌面环境那一档今天在真机上永远不命中**（后端还不报
+ * `desktop`），所以 Linux 这一档的结果仍然是 StrixMaid 那套，与加这个设置之前
+ * 零差异；Windows 用户看见 Fluent，macOS 用户看见 macOS 那套。
+ * 想在 Linux 上用 Adwaita / Breeze / Yaru，今天只能在设置里手动选。
  *
  * **这一档不影响 accent。** accent 回答的是「正在看哪台机器」，属于身份层
  * （distro.ts），与界面长什么样是两件事：选了 StrixMaid 的用户连上 Windows，
@@ -149,9 +205,13 @@ export function asDesign(value: unknown): DesignPreference {
  * 偏好为 `system` 时才按机器挑，优先级是**桌面环境 > 操作系统 > 通用**。
  * 桌面环境排在前面，因为界面长什么样由桌面环境决定，不由发行版决定：
  * Ubuntu 装 KDE 该用 Breeze，Fedora 装 GNOME 该用 Adwaita，
- * 而没有桌面的服务器两者都不是，落回通用。Windows 上没有这个分叉，`osId` 一档就够。
+ * 而没有桌面的服务器两者都不是，落回通用。Windows 与 macOS 上没有这个分叉，
+ * `osId` 一档就够。
  *
  * 认不出时返回通用主题，不假装认识这台机器——与 `findDistro` 的同一条约定。
+ *
+ * **注意：后端今天还不报 `desktop`**，所以桌面环境那一档在真机上恒不命中，
+ * Adwaita / Breeze / Yaru 只能在设置里手动选。详见 `PlatformIdentity.desktop`。
  *
  * `design` 有默认值而不是必传：默认档的结果与加这个参数之前逐字相同，
  * 于是「只问机器该用什么」的调用点（测试、将来的预览）可以继续只传一个参数。
@@ -164,8 +224,15 @@ export function pickTheme(
   // 而不是抛错或给一块空白。`asDesign` 在入口处已经拦过一道，这里是第二道。
   const forced = design === "system" ? undefined : THEMES.find((t) => t.id === design);
   if (forced) return forced;
-  const desktop = identity.desktop?.toLowerCase();
-  if (desktop && THEME_BY_DESKTOP[desktop]) return THEME_BY_DESKTOP[desktop];
+  // `XDG_CURRENT_DESKTOP` 是**冒号分隔的一张表**（`ubuntu:GNOME`、
+  // `X-Cinnamon`），不是单值。按顺序试每一段，第一个认得出的算数：
+  // Ubuntu 的 GNOME 会话报 `ubuntu:GNOME`，`ubuntu` 在前，于是拿到 Yaru
+  // 而不是 Adwaita——那台机器上的 GNOME 长的就是 Yaru 的样子。
+  // 大小写一并归一，后端将来原样透传环境变量也认得出。
+  for (const part of identity.desktop?.toLowerCase().split(":") ?? []) {
+    const byDesktop = THEME_BY_DESKTOP[part.trim()];
+    if (byDesktop) return byDesktop;
+  }
   const os = identity.osId?.toLowerCase();
   if (os && THEME_BY_OS[os]) return THEME_BY_OS[os];
   return GENERIC_THEME;

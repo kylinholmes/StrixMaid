@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { DISTROS, UNKNOWN_DISTRO } from "./distro";
 import {
+  ADWAITA_THEME,
   asDesign,
+  BREEZE_THEME,
   DEFAULT_DESIGN,
   DESIGN_OPTIONS,
   type DesignPreference,
   FLUENT_THEME,
   GENERIC_THEME,
+  MACOS_THEME,
   type Mode,
   type NeutralToken,
   pickTheme,
@@ -14,6 +17,7 @@ import {
   THEMES,
   type Theme,
   type TokenSet,
+  YARU_THEME,
 } from "./tokens";
 
 const MODES: readonly Mode[] = ["light", "dark"];
@@ -137,10 +141,20 @@ describe.each(THEMES)("$name 主题", (theme: Theme) => {
   });
 });
 
+/** 有专属设计语言的那两个操作系统。其余 `osId` 一律落回通用。 */
+const THEME_BY_OS_EXPECTED: Readonly<Record<string, Theme>> = {
+  windows: FLUENT_THEME,
+  macos: MACOS_THEME,
+};
+
 describe("pickTheme（挑设计语言）", () => {
-  it("Windows 用 Fluent，其余一律通用", () => {
-    expect(pickTheme({ osId: "windows" })).toBe(FLUENT_THEME);
-    for (const d of DISTROS.filter((x) => x.id !== "windows")) {
+  it("Windows 用 Fluent、macOS 用 macOS 那套，其余一律通用", () => {
+    for (const [osId, theme] of Object.entries(THEME_BY_OS_EXPECTED)) {
+      expect(pickTheme({ osId }), osId).toBe(theme);
+    }
+    // Linux 的各个发行版一个都不在 osId 这张表里：界面长什么样由桌面环境决定，
+    // 不由发行版决定，所以 Linux 走的是下面那一组的 desktop 这一档。
+    for (const d of DISTROS.filter((x) => !(x.id in THEME_BY_OS_EXPECTED))) {
       expect(pickTheme({ osId: d.id }), d.id).toBe(GENERIC_THEME);
     }
   });
@@ -156,12 +170,56 @@ describe("pickTheme（挑设计语言）", () => {
     expect(pickTheme({ osId: "Windows" })).toBe(FLUENT_THEME);
   });
 
-  // 桌面环境是留给 Adwaita / Breeze / Yaru 的扩展点，后端今天还不报这个字段。
-  // 这一条钉住「字段缺省时行为与只看 osId 完全一致」，将来加档位不能破坏它。
+  // 这一条钉住「字段缺省时行为与只看 osId 完全一致」。**后端今天还不报 desktop**，
+  // 所以真机上走的永远是这一条路径；加了档位也不能破坏它。
   it("桌面环境缺省或认不出时，结果与只看 osId 一致", () => {
     expect(pickTheme({ osId: "windows", desktop: undefined })).toBe(FLUENT_THEME);
     expect(pickTheme({ osId: "windows", desktop: null })).toBe(FLUENT_THEME);
-    expect(pickTheme({ osId: "ubuntu", desktop: "kde" })).toBe(GENERIC_THEME);
+    expect(pickTheme({ osId: "ubuntu", desktop: "" })).toBe(GENERIC_THEME);
+    // 认不出的桌面不硬塞给某一套：XFCE、Cinnamon、MATE 各有各的主题
+    for (const desktop of ["xfce", "x-cinnamon", "mate", "lxqt", "i3"]) {
+      expect(pickTheme({ osId: "debian", desktop }), desktop).toBe(GENERIC_THEME);
+    }
+  });
+});
+
+/**
+ * 桌面环境 → 设计语言。
+ *
+ * **这一档今天在真机上恒不命中**：后端还不报 `desktop`（那是 `crates/` 的改动，
+ * 单独一轮）。所以这一组验的是「字段到位之后会怎样」，不是今天的行为；
+ * 今天想用这三套只能在设置里手动选。
+ */
+describe("pickTheme（桌面环境）", () => {
+  it("GNOME → Adwaita、KDE → Breeze、Ubuntu → Yaru", () => {
+    expect(pickTheme({ osId: "fedora", desktop: "gnome" })).toBe(ADWAITA_THEME);
+    expect(pickTheme({ osId: "debian", desktop: "kde" })).toBe(BREEZE_THEME);
+    expect(pickTheme({ osId: "ubuntu", desktop: "ubuntu" })).toBe(YARU_THEME);
+  });
+
+  it("大小写不敏感——XDG_CURRENT_DESKTOP 各家大小写不一", () => {
+    for (const v of ["GNOME", "gnome", "GNOME-Classic", "GNOME-Flashback"]) {
+      expect(pickTheme({ osId: "fedora", desktop: v }), v).toBe(ADWAITA_THEME);
+    }
+    for (const v of ["KDE", "kde", "KDE-Plasma", "plasma"]) {
+      expect(pickTheme({ osId: "debian", desktop: v }), v).toBe(BREEZE_THEME);
+    }
+  });
+
+  // XDG_CURRENT_DESKTOP 是冒号分隔的一张表，不是单值。
+  it("冒号分隔的取值逐段试，第一个认得出的算数", () => {
+    // Ubuntu 的 GNOME 会话报的就是这个：ubuntu 段在前，于是拿 Yaru 而不是 Adwaita
+    expect(pickTheme({ osId: "ubuntu", desktop: "ubuntu:GNOME" })).toBe(YARU_THEME);
+    // 前面几段都认不出时继续往后试
+    expect(pickTheme({ osId: "debian", desktop: "X-Generic:KDE" })).toBe(BREEZE_THEME);
+    // 一段都认不出就落回通用，不拿第一段硬猜
+    expect(pickTheme({ osId: "debian", desktop: "X-Cinnamon:Cinnamon" })).toBe(GENERIC_THEME);
+  });
+
+  it("桌面环境压过操作系统——Ubuntu 装 KDE 该是 Breeze，不是 Yaru", () => {
+    expect(pickTheme({ osId: "ubuntu", desktop: "KDE" })).toBe(BREEZE_THEME);
+    // 反过来，认不出桌面时才轮到 osId
+    expect(pickTheme({ osId: "windows", desktop: "xfce" })).toBe(FLUENT_THEME);
   });
 });
 
@@ -178,9 +236,11 @@ describe("pickTheme（设计语言偏好）", () => {
     expect(pickTheme({ osId: "ubuntu" })).toBe(pickTheme({ osId: "ubuntu" }, "system"));
   });
 
-  it("选「系统」时跟随机器：Windows 拿 Fluent，其余通用", () => {
-    expect(pickTheme({ osId: "windows" }, "system")).toBe(FLUENT_THEME);
-    for (const d of DISTROS.filter((x) => x.id !== "windows")) {
+  it("选「系统」时跟随机器：Windows 拿 Fluent、macOS 拿 macOS，其余通用", () => {
+    for (const [osId, theme] of Object.entries(THEME_BY_OS_EXPECTED)) {
+      expect(pickTheme({ osId }, "system"), osId).toBe(theme);
+    }
+    for (const d of DISTROS.filter((x) => !(x.id in THEME_BY_OS_EXPECTED))) {
       expect(pickTheme({ osId: d.id }, "system"), d.id).toBe(GENERIC_THEME);
     }
   });
@@ -195,8 +255,8 @@ describe("pickTheme（设计语言偏好）", () => {
     }
   });
 
-  // 偏好排在机器前面判。将来 THEME_BY_DESKTOP 填上 Adwaita / Breeze 之后，
-  // 桌面环境同样不得绕过这一档——这条现在就钉住，那时不必回头补。
+  // 偏好排在机器前面判。THEME_BY_DESKTOP 填上 Adwaita / Breeze / Yaru 之后，
+  // 桌面环境同样不得绕过这一档——指名了就是指名了，连 KDE 也扳不回来。
   it("指名某一套时连桌面环境这一档也不看", () => {
     for (const t of THEMES) {
       expect(pickTheme({ osId: "ubuntu", desktop: "kde" }, t.id), t.id).toBe(t);
@@ -206,7 +266,9 @@ describe("pickTheme（设计语言偏好）", () => {
 
   // 类型上挡得住的事情运行时也要挡：存储里可能留着旧 id，或者某套语言被删掉了。
   it("指名一套不存在的语言时回落到「系统」，不抛错也不给空白", () => {
-    const stale = "breeze" as DesignPreference;
+    // 这个 id 有意不在注册表里：第四版这条用的是 "breeze"，第五版把 Breeze 实现了，
+    // 于是换成一个仍然不存在的（Aqua 是 macOS 早已退役的那代观感，不会再注册）。
+    const stale = "aqua" as DesignPreference;
     expect(pickTheme({ osId: "windows" }, stale)).toBe(FLUENT_THEME);
     expect(pickTheme({ osId: "ubuntu" }, stale)).toBe(GENERIC_THEME);
   });
@@ -254,7 +316,9 @@ describe("asDesign（偏好的回落）", () => {
   // 存储里只可能有本项目自己写进去的值，所以是精确匹配，不做大小写归一：
   // 对不上就说明那是手改的、或旧版本留下的，回落比猜用户想要什么稳妥。
   it("读不到、空值、大小写不对、指向不存在的语言时一律回落到「系统」", () => {
-    for (const v of [null, undefined, "", "Generic", "FLUENT", "strixmaid", "breeze", 0, {}]) {
+    // "macOS" / "Adwaita" 是大小写不对的那一类（注册的 id 全小写），
+    // "aqua" 是指向不存在的那一类。
+    for (const v of [null, undefined, "", "Generic", "FLUENT", "macOS", "Adwaita", "aqua", 0, {}]) {
       expect(asDesign(v), String(v)).toBe("system");
     }
   });

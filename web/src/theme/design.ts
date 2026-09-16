@@ -271,7 +271,7 @@ export type TokenName = (typeof TOKEN_NAMES)[number];
 export type TokenSet = Readonly<Record<TokenName, string>>;
 
 export interface Theme {
-  /** 设计语言的 id，不是平台 id——将来 Breeze 会同时服务好几个发行版 */
+  /** 设计语言的 id，不是平台 id——Breeze 一套要服务装着 KDE 的所有发行版 */
   readonly id: string;
   readonly name: string;
   readonly tokens: { readonly light: TokenSet; readonly dark: TokenSet };

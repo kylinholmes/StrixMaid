@@ -13,9 +13,10 @@ import { describe, expect, it } from "vitest";
  *
  * 扫三类，都是**换语言时一定要变、写死就一定错**的：
  *
- * - 圆角：StrixMaid 全 0、Fluent 2/4/8/胶囊，写死等于钉死其中一套；
- * - 过渡与动画的时长：两套语言的时长阶不同；
- * - 像素字号：两套语言的字阶不同。
+ * - 圆角：StrixMaid 全 0、Fluent 2/4/8/胶囊、Breeze 4/5/5/5、Adwaita 6/9/15/胶囊，
+ *   写死等于钉死其中一套；
+ * - 过渡与动画的时长：六套语言的时长阶各不相同（Breeze 100ms、macOS 250ms）；
+ * - 像素字号：六套语言的字阶各不相同（macOS 正文 13px、Adwaita 与 Yaru 15px）。
  *
  * 颜色不在扫描范围内——它早在第二版就全进 token 了，而且 `#` 开头的字面量
  * 在图标、品牌方块这些地方有正当用途，扫出来全是噪音。
@@ -190,6 +191,13 @@ describe("防回潮：CSS 里不得再出现写死的值", () => {
  * 今天全站**只有一处**：Fluent 的双描边焦点环（base.css）。
  * 环的颜色、宽度、偏移全部走 token，覆盖里只有「多画一层」这一件事——
  * `outline` 画不出第二层不同色的环。
+ *
+ * **第五版一次加了四套语言（macOS / Adwaita / Breeze / Yaru），这个数字没有涨。**
+ * 四套里焦点环的做法各不相同——Adwaita 是 2px 内收、半透明的 accent；
+ * Breeze 是 2px 贴边的实色；macOS 是 3px 贴边；Yaru 是 2px 内收的一圈淡橙——
+ * 但它们的差别全落在 `--focus` / `--focus-width` / `--focus-offset` 三条轴上，
+ * 都是单层环，一处覆盖都不需要。这条数字是「一套语言一个文件」是否成立的判据，
+ * 它在四套新语言之后仍然是 1，说明轴划对了。
  */
 describe("[data-design] 作用域覆盖", () => {
   const hits = FILES.flatMap(({ name, text }) =>

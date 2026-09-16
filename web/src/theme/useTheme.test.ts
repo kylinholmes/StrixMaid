@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DESIGN_OPTIONS, FLUENT_THEME, GENERIC_THEME, THEMES } from "./tokens";
+import {
+  ADWAITA_THEME,
+  BREEZE_THEME,
+  DESIGN_OPTIONS,
+  FLUENT_THEME,
+  GENERIC_THEME,
+  MACOS_THEME,
+  THEMES,
+  YARU_THEME,
+} from "./tokens";
 
 /**
  * 主题 store 的行为，重点在**设计语言偏好**：默认档、指名某一套、跨刷新保持、
@@ -62,22 +71,54 @@ describe("设计语言偏好", () => {
     expect(store.getState().theme.id).toBe(FLUENT_THEME.id);
   });
 
-  it("「系统」档下 Linux 与 macOS 仍是 StrixMaid 那套——与加这个设置之前零差异", async () => {
+  it("「系统」档下 Linux 仍是 StrixMaid 那套——后端不报桌面环境，这条路径没变", async () => {
     const { store } = await boot();
-    for (const osId of ["ubuntu", "debian", "macos", null]) {
+    // Linux 的 osId 一个都不在 THEME_BY_OS 里，而 setPlatform 今天拿不到
+    // desktop 字段（后端还不报），所以真机上 Linux 一律落回通用主题。
+    for (const osId of ["ubuntu", "debian", "fedora", null]) {
       store.getState().setPlatform({ osId });
       expect(store.getState().theme.id, String(osId)).toBe(GENERIC_THEME.id);
     }
   });
 
+  it("「系统」档下 macOS 拿到 macOS 那套", async () => {
+    const { store } = await boot();
+    store.getState().setPlatform({ osId: "macos" });
+    expect(store.getState().theme.id).toBe(MACOS_THEME.id);
+  });
+
+  // 后端补上 desktop 之后这条链路才通。先钉住，免得那一轮改坏了没人发现。
+  it("后端一旦报出桌面环境，Linux 就跟着换语言", async () => {
+    const { store } = await boot();
+    store.getState().setPlatform({ osId: "ubuntu", desktop: "ubuntu:GNOME" });
+    expect(store.getState().theme.id).toBe(YARU_THEME.id);
+    store.getState().setPlatform({ osId: "ubuntu", desktop: "KDE" });
+    expect(store.getState().theme.id).toBe(BREEZE_THEME.id);
+    store.getState().setPlatform({ osId: "fedora", desktop: "GNOME" });
+    expect(store.getState().theme.id).toBe(ADWAITA_THEME.id);
+  });
+
   // 遍历清单而不是列举两档：加一套设计语言时这条自动覆盖它。
-  it("清单里的每一档都选得动，选了之后连 Windows 也照办", async () => {
+  //
+  // **光比 store 里的 id 不够**：换了主题但没重写 :root，界面上什么都不会变，
+  // 而 store 看着完全正常。所以每一档都要验到落在 :root 上的变量——
+  // 第五版一次加了四套语言，这条是「设置里每一项都真的切得动」的执行者。
+  it("清单里的每一档都选得动，选了之后连 Windows 也照办，且真的写进 :root", async () => {
     for (const o of DESIGN_OPTIONS) {
       if (o.value === "system") continue;
-      const { store } = await boot();
+      const { store, vars } = await boot();
       store.getState().setPlatform({ osId: "windows" });
       store.getState().setDesign(o.value);
-      expect(store.getState().theme.id, o.value).toBe(o.value);
+      const { theme, mode } = store.getState();
+      expect(theme.id, o.value).toBe(o.value);
+      // 整套 token 逐 key 落到 :root 上，不是只落了颜色。
+      // `--accent` 除外：它是身份层的，认出 Windows 之后由发行版那档盖掉，
+      // 「换设计语言不动 accent」由本文件下面那条单独验。
+      for (const [token, value] of Object.entries(theme.tokens[mode])) {
+        if (token === "accent") continue;
+        expect(vars.get(`--${token}`), `${o.value} 的 --${token}`).toBe(value);
+      }
+      expect(vars.size, o.value).toBe(Object.keys(theme.tokens[mode]).length);
     }
   });
 
@@ -134,7 +175,8 @@ describe("设计语言偏好", () => {
   });
 
   it("存着的值非法时回落到「系统」，不是回落到某一套语言", async () => {
-    for (const bad of ["strixmaid", "breeze", "Generic", "", "true"]) {
+    // "aqua" 指向一套不存在的语言，"macOS" 大小写不对（注册的 id 全小写）
+    for (const bad of ["strixmaid", "aqua", "macOS", "Generic", "", "true"]) {
       const { store } = await boot(fakeStorage({ [DESIGN_KEY]: bad }));
       expect(store.getState().design, bad).toBe("system");
       store.getState().setPlatform({ osId: "windows" });
