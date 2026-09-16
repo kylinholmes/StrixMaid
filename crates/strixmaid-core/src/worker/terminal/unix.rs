@@ -23,11 +23,8 @@ use nix::sys::signal::{Signal, killpg};
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::{Pid, User, getuid};
 use portable_pty::{MasterPty, PtySize, native_pty_system};
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 use strixmaid_types::rpc::{
-    self, TermCloseParams, TermCloseResult, TermExit, TermOpenParams, TermOpenResult,
-    TermResizeParams,
+    TermCloseParams, TermCloseResult, TermExit, TermOpenParams, TermOpenResult, TermResizeParams,
 };
 use strixmaid_types::{ApiError, ApiResult};
 use tokio::io::unix::AsyncFd;
@@ -732,8 +729,11 @@ mod tests {
 
     use super::*;
     // 注册与分发是平台无关的，住在父模块里（见 `super` 的模块文档）。
+    // `rpc` 只有这里按路径用到（`rpc::TERM_OPEN` 等），放在顶层会成为
+    // 非测试构建下的未使用导入。
     use crate::worker::Dispatcher;
     use crate::worker::terminal::register;
+    use strixmaid_types::rpc;
 
     /// 测试里固定用 `/bin/sh`：它一定在 `/etc/shells` 里，行为也可预测。
     /// 用登录用户自己的 shell 会把测试和开发者的 rc 文件绑在一起（比如某些
