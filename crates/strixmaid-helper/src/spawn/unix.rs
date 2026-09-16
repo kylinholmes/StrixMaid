@@ -1,4 +1,8 @@
-//! fork + 切换身份 + exec `strixmaid worker`（design.md §2.2 / §10）。
+//! Unix 侧拉起 worker：fork + 切换身份 + exec `strixmaid worker`（design.md §2.2 / §10）。
+//!
+//! 本文件是 `spawn` 的 Unix 实现。Windows 侧的同形实现见 [`super::windows`]；
+//! 两边为什么一个用 fork 一个用 `CreateProcessAsUserW`、又怎么被
+//! [父模块](super)收拢成同一个入口，见父模块文档。
 //!
 //! # 身份切换的顺序不能错
 //!
@@ -220,6 +224,43 @@ fn cstring(bytes: &[u8], what: &str) -> Result<CString, String> {
     CString::new(bytes).map_err(|_| format!("{what}含 NUL 字节"))
 }
 
+// ===========================================================================
+// 回收已退出的 worker
+// ===========================================================================
+//
+// 这一段原来在 `main.rs` 里。`main.rs` 要做成平台中立的状态机，而「子进程有没有
+// 退出」在两个平台上是两套完全不同的原语（`waitpid` 对
+// `WaitForSingleObject` + `GetExitCodeProcess`），于是搬进各自的平台模块。
+// 判定逻辑逐字未改。
+
+/// 非阻塞回收已退出的 worker。
+///
+/// `WNOHANG` 让它可以放在事件循环的每一轮开头：还活着就原样留下，
+/// 退出了就记一行日志并从列表里摘掉。留下僵尸进程会一直占着 pid，
+/// 而 helper 可能活到用户登出，中间能攒出不少个。
+pub fn reap_workers(workers: &mut Vec<super::WorkerProc>) {
+    workers.retain(|w| {
+        let pid = Pid::from_raw(w.pid);
+        match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+            Ok(nix::sys::wait::WaitStatus::StillAlive) => true,
+            Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => {
+                crate::log::event(&format!(
+                    "worker {pid} 退出，code={code}（{}）",
+                    describe_exit(code)
+                ));
+                false
+            }
+            Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => {
+                crate::log::event(&format!("worker {pid} 被信号 {sig:?} 终止"));
+                false
+            }
+            Ok(_) => true,
+            // ECHILD 等：已经不是我们的孩子了。
+            Err(_) => false,
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     //! 以自己的身份（非 root 下 setuid(自己) 是合法空操作）真的 fork + exec
@@ -341,3 +382,4 @@ mod tests {
         );
     }
 }
+

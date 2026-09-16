@@ -8,9 +8,40 @@ license.workspace      = true
 
 [dependencies]
 anyhow = "1.0.104"
-libc = "0.2.189"
-nix = { version = "0.31.3", features = ["user", "process", "socket", "uio", "fs", "sched"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 strixmaid-types = { version = "0.1.0", path = "../strixmaid-types" }
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
+
+# PAM / fork / setuid / socketpair 这一整套只在 Unix 上存在。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+nix = { version = "0.31.3", features = ["user", "process", "socket", "uio", "fs", "sched"] }
+
+# Windows 侧 helper 的三件事：LogonUserW 认证、CreateProcessAsUserW 拉起 worker、
+# 持有登录令牌与用户配置文件直到登出（对应 PAM 的 open/close_session）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    # ProcessPrng：给 worker 通道的命名管道起随机名，避免为此拉一个 rand 依赖。
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+] }
+
+# 版本资源与应用程序清单（见 build.rs 的 “Windows” 一节）。
+#
+# cfg 按**宿主**匹配而不是目标——实测在 Windows 上 `--target x86_64-unknown-linux-musl`
+# 依然会编译这个依赖。这正合本项目的需要：Linux / macOS 上的构建一个字节都不会
+# 拉到它，而 Windows 产物本来就在 windows runner 上原生构建。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"

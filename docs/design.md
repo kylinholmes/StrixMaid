@@ -14,6 +14,20 @@
 4. **静态单二进制优先。** 需要动态链接的部分全部隔离进 `strixmaid-helper`。
 5. **AgentCore 是唯一的业务逻辑所在地。** Server 与 Agent 都只是它的宿主。
 
+> **第 1 条在 Windows 上的等价写法**：那里没有 `/proc`、`/sys`、netlink，
+> 「直读」对应的入口是 `NtQuerySystemInformation`（进程与处理器）、注册表
+> （静态描述信息）、IOCTL（块设备）、IP Helper（网络）、SCM（服务）、
+> 事件日志 API（日志）。
+>
+> 判据与第 1 条同源：**不依赖需要额外守护进程的中间层**。因此
+> **一律不走 WMI**——它要起 COM、连 WMI 服务，负载高时可能几秒才应答，
+> 一个每 2 秒采集一轮的指标管线不能赌这个；**除 GPU 外也不走 PDH**（性能计数器），
+> 它要两轮采集、每轮走一遍计数器名解析，而 CPU / 内存 / 磁盘 / 网络都有更直接、
+> 更便宜、且与内核数据结构同源的入口。GPU 是唯一没有别的路的那一项。
+>
+> 第 2 条在 Windows 上格外吃重：拿不到的东西比 Linux 多，逐条清单见
+> [`windows-platform.md`](./windows-platform.md) §4。
+
 ---
 
 ## 2. 产物与进程模型
@@ -33,6 +47,32 @@
 > 覆盖差异与平台 API 的坑逐条记在 [`macos-dev-platform.md`](./macos-dev-platform.md)。
 > Linux 实现的内容未因此改动一个字节。
 
+#### Windows 补充（2026-09）
+
+**Windows 后来成为第二个交付目标**，与 macOS 那一层不是同一件事：macOS 是开发平台，
+取不到的数据可以整项不做；Windows 是有人会拿来跑生产的平台，缺一项就少一块视野。
+因此它享受与 Linux 相同的质量门槛（CI 里 `cargo clippy --workspace --all-targets
+-- -D warnings` 与 `cargo test --workspace` 各跑一遍），取舍标准仍是 §1 的第 2 条。
+完整说明见 [`windows-platform.md`](./windows-platform.md)。
+
+三个产物在 Windows 上的形态：
+
+| 产物 | 链接方式 | 与 Linux 的差别 |
+|---|---|---|
+| `strixmaid.exe` | MSVC 动态（系统 DLL） | 多一组 `service` 子命令：注册 / 注销 / 启停 / 查询，以及被 SCM 拉起的 `service run` 入口 |
+| `strixmaid-agent.exe` | 同上 | 暂不随发布包分发——还没有被 SCM 托管的入口 |
+| `strixmaid-helper.exe` | 同上 | 没有 PAM：认证走 `LogonUserW`，会话走 `LoadUserProfileW`，身份切换走 `CreateProcessAsUserW` |
+
+「静态单二进制优先」（§1 第 4 条）在 Windows 上表现为另一种形式：不依赖任何需要单独
+安装的运行时，全部走系统 DLL。helper 之所以仍然独立存在，理由从「隔离动态链接」变成了
+「持有登录令牌与用户配置文件直到登出」——见 §5.4 的 Windows 补充。
+
+`worker` 同样不是独立二进制，而是 `strixmaid.exe` 的子命令。这一点对 Windows 的
+安装脚本有直接影响：worker 以**登录用户**的身份运行，所以安装目录必须给 Users
+读 + 执行权限，否则登录之后什么都干不了。
+
+Linux 与 macOS 实现的内容未因此改动一个字节。
+
 ### 2.2 进程拓扑
 
 ```
@@ -49,6 +89,45 @@ strixmaid                (root, 常驻)
 **全局指标采集留在主进程（root）**——它与登录用户无关，且必须在无人登录时持续运行。
 
 一个会话最多两个 worker：`user worker`（登录即建，uid = 登录用户）与 `admin worker`（提权后才建，uid = 0）。API 层按操作类型路由；未提权的写操作返回 403 + 需要管理访问。
+
+#### Windows 补充：同一张拓扑，换一套身份
+
+```
+strixmaid                (服务进程, SCM 拉起, 身份 = LocalSystem)
+  │   HTTP/WS · 前端资源 · 全局指标采集 · 存储与聚合 · 会话路由
+  └─ strixmaid-helper    (同一令牌, 按需 spawn)
+       │   LogonUserW · LoadUserProfileW · CreateProcessAsUserW
+       └─ worker         (身份 = 登录用户的令牌, 每会话一个)
+            ├─ ConPTY 终端 + 作业对象
+            └─ 文件操作 / 进程终止
+```
+
+逐级对应：
+
+| 这一级 | Linux | Windows |
+|---|---|---|
+| 主进程 | uid 0 | 服务账户，默认 `LocalSystem`（`S-1-5-18`，映射成 uid 0） |
+| helper | uid 0，`fork` + `exec` | 与主进程同一令牌，`CreateProcessW` |
+| user worker | `setuid` 到登录用户 | `LogonUserW` 拿到的用户令牌 + `CreateProcessAsUserW` |
+| admin worker | 不切换身份，保持 uid 0 | **UAC 的 linked token**（完整管理员令牌） |
+| 会话 bus | system bus，polkit 按该用户裁决 | 无对应物——授权由令牌里的组与特权直接裁决 |
+
+三处语义差异值得记在设计层：
+
+1. **提权是换一张令牌，不是保持身份**。Windows 没有「有效用户」这一层，一个进程的
+   令牌就是它的全部身份，因此 `uid` 恒等于 `euid`。提权在这里是另一个令牌、进而是
+   另一个进程。
+2. **helper 的生命周期理由换了，结论没换**。Linux 上它必须活到登出，是因为
+   `pam_open_session` / `pam_close_session` 要在同一进程同一句柄上成对调用；
+   Windows 上是因为 `LoadUserProfileW` / `UnloadUserProfile` 同样要成对，
+   且登录令牌需要有人一直持有。
+3. **polkit 恒为不可用**。Windows 没有「按 action id 询问策略」的模型，
+   `SystemCapabilities.polkit` 在这里永远是 `false`——与 macOS 同理。
+
+由第 1 条还推出一个容易踩的结论：**Windows 上的 `admin worker` 的 uid 不是 0**。
+uid 取自令牌里用户 SID 的 RID，而 linked token 的用户 SID 与过滤过的那张完全相同，
+所以提权前后 uid 不变；`uid == 0` 在这个平台上只留给 `S-1-5-18`（LocalSystem）。
+判断「这个会话有没有管理访问」要看 `session.elevated`，不要看 uid。
 
 ---
 
@@ -152,6 +231,31 @@ PAM 需要明文密码，因此某个进程必然短暂持有它。MVP 采用「
 - **调用 `pam_open_session`** —— 这是 `--user` unit 支持的前提（创建 loginctl 会话、`XDG_RUNTIME_DIR`、启动 user manager）。
 - 用户级 systemd 的 session bus 走 EXTERNAL(uid) 认证，root 直连会被拒，必须 setuid 后再连——这项工作归 helper。
 
+#### Windows 补充：`LogonUserW` 与 `LoadUserProfileW`
+
+Windows 上没有 PAM，但本节规定的每一步都有对应物：
+
+| 本节的这一步 | Windows |
+|---|---|
+| `pam_start(service, user)` | 无。不读 `/etc/pam.d/<名字>`，没有「服务栈」这一层 |
+| `pam_authenticate` | **`LogonUserW`**（`LOGON32_LOGON_INTERACTIVE`）：用户名 + 明文口令换一张令牌 |
+| `pam_acct_mgmt` | **没有单独一步**。LSA 把两件事做在同一次 `LogonUserW` 里：账户禁用、锁定、过期、口令过期、登录时段限制、未授予登录类型，全部表现为它失败加一个特定的 `GetLastError` |
+| `pam_setcred(PAM_ESTABLISH_CRED)` | 无。凭据就是那张令牌本身 |
+| **`pam_open_session`** | **`LoadUserProfileW`**：往注册表挂载用户单元（`HKCU`）、准备 `%USERPROFILE%` |
+| `pam_close_session` | `UnloadUserProfile`，必须与上一步在同一进程、同一令牌上成对调用 |
+| `pam_end` | `CloseHandle(令牌)` |
+
+因此 `pam_service` 配置项在 Windows 上没有意义，字段保留只为配置形状三平台一致，
+helper 收到后直接忽略。§5.3 的三条凭据硬约束一字不改地继续成立。
+
+**部署时最常踩的一脚**：目标账户必须有本机的「允许本地登录」
+（`SeInteractiveLogonRight`），否则口令完全正确 `LogonUserW` 也会以
+`ERROR_LOGON_TYPE_NOT_GRANTED` 失败。
+
+「用户级 unit」那一条在 Windows 上整项不存在：SCM 只有一张全机服务表，
+收到 `scope=user` 时如实返回 `capability_unavailable`。理由见
+[`windows-platform.md`](./windows-platform.md) §4.4。
+
 ---
 
 ## 6. 能力探测（两层）
@@ -176,6 +280,25 @@ GET /api/v1/capabilities
 前端据此区分两种状态，二者体验不同、不可混淆：
 - **能力不存在** → 隐藏页面；
 - **能力存在但当前用户无权** → 显示但禁用，并给出提权入口与可操作的说明（例如「你的账户不在 `systemd-journal` 或 `adm` 组，因此只能看到自己的日志。启用管理访问后可查看全部。」）。
+
+#### Windows 补充：字段名不变，语义是「这项能力可用」
+
+与 macOS 同一个决定（见 [`macos-dev-platform.md`](./macos-dev-platform.md) §3.6）：
+`SystemCapabilities` 的字段名沿用 Linux 实现的名字，**语义是「这项能力可用」而不是
+「装了这个软件」**。与其为第二、第三个平台在 API 契约里加字段（下游代码生成器全要
+跟着改），不如让「后端具体是谁」留在 `providers` 列表里。
+
+| 字段 | Windows 上的取值与判据 |
+|---|---|
+| `systemd` | SCM 是系统组件，恒 `true`；真连不上会由 service provider 的 `probe()` 覆盖 |
+| `journal` | 事件日志同理，恒 `true`；真查不了会由 log provider 的 `probe()` 覆盖 |
+| `polkit` | 恒 `false`。Windows 的授权走 UAC 与服务的 DACL，与 polkit 的「按 action id 询问策略」模型对不上。这不影响提权——提权的权威判定在 helper 内部（§5） |
+| `user_units` | 恒 `false`。SCM 只有一张全机服务表，没有 `systemctl --user` 那一层 |
+| `helper` | 同 Linux：`helper_path` 能否解析到一个可执行文件 |
+
+两层探测的「第二层」（`user`）在 Windows 上换成了读令牌：组来自令牌里的组 SID，
+`can_elevate` 按**英文规范组名**判断——本地化系统上内建组的显示名不是英文，
+helper 会额外补一个规范名，配置里照写 `Administrators` 即可。
 
 ---
 
@@ -468,6 +591,30 @@ WS /ws/terminal/{id}       终端专用连接
 
 worker 的 socketpair 一端由 helper 经 `SCM_RIGHTS` 传回主进程；此后主进程与 worker 直接通信，不再经过 helper。
 
+#### Windows 补充：命名管道，且附件由**读端**去拉
+
+| | Unix | Windows |
+|---|---|---|
+| 通道 | `socketpair(AF_UNIX, SOCK_STREAM)` 的一端 | 一条命名管道实例 |
+| 附件 | fd，`SCM_RIGHTS` 带外传递 | `HANDLE`，`DuplicateHandle` |
+| 身份证明 | 父子关系（fd 是继承来的） | `GetNamedPipeClientProcessId` 对上子进程 pid |
+
+「不走文件系统 socket」这条结论在 Windows 上更彻底：命名管道根本不落文件系统，
+`run_dir` 因此在这个平台上用不到（配置项保留只为形状一致）。
+
+**附件的方向是反的，而且必须是反的。** `SCM_RIGHTS` 是写端推；Windows 只有
+`DuplicateHandle`，而它需要对另一个进程的 `PROCESS_DUP_HANDLE` 权限。本项目里附件
+永远朝主进程流动（helper 把 worker 通道交给主进程、worker 把终端通道交给主进程），
+而主进程恰好权限最高——所以一律由**读端**`OpenProcess(PROCESS_DUP_HANDLE)` 打开写端
+进程、把句柄拉过来，并用 `DUPLICATE_CLOSE_SOURCE` 关掉源端那一份。
+
+反过来做需要给低权限的 worker 开 `PROCESS_DUP_HANDLE` 到一个 SYSTEM 进程上，
+那等于把提权漏洞写进设计。完整论证在
+`crates/strixmaid-core/src/session/channel.rs` 的模块文档。
+
+随之而来的一条纪律：**写端发出附件后不能 drop 自己那一份**——句柄已被内核关掉，
+值可能已被复用，再 `CloseHandle` 会误关无关对象。
+
 ### 帧格式
 
 **长度前缀（u32 大端）+ fd 计数（u8）+ JSON。** 不用 bincode：IPC 消息量极小（每会话几十条），性能无关紧要，而 JSON 用 `socat` 就能调试、且 helper 少一个依赖。
@@ -540,6 +687,44 @@ helper 是「需要动态链接或需要切换身份的操作」的唯一出口�
 | 安装物 | 二进制 + `strixmaid.service` + `/etc/pam.d/strixmaid`（按发行版模板）+ 默认 config.toml |
 
 MVP 不做 TLS 的理由：自签证书会给每个用户制造浏览器警告，正经用法是放在 nginx / Caddy 之后。
+
+#### Windows 补充：路径、服务宿主与安装物
+
+Windows 上没有 FHS，等价物是 `%ProgramData%\StrixMaid`——那正是「机器范围、非用户、
+可写」的系统目录。**这些默认值在代码里是编译期常量而不是运行时展开 `%ProgramData%`**：
+配置的默认值必须在 `Config::default()` 里是确定的（示例配置、错误信息、测试都要引用它），
+而 `%ProgramData%` 在实际部署里几乎总是 `C:\ProgramData`；被改掉的机器上用 `--config`
+或 `STRIXMAID_DATA_DIR` 显式指定即可。
+
+| 项 | Linux | Windows |
+|---|---|---|
+| 配置文件 | `/etc/strixmaid/config.toml` | `C:\ProgramData\StrixMaid\config.toml` |
+| 数据目录 | `/var/lib/strixmaid/` | `C:\ProgramData\StrixMaid\data\` |
+| 运行目录 | `/run/strixmaid/`（helper socket） | `C:\ProgramData\StrixMaid\run\`，**实际用不到**（IPC 走命名管道） |
+| 二进制 | `/usr/bin/` | `%ProgramFiles%\StrixMaid\` |
+| 服务宿主 | systemd unit | SCM，服务名 `StrixMaid`，`ImagePath` 是「绝对路径 + `service run`」 |
+| 日志 | stderr → journald | stderr → 服务宿主；服务模式下另写 Windows 事件日志 |
+| PAM 模板 | `/etc/pam.d/strixmaid` | 无 |
+| 安装物 | tar.gz + `install.sh` | zip + `install.ps1` / `uninstall.ps1` |
+
+三条与 Linux 不同的部署约束：
+
+1. **服务注册走 `strixmaid.exe service install`，不用 `New-Service`。** 那条子命令还要
+   写恢复策略（`SERVICE_CONFIG_FAILURE_ACTIONS`）与服务描述，并把 `ImagePath` 写成
+   绝对路径——服务由 `services.exe` 拉起，工作目录是 `%SystemRoot%\system32`，
+   相对路径解析不到。这些 `New-Service` 都给不了。
+2. **`helper_path` 必须写成绝对路径。** 默认值是裸名，要靠 `PATH` 查找，而服务继承的是
+   系统 `PATH`，`%ProgramFiles%\StrixMaid` 不在其中。安装脚本因此把这一项改写掉。
+3. **目录 ACL 要显式设置，不能靠继承。** `%ProgramData%` 的默认 ACL 给 Users 一条带
+   继承的「创建文件 / 写入数据」，不断掉的话任何登录用户都能往配置目录里写文件——
+   而服务以 LocalSystem 读这里的 `config.toml`，`helper_path` 是一条会被执行的路径。
+   安装目录反过来**必须**给 Users 读 + 执行：worker 以登录用户身份运行，而 worker 是
+   `strixmaid.exe` 的子命令。
+
+卸载的语义与 deb 一致：**默认保留配置与数据**，`-Purge` 才删。
+
+详见 [`windows-platform.md`](./windows-platform.md) 与
+[`packaging/windows/README.md`](../packaging/windows/README.md)。
 
 ### 12.1 OpenAPI 导出
 

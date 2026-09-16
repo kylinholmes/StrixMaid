@@ -1,7 +1,12 @@
-//! 主进程侧的 worker 句柄：在 helper 经 `SCM_RIGHTS` 传回的 socketpair 上做 RPC。
+//! 主进程侧的 worker 句柄：在 helper 交回来的那条通道上做 RPC。
 //!
 //! 调用可以并发在途——写端用 `Mutex` 串行化，一个后台 task 读回应并按 `id` 唤醒
 //! 对应的 `oneshot`。worker 断开时所有在途调用都会收到 [`ErrorCode::Unavailable`]。
+//!
+//! 通道本身是 [`IpcChannel`]：Unix 上是一条 `socketpair`，Windows 上是一条命名管道。
+//! 本文件只在两处需要区分平台——终止 worker（信号 vs `TerminateProcess`）与
+//! 半关写方向（Windows 上无此概念），都收敛在 [`stop_process`] 与
+//! [`IpcChannel::shutdown_write`] 里。
 //!
 //! # 订阅（`roadmap/01-worker-execution.md` §4.4）
 //!
@@ -38,30 +43,27 @@
 //! 不读数据的客户端把整个会话拖住。
 
 use std::collections::HashMap;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use serde_json::Value;
 use strixmaid_types::ipc::{FromWorker, METHOD_PING, METHOD_WHOAMI, ToWorker, WhoAmI};
 use strixmaid_types::{ApiError, ErrorCode};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::SessionError;
+use super::channel::{Attachment, IpcChannel};
 use super::framing::{self, FdFrameReader};
 
 /// 等 worker 第一帧 `Hello` 的上限。exec 一个静态二进制并起 tokio 用不了 1 秒，
 /// 这里放宽到 15 秒兜底负载很高的机器。
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
-/// `Shutdown` 之后等 worker 自行退出的时间，超过则 SIGTERM。
+/// `Shutdown` 之后等 worker 自行退出的时间，超过则进入 `Stop::Graceful`。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
-/// SIGTERM 之后再等这么久，还不退就 SIGKILL。
+/// `Stop::Graceful` 之后再等这么久，还不退就 `Stop::Force`。
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// 每个订阅的队列深度。够吸收一次 GC 停顿或一轮慢渲染，又不至于在内存里
@@ -73,9 +75,9 @@ const SUBSCRIBER_STALL_LIMIT: Duration = Duration::from_secs(10);
 
 /// 在途调用的应答通道。
 ///
-/// 载荷带上 `Vec<OwnedFd>`：`term.open` 的结果**必须**连同 PTY 的 fd 一起交给
-/// 调用方，而 fd 只在读循环那一刻存在。若在这里把它丢掉，之后无论如何都补不回来。
-type Pending = HashMap<u64, oneshot::Sender<Result<(Value, Vec<OwnedFd>), ApiError>>>;
+/// 载荷带上 `Vec<Attachment>`：`term.open` 的结果**必须**连同 PTY 那条通道一起
+/// 交给调用方，而附件只在读循环那一刻存在。若在这里把它丢掉，之后无论如何都补不回来。
+type Pending = HashMap<u64, oneshot::Sender<Result<(Value, Vec<Attachment>), ApiError>>>;
 
 /// 一个活着的订阅在主进程侧的登记。
 struct Sub {
@@ -87,10 +89,11 @@ struct Sub {
 }
 
 struct Inner {
-    /// 整条连接。读端要用 `recvmsg` 收 fd，因而不能 `into_split`——
-    /// 见 [`FdFrameReader`]：普通 `read()` 读过带 fd 的字节会让内核**静默丢掉** fd。
-    /// tokio 的 `UnixStream` 允许 `&self` 并发读写，共享一个 `Arc` 即可。
-    stream: Arc<UnixStream>,
+    /// 整条连接。读端要用 [`FdFrameReader`] 收附件，因而不能拆成读写两半——
+    /// Unix 上普通 `read()` 读过带 fd 的字节会让内核**静默丢掉** fd，
+    /// Windows 上则会把帧尾的句柄表当成下一帧的开头。
+    /// [`IpcChannel`] 的两个实现都允许 `&self` 并发读写，共享一个 `Arc` 即可。
+    stream: Arc<IpcChannel>,
     /// 写端互斥。一帧要原子地写完：两个并发写交错到一起就是流上的字节乱码，
     /// 而这种损坏在读端表现为莫名其妙的解析错误，极难追。
     write_lock: Mutex<()>,
@@ -102,7 +105,7 @@ struct Inner {
 }
 
 impl Inner {
-    /// 串行地写一帧给 worker。主进程方向从不发 fd。
+    /// 串行地写一帧给 worker。主进程方向从不发附件。
     async fn send(&self, msg: &ToWorker) -> strixmaid_types::ipc::IpcResult<()> {
         let _guard = self.write_lock.lock().await;
         framing::write_msg_with_fds(&self.stream, msg, &[]).await
@@ -113,7 +116,7 @@ impl Inner {
 #[derive(Clone)]
 pub struct WorkerHandle {
     /// helper `fork` 出来的 pid（`WorkerSpawned.pid`）。这是终止 worker 时用的权威值；
-    /// `<= 1` 表示未知（测试用的进程内 worker），此时绝不发信号。
+    /// `<= 1` 表示未知（测试用的进程内 worker），此时绝不去终止任何进程。
     pid: i32,
     /// worker 实际运行的 uid（来自 `Hello`，即内核眼中的 `getuid()`）。
     uid: u32,
@@ -131,28 +134,29 @@ impl std::fmt::Debug for WorkerHandle {
 }
 
 impl WorkerHandle {
-    /// 接管 fd、等 `Hello`、起读循环。
+    /// 接管通道、等 `Hello`、起读循环。
     ///
     /// `expected_uid` 为 `Some` 时 `Hello.uid` 必须等于它——不等说明 helper 声称的身份切换
-    /// 没有发生，这种 worker 绝不能用。admin worker 传 `None`（由 root helper 直接 fork）。
+    /// 没有发生，这种 worker 绝不能用。admin worker 传 `None`（由特权 helper 直接拉起）。
     pub async fn connect(
-        fd: OwnedFd,
+        channel: IpcChannel,
         pid: i32,
         expected_uid: Option<u32>,
     ) -> Result<Self, SessionError> {
-        let std_stream = std::os::unix::net::UnixStream::from(fd);
-        std_stream
-            .set_nonblocking(true)
-            .map_err(|e| SessionError::Worker(format!("worker socket 设置非阻塞失败: {e}")))?;
-        let stream = UnixStream::from_std(std_stream)
-            .map_err(|e| SessionError::Worker(format!("worker socket 注册到 tokio 失败: {e}")))?;
-        let stream = Arc::new(stream);
+        let mut channel = channel;
+        // Windows 上收附件要先知道对端是哪个进程（`DuplicateHandle` 的源）。
+        // `term.open` 的结果就带着一个附件，不设这一步会在那里报协议错。
+        // pid <= 1 是进程内 worker（测试），此时本来也不会有附件过来。
+        if pid > 1 {
+            channel.set_peer_pid(pid as u32);
+        }
+        let stream = Arc::new(channel);
         let mut reader = FdFrameReader::new(stream.clone());
 
         let hello = tokio::time::timeout(HELLO_TIMEOUT, reader.read())
             .await
             .map_err(|_| SessionError::Worker("等待 worker Hello 超时".into()))??;
-        // Hello 不该带 fd；带了就是协议错，`fds` 在这里 drop 掉不会泄漏。
+        // Hello 不该带附件；带了就是协议错，`fds` 在这里 drop 掉不会泄漏。
         let hello: Option<FromWorker> = match hello {
             Some((payload, _fds)) => Some(strixmaid_types::ipc::decode(&payload)?),
             None => None,
@@ -218,26 +222,26 @@ impl WorkerHandle {
 
     /// 发起一次 RPC。
     ///
-    /// 应答若附带 fd，这里会把它关掉并告警——需要 fd 的调用请用
-    /// [`call_with_fds`](Self::call_with_fds)。宁可吵，也不要让 fd 无声无息地漏掉。
+    /// 应答若附带附件，这里会把它关掉并告警——需要附件的调用请用
+    /// [`call_with_fds`](Self::call_with_fds)。宁可吵，也不要让它无声无息地漏掉。
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, ApiError> {
         let (value, fds) = self.call_with_fds(method, params).await?;
         if !fds.is_empty() {
             tracing::warn!(
                 method,
                 count = fds.len(),
-                "worker 的应答附带了 fd，但调用方没有接收，已关闭"
+                "worker 的应答附带了附件，但调用方没有接收，已关闭"
             );
         }
         Ok(value)
     }
 
-    /// 发起一次 RPC 并取走应答附带的 fd（`term.open` 用）。
+    /// 发起一次 RPC 并取走应答附带的附件（`term.open` 用）。
     pub async fn call_with_fds(
         &self,
         method: &str,
         params: Value,
-    ) -> Result<(Value, Vec<OwnedFd>), ApiError> {
+    ) -> Result<(Value, Vec<Attachment>), ApiError> {
         if !self.is_alive() {
             return Err(ApiError::new(ErrorCode::Unavailable, "worker 已退出"));
         }
@@ -347,25 +351,23 @@ impl WorkerHandle {
             .map_err(|e| ApiError::internal(format!("whoami 响应格式错误: {e}")))
     }
 
-    /// 请 worker 退出：先 `Shutdown`，超时后 SIGTERM，再超时 SIGKILL。
+    /// 请 worker 退出：先 `Shutdown` 帧，超时后礼貌终止，再超时强制终止。
+    ///
+    /// Windows 上没有 SIGTERM 那一档（见 [`stop_process`]），因此
+    /// `Stop::Graceful` 直接报告「没做成」，流程落到强制终止那一步。
     pub async fn shutdown(&self) {
-        {
-            let _ = self.inner.send(&ToWorker::Shutdown).await;
-            // 半关写方向让 worker 的读端看到 EOF。用 nix 而不是 `AsyncWriteExt::shutdown`
-            // ——后者要 `&mut`，而这里只有共享的 `Arc<UnixStream>`。
-            use std::os::fd::AsRawFd;
-            let _ = nix::sys::socket::shutdown(
-                self.inner.stream.as_raw_fd(),
-                nix::sys::socket::Shutdown::Write,
-            );
-        }
+        let _ = self.inner.send(&ToWorker::Shutdown).await;
+        // 半关写方向让 worker 的读端看到 EOF；Windows 上是无操作，
+        // 那边靠上面这帧 `Shutdown` 与进程退出时管道断开。
+        self.inner.stream.shutdown_write();
+
         if self.wait_closed(SHUTDOWN_GRACE).await {
             return;
         }
-        if self.signal(Signal::SIGTERM) && self.wait_closed(TERM_GRACE).await {
+        if self.stop(Stop::Graceful) && self.wait_closed(TERM_GRACE).await {
             return;
         }
-        self.signal(Signal::SIGKILL);
+        self.stop(Stop::Force);
         self.inner.closed.store(true, Ordering::Release);
         self.fail_pending();
     }
@@ -384,15 +386,16 @@ impl WorkerHandle {
         }
     }
 
-    /// 给 worker 发信号。pid 未知（`<= 1`）时什么都不做——给 0 / -1 / 1 发信号是灾难。
-    fn signal(&self, sig: Signal) -> bool {
+    /// 终止 worker 进程。pid 未知（`<= 1`）时什么都不做——
+    /// 给 0 / -1 / 1 发信号是灾难，而进程内 worker（测试）压根没有进程可杀。
+    fn stop(&self, how: Stop) -> bool {
         if self.pid <= 1 {
             return false;
         }
-        match kill(Pid::from_raw(self.pid), sig) {
-            Ok(()) => true,
+        match stop_process(self.pid, how) {
+            Ok(done) => done,
             Err(e) => {
-                tracing::debug!(pid = self.pid, ?sig, error = %e, "向 worker 发信号失败");
+                tracing::debug!(pid = self.pid, ?how, error = %e, "终止 worker 失败");
                 false
             }
         }
@@ -403,10 +406,64 @@ impl WorkerHandle {
     }
 }
 
+/// 终止的力度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// 「请你退出」：Unix 上是 `SIGTERM`，进程有机会做收尾。
+    Graceful,
+    /// 「立刻消失」：Unix 上是 `SIGKILL`，Windows 上是 `TerminateProcess`。
+    Force,
+}
+
+/// 终止一个进程。返回 `Ok(false)` 表示这个平台上没有对应的动作。
+#[cfg(unix)]
+fn stop_process(pid: i32, how: Stop) -> std::io::Result<bool> {
+    let sig = match how {
+        Stop::Graceful => nix::sys::signal::Signal::SIGTERM,
+        Stop::Force => nix::sys::signal::Signal::SIGKILL,
+    };
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), sig)?;
+    Ok(true)
+}
+
+/// 见 Unix 版。
+///
+/// # 为什么 `Graceful` 是空操作
+///
+/// Windows 没有「可捕获的终止信号」。控制台程序有 `CTRL_BREAK_EVENT`，但
+/// worker 是服务拉起的无控制台进程，收不到；给它建控制台只为了发一个事件，
+/// 代价远大于收益。真正的「请你退出」在本模块里已经由 [`ToWorker::Shutdown`]
+/// 那一帧承担了，`Graceful` 这一档在 Windows 上没有别的可做，
+/// 于是报告「没做成」，让调用方直接进入强制终止。
+#[cfg(windows)]
+fn stop_process(pid: i32, how: Stop) -> std::io::Result<bool> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+    };
+
+    if how == Stop::Graceful {
+        return Ok(false);
+    }
+    // SAFETY: 常规 Win32 调用；pid 由 helper 给出，无效时返回空句柄。
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: handle 刚打开且非空；退出码 1 表示非正常结束。
+    let ok = unsafe { TerminateProcess(handle, 1) };
+    // SAFETY: handle 由 OpenProcess 取得，此处归还。
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
 /// 读循环：把回应按 `id` 派发给等待者；连接断开时唤醒所有在途调用。
 async fn read_loop(mut reader: FdFrameReader, inner: Arc<Inner>) {
     loop {
-        // 先取出 fd 再解码：解码失败时 `fds` 随作用域 drop，不会泄漏。
+        // 先取出附件再解码：解码失败时 `fds` 随作用域 drop，不会泄漏。
         let framed = match reader.read().await {
             Ok(Some((payload, fds))) => match strixmaid_types::ipc::decode::<FromWorker>(&payload) {
                 Ok(msg) => Some((msg, fds)),
@@ -573,7 +630,7 @@ async fn watch_subscription(
     // 这里 drop `tx`：它是最后一个发送端，接收端因此看到流结束。
 }
 
-fn deliver(inner: &Inner, id: u64, result: Result<(Value, Vec<OwnedFd>), ApiError>) {
+fn deliver(inner: &Inner, id: u64, result: Result<(Value, Vec<Attachment>), ApiError>) {
     let tx = inner
         .pending
         .lock()

@@ -7,10 +7,11 @@
 //!
 //! | 目录 | 数据源 |
 //! |---|---|
-//! | [`linux`] | `/proc`、`/sys`、`/etc`（目标平台，`docs/design.md` §1） |
-//! | [`macos`] | `sysctl`、`sw_vers`、`getfsstat`、`scutil` |
+//! | [`linux`] | `/proc`、`/sys`、`/etc`（`docs/design.md` §1） |
+//! | [`macos`] | `sysctl`、`SystemVersion.plist`、`getfsstat`、`scutil` |
+//! | [`windows`] | 注册表、`GlobalMemoryStatusEx`、`GetIfTable2`、卷与物理盘枚举、`SetComputerNameExW` |
 //!
-//! [`health`] 是两个平台共用的判定逻辑（阈值、严重级别、版本比较），不做 I/O。
+//! [`health`] 是三个平台共用的判定逻辑（阈值、严重级别、版本比较），不做 I/O。
 //!
 //! 采集函数（`collect_*`）全是同步、永不失败的纯 I/O；[`HostProvider`] 的 async 方法把它们
 //! 丢进 `spawn_blocking`——`statvfs` 碰上挂死的网络挂载会阻塞，不能占用运行时线程。
@@ -21,11 +22,15 @@ pub mod health;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 use linux as sys;
 #[cfg(target_os = "macos")]
 use macos as sys;
+#[cfg(windows)]
+use windows as sys;
 
 use async_trait::async_trait;
 use strixmaid_types::system::{

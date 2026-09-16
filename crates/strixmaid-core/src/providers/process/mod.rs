@@ -10,10 +10,11 @@
 //!
 //! | 模块 | 数据源 | 备注 |
 //! |---|---|---|
-//! | [`linux`] | `/proc`（`procfs` crate） | 目标平台 |
-//! | [`macos`] | `libproc`（`proc_listpids` / `proc_pidinfo`） | 开发平台；无 cgroup，`unit` 恒为 `None` |
+//! | [`linux`] | `/proc`（`procfs` crate） | |
+//! | [`macos`] | `libproc`（`proc_listpids` / `proc_pidinfo`） | 无 cgroup，`unit` 恒为 `None` |
+//! | [`windows`] | `NtQuerySystemInformation(SystemProcessInformation)` | 一次调用取全表；`cgroup` 恒为 `None`，`unit` 由服务的 pid 反查 |
 //!
-//! 两个后端产出同一套 DTO（`strixmaid_types::process`），差异由字段的 `Option` 表达，
+//! 三个后端产出同一套 DTO（`strixmaid_types::process`），差异由字段的 `Option` 表达，
 //! 不新增平台分支到 API 契约里。
 //!
 //! # CPU%
@@ -42,19 +43,35 @@ pub mod tty;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// 信号与优先级的 POSIX 实现，Linux 与 macOS 共用。
+///
+/// 放在这里而不是各自的后端文件里：`kill(2)` 与 `setpriority(2)` 是 POSIX 的
+/// 东西，两个后端一个字都不会写得不一样，复制两份只会多一处可以走样的地方。
+#[cfg(unix)]
+pub mod posix;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 use linux as sys;
 #[cfg(target_os = "macos")]
 use macos as sys;
+#[cfg(windows)]
+use windows as sys;
+
+/// 「发信号 / 改优先级」这两个写操作的平台实现。
+///
+/// 与 [`sys`]（枚举进程的后端）分开：枚举方式是每个平台各写一套的，
+/// 而这两个写操作在 Linux 与 macOS 上完全相同。
+#[cfg(unix)]
+use posix as signals;
+#[cfg(windows)]
+use windows as signals;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use nix::errno::Errno;
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use strixmaid_types::process::{
     ProcessDetail, ProcessListQuery, ProcessSummary, SignalName,
 };
@@ -138,50 +155,28 @@ impl ProcProvider {
         self.inner.sys.detail(raw_pid, cpu, io, &ctx)
     }
 
-    /// `POST /processes/{pid}/signal`：`kill(2)`。
+    /// `POST /processes/{pid}/signal`。
+    ///
+    /// Unix 上是 `kill(2)`；Windows 没有信号，映射见
+    /// [`windows::send_signal`](sys::send_signal)。
     pub fn signal(&self, pid: u32, signal: SignalName) -> ApiResult<()> {
         let raw_pid = checked_pid(pid)?;
         if raw_pid == 1 {
             return Err(ApiError::invalid_request("不允许向 PID 1（init）发送信号"));
         }
-        let sig = match signal {
-            SignalName::Term => Signal::SIGTERM,
-            SignalName::Kill => Signal::SIGKILL,
-            SignalName::Hup => Signal::SIGHUP,
-        };
-        kill(Pid::from_raw(raw_pid), sig).map_err(|e| match e {
-            Errno::ESRCH => ApiError::not_found(format!("进程 {pid} 不存在")),
-            Errno::EPERM => ApiError::permission_denied(format!(
-                "内核拒绝向进程 {pid} 发送 {sig}：不是该进程的属主"
-            ))
-            .with_detail(e.to_string())
-            .retry_elevated(),
-            other => ApiError::internal(format!("向进程 {pid} 发送 {sig} 失败"))
-                .with_detail(other.to_string()),
-        })
+        signals::send_signal(pid, raw_pid, signal)
     }
 
-    /// `POST /processes/{pid}/renice`：`setpriority(2)`。
+    /// `POST /processes/{pid}/renice`。
+    ///
+    /// Unix 上是 `setpriority(2)`；Windows 上映射成优先级类，见
+    /// [`windows::set_nice`](sys::set_nice)。
     pub fn renice(&self, pid: u32, nice: i32) -> ApiResult<()> {
         if !(-20..=19).contains(&nice) {
             return Err(ApiError::invalid_request("nice 值必须在 -20..=19 之间"));
         }
         let raw_pid = checked_pid(pid)?;
-        // SAFETY: setpriority 只读参数，无内存副作用。
-        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, raw_pid as libc::id_t, nice) };
-        if rc == 0 {
-            return Ok(());
-        }
-        let e = std::io::Error::last_os_error();
-        Err(match e.raw_os_error() {
-            Some(libc::ESRCH) => ApiError::not_found(format!("进程 {pid} 不存在")),
-            Some(libc::EACCES) | Some(libc::EPERM) => ApiError::permission_denied(format!(
-                "内核拒绝调整进程 {pid} 的优先级：调低 nice 值（提高优先级）需要 root，且只能操作自己的进程"
-            ))
-            .with_detail(e.to_string())
-            .retry_elevated(),
-            _ => ApiError::internal(format!("调整进程 {pid} 优先级失败")).with_detail(e.to_string()),
-        })
+        signals::set_nice(pid, raw_pid, nice)
     }
 
     /// 一次列表 / 详情共用的上下文：用户表快照、内存总量、采样时刻。
@@ -306,8 +301,14 @@ mod tests {
         assert_eq!(d.summary.pid, me);
         assert!(!d.cmdline_args.is_empty());
         assert!(d.exe.is_some(), "自己的 exe 总该读得到");
+        // euid 的第二来源按平台不同：Unix 上是 `geteuid(2)`；Windows 没有
+        // 「有效用户」这一层，一个进程只有一张主令牌，因此 euid 恒等于 uid
+        // （详见 `providers/process/windows.rs` 的同名断言）。
+        #[cfg(unix)]
         // SAFETY: geteuid 无副作用。
         assert_eq!(d.euid, Some(unsafe { libc::geteuid() }));
+        #[cfg(windows)]
+        assert_eq!(d.euid, Some(d.summary.uid), "Windows 只有一张主令牌");
     }
 
     #[test]
@@ -339,6 +340,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn 非_root_无法_renice_pid_1() {
         // SAFETY: geteuid 无副作用。
@@ -348,6 +350,44 @@ mod tests {
         let provider = ProcProvider::new();
         let err = provider.renice(1, 10).unwrap_err();
         assert_eq!(err.code, ErrorCode::PermissionDenied);
+        assert!(err.can_retry_elevated);
+    }
+
+    /// 上一条在 Windows 上的等价物。
+    ///
+    /// pid 1 在 Windows 上不是 init，也不保证存在；这里要证明的那件事
+    /// ——「权限不够时如实报 `PermissionDenied` 且标明可提权重试」——对应的是
+    /// 「普通令牌打不开 LocalSystem 名下的进程」（`OpenProcess` 报
+    /// `ERROR_ACCESS_DENIED`，见 `windows::write_error`）。
+    ///
+    /// 令牌已提升时跳过：那时 `SetPriorityClass` 会真的成功，
+    /// 在开发机上把某个系统进程的优先级类改掉，测试不该留下这种副作用。
+    #[cfg(windows)]
+    #[test]
+    fn 非管理员无法_renice_系统账户的进程() {
+        use strixmaid_types::process::ProcessListQuery;
+
+        if crate::platform::windows::token::is_elevated() {
+            eprintln!("当前令牌已提升，跳过：此时这一步会真的改掉系统进程的优先级类");
+            return;
+        }
+        let provider = ProcProvider::new();
+        // uid 0 = LocalSystem；也包含「打不开因而身份未知」的进程，
+        // 那些正是本用例要的对象。0 与 4 由 `reject_system_pid` 另行挡下。
+        let Some(victim) = provider
+            .list_blocking(&ProcessListQuery::default())
+            .into_iter()
+            .find(|p| p.uid == 0 && p.pid != 0 && p.pid != 4)
+        else {
+            eprintln!("列表里没有 LocalSystem 名下的进程，跳过");
+            return;
+        };
+        let err = provider.renice(victim.pid, 10).unwrap_err();
+        if err.code == ErrorCode::NotFound {
+            eprintln!("进程 {} 在两次调用之间退出了，跳过", victim.pid);
+            return;
+        }
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
         assert!(err.can_retry_elevated);
     }
 

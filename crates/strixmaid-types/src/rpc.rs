@@ -88,8 +88,9 @@ pub const FS_READ: &str = "fs.read";
 
 /// 开一个 PTY（`roadmap/03-terminal.md` §4.5）。
 ///
-/// 参数 [`TermOpenParams`]，结果 [`TermOpenResult`]，**并附带 1 个 fd**——
-/// 那是主进程与 PTY 之间的 socketpair 一端。因此它注册为
+/// 参数 [`TermOpenParams`]，结果 [`TermOpenResult`]，**并附带 1 个附件**——
+/// 那是主进程与 PTY 之间的通道的一端（Unix 上是 socketpair 的 fd，
+/// Windows 上是命名管道的 `HANDLE`）。因此它注册为
 /// `Dispatcher::register_fd` 而不是普通处理器。
 pub const TERM_OPEN: &str = "term.open";
 

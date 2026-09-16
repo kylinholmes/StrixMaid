@@ -1,40 +1,16 @@
-//! worker 侧的 PTY：`term.open` / `term.resize` / `term.close`
-//! （`roadmap/03-terminal.md` §4.1 §4.2 §4.5）。
+//! Unix 侧的 PTY 实现：`openpty` + `fork` + `setuid` + `execve`。
 //!
-//! # 为什么 PTY 必须在 worker 里
+//! 接口形状与 Windows 侧一致，取舍与背景见 [父模块文档](super)。
 //!
-//! `design.md` §2.2：终端里跑的 shell 就是登录用户本人。worker 是 helper
-//! `setuid` 之后 exec 出来的，它 fork 出的 shell 天然继承那个 uid——
-//! 内核来裁决这个 shell 能干什么，服务端**一行授权代码都不用写**。
-//! 反过来，如果 PTY 开在主进程（root）里，每一次读写文件、每一次发信号都得由
-//! 我们自己去判断「该不该」，那正是 `design.md` §5.1 要避免的自建鉴权。
+//! # 本文件独有的要点
 //!
-//! # 数据通路：为什么是 fd 而不是 JSON
-//!
-//! ```text
-//! 主进程 ⇄ socketpair ⇄ worker（两个泵）⇄ PTY master ⇄ shell
-//! ```
-//!
-//! 终端是字节流，塞进 RPC 的 JSON 帧要付 base64 与转义的代价，还会和别的
-//! RPC 抢同一条 socket 的写锁（`worker::FrameWriter` 是串行的）——一个
-//! `cat 大文件` 就能把整个会话的控制面堵住。所以 `term.open` 只用 RPC 回一个
-//! **fd**（`Dispatcher::register_fd` + `SCM_RIGHTS`），此后终端字节走它自己那条
-//! socketpair，与控制面彻底分开。
-//!
-//! # 背压
-//!
-//! 两个泵都是「读一块、写完再读下一块」，中间没有任何无界缓冲。主进程读得慢
-//! → socketpair 缓冲满 → 泵卡在写上 → 不再读 PTY master → PTY 缓冲满 →
-//! shell 自己被内核挡住。这一路顶回去正是想要的：宁可让 `yes` 慢下来，
-//! 也不要在 worker 里堆几百 MB 的终端输出。
-//!
-//! # 身份：worker 不判断「该不该」
-//!
-//! `TermOpenParams::user` 只有 admin worker（`getuid() == 0`）会用；user worker
-//! **忽略**它——它被内核锁死在自己的 uid 上，`user` 写什么都只能是自己。
-//! 「这个会话能不能开别人的终端」由主进程按 `session.elevated` 决定
-//! （`roadmap/03-terminal.md` §4.2：未提权 → 403，根本不会派到 admin worker），
-//! worker 这里不复核。复核会带来两套判断规则，而两套规则迟早会不一致。
+//! - PTY 主设备一关，内核就给整个会话发 `SIGHUP`。这既是关终端的手段，
+//!   也意味着 [`Terminal::master`] 不能随手 drop。
+//! - 从设备**只要还有一个 fd 开着**，shell 退出时主设备就读不到 EOF，
+//!   主进程会一直以为终端还活着。所以 `open` 里拿到自己那份之后立刻
+//!   丢掉 portable-pty 的那份，`spawn_on_tty` 之后再丢掉自己的。
+//! - 换身份时要把 tty 过户给目标用户（`login(1)` 也这么做），
+//!   否则 sudo / ssh / less 这些要重开控制终端的程序会打不开 `/dev/tty`。
 
 use std::collections::HashMap;
 use std::io;
@@ -60,8 +36,9 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use super::Dispatcher;
-use super::spawn_as::{ExecSpec, Identity, PreparedExec, describe_exit};
+use super::{CLOSE_GRACE, PUMP_BUF, REAPED_LINGER, unknown};
+use crate::session::channel::Attachment;
+use crate::worker::spawn_as::{ExecSpec, Identity, PreparedExec, describe_exit};
 
 /// 允许作为 shell 的白名单文件。Linux 与 macOS 都有。
 const SHELLS_FILE: &str = "/etc/shells";
@@ -71,19 +48,6 @@ const FALLBACK_SHELL: &str = "/bin/sh";
 
 /// 没有从环境继承到 PATH 时的兜底（与 helper 的 `spawn.rs` 一致）。
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-
-/// 泵一次搬运的字节上限。
-const PUMP_BUF: usize = 16 * 1024;
-
-/// `term.close` 里等 shell 咽气的宽限期，超时就 `SIGKILL`。
-const CLOSE_GRACE: Duration = Duration::from_secs(3);
-
-/// shell 自行退出后，条目带着退出状态在表里保留多久，等主进程的 `term.close` 来取。
-///
-/// 主进程在 socketpair 读到 EOF 后总会补一次 `term.close`（`terminal/mod.rs` 的
-/// `shutdown`），正常情况下几毫秒内就来取走了；这个上限只兜「主进程一直不来」的
-/// 异常路径，防止条目在表里永久滞留。
-const REAPED_LINGER: Duration = Duration::from_secs(30);
 
 // ===========================================================================
 // 终端表
@@ -173,7 +137,7 @@ impl TerminalTable {
     }
 
     /// 开一个 PTY，返回结果与**主进程侧的 socketpair 一端**。
-    pub async fn open(&self, params: TermOpenParams) -> ApiResult<(TermOpenResult, OwnedFd)> {
+    pub async fn open(&self, params: TermOpenParams) -> ApiResult<(TermOpenResult, Attachment)> {
         if params.cols == 0 || params.rows == 0 {
             return Err(ApiError::invalid_request(format!(
                 "终端尺寸必须为正，收到 {}x{}",
@@ -356,10 +320,6 @@ impl TerminalTable {
         tracing::info!(pid = params.pid, exit = ?exit, "终端已关");
         Ok(TermCloseResult { exit })
     }
-}
-
-fn unknown(pid: u32) -> ApiError {
-    ApiError::not_found(format!("本 worker 没有 pid 为 {pid} 的终端"))
 }
 
 /// 等 shell 退出并回收它，返回退出状态。
@@ -764,65 +724,6 @@ async fn pump_socket_to_master(
     tracing::debug!(pid = %pid, "主进程侧输入通道已关闭，终端继续运行");
 }
 
-// ===========================================================================
-// 注册
-// ===========================================================================
-
-/// 把 JSON 参数解成 `P`。
-///
-/// 解不出来是**主进程构造错了调用**，不是用户输入有问题，所以报 `internal`；
-/// 理由与 `worker::providers::params` 相同，那边是私有的，这里重写一份。
-fn decode<P: DeserializeOwned>(method: &'static str, v: Value) -> ApiResult<P> {
-    serde_json::from_value(v).map_err(|e| {
-        ApiError::internal(format!("worker 无法解析 {method} 的参数")).with_detail(e.to_string())
-    })
-}
-
-fn encode<R: serde::Serialize>(r: R) -> ApiResult<Value> {
-    serde_json::to_value(r)
-        .map_err(|e| ApiError::internal("worker 无法序列化结果").with_detail(e.to_string()))
-}
-
-/// 把 `term.*` 三个方法注册进分发表，共享同一张终端表。
-///
-/// `term.open` 走 [`Dispatcher::register_fd`]：它要交出的 socketpair fd 必须和
-/// 结果**在同一帧**里发出去（`SCM_RIGHTS`），普通处理器的签名表达不了这件事。
-pub fn register(d: &mut Dispatcher) -> TerminalTable {
-    let table = TerminalTable::new();
-
-    let t = table.clone();
-    d.register_fd(
-        rpc::TERM_OPEN,
-        Arc::new(move |v: Value| {
-            let t = t.clone();
-            Box::pin(async move {
-                let params: TermOpenParams = decode(rpc::TERM_OPEN, v)?;
-                let (result, fd) = t.open(params).await?;
-                Ok((encode(result)?, vec![fd]))
-            })
-        }),
-    );
-
-    let t = table.clone();
-    d.register_fn(rpc::TERM_RESIZE, move |v| {
-        let t = t.clone();
-        async move {
-            t.resize(decode(rpc::TERM_RESIZE, v)?).await?;
-            encode(())
-        }
-    });
-
-    let t = table.clone();
-    d.register_fn(rpc::TERM_CLOSE, move |v| {
-        let t = t.clone();
-        async move {
-            let result = t.close(decode(rpc::TERM_CLOSE, v)?).await?;
-            encode(result)
-        }
-    });
-
-    table
-}
 
 #[cfg(test)]
 mod tests {
@@ -830,6 +731,9 @@ mod tests {
     use std::os::unix::net::UnixStream as StdUnixStream;
 
     use super::*;
+    // 注册与分发是平台无关的，住在父模块里（见 `super` 的模块文档）。
+    use crate::worker::Dispatcher;
+    use crate::worker::terminal::register;
 
     /// 测试里固定用 `/bin/sh`：它一定在 `/etc/shells` 里，行为也可预测。
     /// 用登录用户自己的 shell 会把测试和开发者的 rc 文件绑在一起（比如某些

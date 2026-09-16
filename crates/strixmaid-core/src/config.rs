@@ -63,8 +63,26 @@ use strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS;
 // 常量
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// 路径默认值
+//
+// Unix 上是 FHS 的 /etc、/var/lib、/run（§12）。Windows 上没有 FHS，
+// 等价物是 `%ProgramData%\StrixMaid`：那正是「机器范围、非用户、可写」的
+// 系统目录，所有以服务身份运行的软件都装在那儿。
+//
+// 为什么写成编译期常量而不是运行时展开 %ProgramData%：配置的默认值必须在
+// `Config::default()` 里是确定的（示例配置、错误信息、测试都要引用它）。
+// `%ProgramData%` 在实际部署里几乎总是 `C:\ProgramData`——它被改掉的机器
+// 极少，而那种机器上用 `--config` 或 `STRIXMAID_DATA_DIR` 显式指定即可。
+// ---------------------------------------------------------------------------
+
 /// 默认配置文件路径（§12）。
+#[cfg(not(windows))]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/strixmaid/config.toml";
+/// 见上。
+#[cfg(windows)]
+pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\StrixMaid\config.toml";
+
 /// 环境变量前缀。
 pub const ENV_PREFIX: &str = "STRIXMAID_";
 /// 环境变量里表示「嵌套一层」的分隔符。
@@ -74,13 +92,36 @@ pub const CONFIG_PATH_ENV: &str = "STRIXMAID_CONFIG";
 
 /// 默认监听地址（§12）。
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:9700";
+
 /// 默认数据目录（§12）。
+#[cfg(not(windows))]
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/strixmaid";
+/// 见上。
+#[cfg(windows)]
+pub const DEFAULT_DATA_DIR: &str = r"C:\ProgramData\StrixMaid\data";
+
 /// 默认运行目录（§12）。
+#[cfg(not(windows))]
 pub const DEFAULT_RUN_DIR: &str = "/run/strixmaid";
-/// helper 二进制默认值：不含 `/`，交由 `Command::new` 按 `PATH` 查找。
+/// 见上。
+///
+/// Windows 上没有 tmpfs 那样的「重启即空」目录，用 `ProgramData` 下的子目录。
+/// 本项目在 Windows 上其实用不到它——helper 走**命名管道**而不是文件系统
+/// socket（见 `session::channel`），这个目录留着只为配置形状在三个平台上一致。
+#[cfg(windows)]
+pub const DEFAULT_RUN_DIR: &str = r"C:\ProgramData\StrixMaid\run";
+
+/// helper 二进制默认值：不含路径分隔符，交由 `PATH` 查找。
+///
+/// Windows 上磁盘文件是 `strixmaid-helper.exe`，后缀由
+/// [`crate::capability::find_executable`] 补，配置里不必写。
 pub const DEFAULT_HELPER_PATH: &str = "strixmaid-helper";
+
 /// 默认 PAM 服务名（§5.4）。
+///
+/// **Windows 上这一项没有意义**：那里的认证走 `LogonUserW`，不读
+/// `/etc/pam.d/<名字>`。字段保留是为了让配置形状在三个平台上一致
+/// （下游的配置管理不必按平台分叉），helper 在 Windows 上收到后直接忽略。
 pub const DEFAULT_PAM_SERVICE: &str = "strixmaid";
 
 /// SQLite 数据库文件名，位于 `data_dir` 下。
@@ -699,11 +740,15 @@ impl Config {
             ));
         }
         for root in &self.files.allowed_roots {
-            if !root.is_absolute() {
+            if !is_absolute_root(root) {
                 errors.push(FieldError::new(
                     "files.allowed_roots",
                     root.display().to_string(),
-                    "每项都必须是绝对路径",
+                    if cfg!(windows) {
+                        "每项都必须是绝对路径（如 C:\\Users），或用 \\ 表示「全部驱动器」"
+                    } else {
+                        "每项都必须是绝对路径"
+                    },
                 ));
             }
         }
@@ -826,11 +871,21 @@ impl Config {
 
     // ---------------------------------------------------------------- 示例
 
-    /// 一份带中文注释的完整示例配置，用于生成 `/etc/strixmaid/config.toml`。
+    /// 一份带中文注释的完整示例配置，用于生成 [`DEFAULT_CONFIG_PATH`] 那个文件。
     ///
-    /// 其中所有取值均等于内置默认值（有单元测试保证），因此原样安装也不会改变行为。
-    pub fn example_toml() -> &'static str {
+    /// 其中所有取值均等于**本平台的**内置默认值（有单元测试保证），
+    /// 因此原样安装也不会改变行为。路径与提权组在三个平台上不同，由本函数
+    /// 按平台填进模板——示例配置是给人照抄的，印一份在本机根本不存在的路径
+    /// （比如在 Windows 上写 `/var/lib/strixmaid`）比不给示例更糟。
+    pub fn example_toml() -> String {
+        let d = Config::default();
         EXAMPLE_TOML
+            .replace("@CONFIG_PATH@", DEFAULT_CONFIG_PATH)
+            .replace("@DATA_DIR@", &toml_path(&d.data_dir))
+            .replace("@RUN_DIR@", &toml_path(&d.run_dir))
+            .replace("@ELEVATE_GROUPS@", &toml_string_list(&d.session.elevate_groups))
+            .replace("@ALLOWED_ROOTS@", &toml_path_list(&d.files.allowed_roots))
+            .replace("@PLATFORM_NOTE@", PLATFORM_NOTE)
     }
 }
 
@@ -882,10 +937,47 @@ fn prune_empty_value(value: Value) -> Option<Value> {
 // 校验小工具
 // ===========================================================================
 
+/// 一个 `files.allowed_roots` 项是不是合法的「根」。
+///
+/// Unix 上就是 `Path::is_absolute`。Windows 上多认一种写法：**裸的 `\` 或 `/`**。
+///
+/// 那是默认值 `["/"]` 在 Windows 上的含义——「整个文件系统命名空间」，
+/// 即全部驱动器。`Path::is_absolute` 在 Windows 上要求带盘符前缀，
+/// 单独一个 `\` 只有 `has_root()` 为真；若照搬 Unix 的判断，跨平台的默认配置
+/// 在 Windows 上会直接启动失败。语义落地见
+/// [`crate::providers::fs::is_allowed`]。
+pub fn is_absolute_root(path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    cfg!(windows) && path.has_root() && path.components().count() == 1
+}
+
 fn check_non_empty_path(field: &str, path: &Path, what: &str, errors: &mut Vec<FieldError>) {
     if path.as_os_str().is_empty() {
         errors.push(FieldError::new(field, "<空>", format!("不能为空；{what}")));
     }
+}
+
+/// 路径 → TOML 字符串字面量。
+///
+/// Windows 的路径里全是反斜杠，而 TOML 的**基本字符串**会把 `\U` 当成转义
+/// （`"C:\Users"` 直接是语法错误）。因此一律用**字面量字符串**（单引号），
+/// 它不做任何转义。Unix 路径里没有反斜杠，用同一套写法也完全合法。
+fn toml_path(p: &Path) -> String {
+    format!("'{}'", p.display())
+}
+
+/// 路径列表 → TOML 数组。
+fn toml_path_list(items: &[PathBuf]) -> String {
+    let inner: Vec<String> = items.iter().map(|p| toml_path(p)).collect();
+    format!("[{}]", inner.join(", "))
+}
+
+/// 字符串列表 → TOML 数组（组名里不会有反斜杠，用普通双引号）。
+fn toml_string_list(items: &[String]) -> String {
+    let inner: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
+    format!("[{}]", inner.join(", "))
 }
 
 fn check_range(
@@ -909,7 +1001,7 @@ fn check_range(
 // 示例配置
 // ===========================================================================
 
-const EXAMPLE_TOML: &str = r#"# StrixMaid 配置文件 —— /etc/strixmaid/config.toml
+const EXAMPLE_TOML: &str = r#"# StrixMaid 配置文件 —— @CONFIG_PATH@
 #
 # 优先级（从低到高）：
 #   内置默认值 < 本文件 < 环境变量 STRIXMAID_* < 命令行参数
@@ -920,17 +1012,22 @@ const EXAMPLE_TOML: &str = r#"# StrixMaid 配置文件 —— /etc/strixmaid/con
 #
 # 所有时长字段统一以「秒」为单位，字段名带 _secs 后缀。
 # 下面每一项的取值都等于内置默认值，可以按需修改或整行删除。
-
+#
+# 路径一律用【单引号】的 TOML 字面量字符串：Windows 的路径里全是反斜杠，
+# 双引号字符串会把它们当转义符（"C:\Users" 直接是语法错误）。
+@PLATFORM_NOTE@
 # 监听地址。只接受 `IP:端口`，不支持主机名。
 # MVP 不提供 TLS：需要对外暴露时请放在 nginx / Caddy 等反向代理之后。
 listen = "127.0.0.1:9700"
 
 # 数据目录。SQLite 数据库（指标 / 会话 / 审计）存放于 <data_dir>/strixmaid.db。
-data_dir = "/var/lib/strixmaid"
+data_dir = @DATA_DIR@
 
-# 运行目录。helper 的 Unix socket（helper.sock，权限 0600）存放于此。
+# 运行目录。
+# Linux / macOS：helper 的 Unix socket（helper.sock，权限 0600）存放于此，
 # 通常由 systemd unit 的 RuntimeDirectory=strixmaid 自动创建。
-run_dir = "/run/strixmaid"
+# Windows：helper 走命名管道，不落文件系统，本项当前用不到。
+run_dir = @RUN_DIR@
 
 # 受信任的反向代理地址。只有直连地址在这个列表里时，才采信 X-Forwarded-For。
 # 默认空 = 谁都不信、一律用直连地址。
@@ -943,10 +1040,13 @@ run_dir = "/run/strixmaid"
 trusted_proxies = []
 
 # strixmaid-helper 二进制路径。
-# 不含 `/` 时按 PATH 查找；需要固定位置就写绝对路径，例如 "/usr/libexec/strixmaid-helper"。
-helper_path = "strixmaid-helper"
+# 不含路径分隔符时按 PATH 查找；需要固定位置就写绝对路径。
+# Windows 上不必写 .exe 后缀，查找时会自动补。
+helper_path = 'strixmaid-helper'
 
 # PAM 服务名，对应 /etc/pam.d/<名字>。安装包会按发行版写入对应模板。
+# 【Windows 上本项无意义】：那里的认证走 LogonUserW，不读 pam.d。
+# 字段保留只为配置形状三平台一致，helper 收到后直接忽略。
 pam_service = "strixmaid"
 
 [log]
@@ -990,13 +1090,17 @@ idle_timeout_secs = 900
 elevated_idle_timeout_secs = 300
 
 # 允许启用管理访问（提权）的系统组。用户属于其中任一组才能提权；root 无条件可以。
-# 默认覆盖 Debian 系的 sudo、RHEL / Arch 系的 wheel、macOS 与老 Ubuntu 的 admin。
+# Linux / macOS 默认覆盖 Debian 系的 sudo、RHEL / Arch 系的 wheel、
+# macOS 与老 Ubuntu 的 admin；Windows 默认是内建的 Administrators。
 #
-# 这不是自建 RBAC，而是把「谁能成为 root」交给系统的组策略，
+# 这不是自建 RBAC，而是把「谁能成为管理员」交给系统的组策略，
 # 与 sudo 的默认配置、与 Cockpit 的管理访问模型一致。
 #
+# 组名按【英文规范名】匹配。本地化的 Windows 上内建组的显示名可能是
+# 德文 / 法文的，helper 会额外补一个英文名，因此这里照写 Administrators 即可。
+#
 # 【配成空列表 [] 表示禁止任何人提权】——这是合法配置，不是「不限制」。
-elevate_groups = ["sudo", "wheel", "admin"]
+elevate_groups = @ELEVATE_GROUPS@
 
 [audit]
 # 审计记录保留天数。超过即被每小时一次的后台任务清理。
@@ -1007,8 +1111,24 @@ retention_days = 90
 [files]
 # 文件面板允许浏览的根路径（绝对路径，列表不能为空）。
 # 这不是安全边界——文件可见性由登录用户的文件权限裁决——只是界面的展示范围。
-allowed_roots = ["/"]
+#
+# Windows 上单独一个 '\' 表示【全部驱动器】（此时浏览根目录列出的是各个盘），
+# 要限定到某几个盘就写成 ['C:\', 'D:\Data']。
+allowed_roots = @ALLOWED_ROOTS@
 "#;
+
+/// 示例配置里的平台提示行，由 [`Config::example_toml`] 填进 `@PLATFORM_NOTE@`。
+///
+/// 只讲「本平台与别的平台不一样的地方」，避免读者照着另一个平台的文档找不存在的路径。
+#[cfg(windows)]
+const PLATFORM_NOTE: &str = r"#
+# 本文件是 Windows 版：路径默认在 %ProgramData%\StrixMaid 下；
+# pam_service 与 run_dir 在本平台无效（认证走 LogonUserW，IPC 走命名管道）。
+";
+
+/// 见上。
+#[cfg(not(windows))]
+const PLATFORM_NOTE: &str = "";
 
 // ===========================================================================
 // 单元测试
@@ -1086,8 +1206,8 @@ mod tests {
     fn 默认值符合设计文档() {
         let c = Config::default();
         assert_eq!(c.listen, "127.0.0.1:9700");
-        assert_eq!(c.data_dir, PathBuf::from("/var/lib/strixmaid"));
-        assert_eq!(c.run_dir, PathBuf::from("/run/strixmaid"));
+        assert_eq!(c.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
+        assert_eq!(c.run_dir, PathBuf::from(DEFAULT_RUN_DIR));
         assert_eq!(c.helper_path, PathBuf::from("strixmaid-helper"));
         assert_eq!(c.pam_service, "strixmaid");
         assert_eq!(c.log.level, LogLevel::Info);
@@ -1104,11 +1224,11 @@ mod tests {
         let c = Config::default();
         assert_eq!(
             c.db_path(),
-            PathBuf::from("/var/lib/strixmaid/strixmaid.db")
+            PathBuf::from(DEFAULT_DATA_DIR).join(DB_FILE_NAME)
         );
         assert_eq!(
             c.helper_socket_path(),
-            PathBuf::from("/run/strixmaid/helper.sock")
+            PathBuf::from(DEFAULT_RUN_DIR).join(HELPER_SOCKET_NAME)
         );
         assert_eq!(
             c.listen_addr().unwrap(),
@@ -1136,12 +1256,12 @@ mod tests {
 
     #[test]
     fn 示例配置等于默认值且能通过校验() {
-        let from_example = from_toml(Config::example_toml()).expect("示例配置必须合法");
+        let from_example = from_toml(&Config::example_toml()).expect("示例配置必须合法");
         assert_eq!(from_example, Config::default());
 
         // 就算不叠默认值层，示例也应当能独立解析出完整配置（serde(default) 兜底）。
         let standalone =
-            Config::from_figment(Figment::from(Toml::string(Config::example_toml()))).unwrap();
+            Config::from_figment(Figment::from(Toml::string(&Config::example_toml()))).unwrap();
         assert_eq!(standalone, Config::default());
     }
 
@@ -1524,17 +1644,30 @@ mod tests {
 mod elevate_groups_tests {
     use super::*;
 
+    /// 默认放行组必须就是 [`strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS`]，
+    /// 而那份常量是按平台给的：Unix 上覆盖三大发行版惯例（Debian 的 `sudo`、
+    /// RHEL / Arch 的 `wheel`、老 Ubuntu 与 macOS 的 `admin`），
+    /// Windows 上只有内建的 `Administrators`——那边根本不存在前三个组，
+    /// 列上去只会让人以为「配置里写了就该生效」。
     #[test]
-    fn 默认值覆盖三大发行版惯例() {
+    fn 默认放行组是本平台的惯例() {
         let c = Config::default();
+        let expect: Vec<String> = strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(c.session.elevate_groups, expect);
+        #[cfg(unix)]
         assert_eq!(c.session.elevate_groups, ["sudo", "wheel", "admin"]);
+        #[cfg(windows)]
+        assert_eq!(c.session.elevate_groups, ["Administrators"]);
         c.validate().expect("默认配置必须合法");
     }
 
     #[test]
     fn 示例配置里的值与默认值一致() {
         // 示例文件是给人抄的；它与默认值不符时，照抄的人会得到意料之外的行为。
-        let from_example: Config = toml::from_str(Config::example_toml()).expect("示例可解析");
+        let from_example: Config = toml::from_str(&Config::example_toml()).expect("示例可解析");
         assert_eq!(
             from_example.session.elevate_groups,
             Config::default().session.elevate_groups

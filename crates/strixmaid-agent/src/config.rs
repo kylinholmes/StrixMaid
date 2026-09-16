@@ -2,7 +2,26 @@
 //!
 //! 加载顺序：内置默认 → TOML → 环境变量 `STRIXMAID_AGENT_*`（嵌套用 `__`）。
 //! TOML 路径来自 `--config`；显式给出的文件必须存在，缺省路径
-//! （`/etc/strixmaid/agent.toml`）不存在则静默跳过——与 Server 的行为一致。
+//! （[`DEFAULT_CONFIG_PATH`]）不存在则静默跳过——与 Server 的行为一致。
+//!
+//! # 两个平台的路径与节点标识
+//!
+//! 路径默认值按平台分叉，取向与 `strixmaid_core::config` 里那几个常量一致：
+//! Unix 走 FHS 的 `/etc`、`/var/lib`，Windows 没有 FHS，等价物是
+//! `%ProgramData%\StrixMaid`——「机器范围、非用户、可写」的系统目录。
+//!
+//! 节点标识（`node_id`）要求**同一台机器重装 Agent 后仍然不变**，否则 Server
+//! 上会多出一个孤儿节点、历史指标断成两截。两个平台各有各的来源：
+//!
+//! | 平台 | 来源 | 何时产生 |
+//! |---|---|---|
+//! | Linux / 类 Unix | `/etc/machine-id`（回退 `/var/lib/dbus/machine-id`） | 系统首次启动时由 systemd 生成 |
+//! | Windows | `HKLM\SOFTWARE\Microsoft\Cryptography` 的 `MachineGuid` | 系统安装时由 CryptoAPI 生成 |
+//!
+//! `MachineGuid` 是 Windows 上 `/etc/machine-id` 最接近的对应物：全局唯一、
+//! 随系统安装确定、重启与重装应用都不变，且**不需要任何特权**就能读到
+//! （该键对 Users 组可读）。它与网卡 MAC、主机名之类的候选不同——后两者会随
+//! 换网卡、加域、改名而变，用它们当节点标识迟早出事。
 //!
 //! # 偏离记录（相对 roadmap/05 §3.1 的表）
 //!
@@ -20,7 +39,18 @@ use serde::{Deserialize, Serialize};
 use strixmaid_core::config::MetricsConfig;
 
 /// 缺省配置文件路径。
+#[cfg(not(windows))]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/strixmaid/agent.toml";
+/// 见上。
+#[cfg(windows)]
+pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\StrixMaid\agent.toml";
+
+/// 缺省数据目录（本地 SQLite 落在这里）。
+#[cfg(not(windows))]
+pub const DEFAULT_DATA_DIR: &str = "/var/lib/strixmaid-agent";
+/// 见上。
+#[cfg(windows)]
+pub const DEFAULT_DATA_DIR: &str = r"C:\ProgramData\StrixMaid\agent-data";
 
 /// Agent 运行时配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,7 +60,7 @@ pub struct AgentConfig {
     /// Agent 自己拼 `/ws/agent`。
     pub server_url: String,
     /// 节点稳定标识；必须与 Server 上 `POST /nodes` 登记的 id 一致。
-    /// 缺省取 `/etc/machine-id`。
+    /// 缺省由 [`AgentConfig::resolve_node_id`] 按平台取机器标识。
     pub node_id: Option<String>,
     /// 显示名；缺省取主机名。
     pub node_name: Option<String>,
@@ -57,7 +87,7 @@ impl Default for AgentConfig {
             node_name: None,
             token: None,
             token_file: None,
-            data_dir: PathBuf::from("/var/lib/strixmaid-agent"),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
             metrics: MetricsConfig::default(),
             sync_interval_secs: 20,
         }
@@ -127,20 +157,15 @@ impl AgentConfig {
         self.data_dir.join("strixmaid-agent.db")
     }
 
-    /// 定下节点 id：配置优先，其次 `/etc/machine-id`。
+    /// 定下节点 id：配置优先，其次取本机的机器标识（来源按平台不同，见模块文档）。
+    ///
+    /// 取不到时**报错而不是生成一个**：随机生成的 id 每次重启都不一样，
+    /// Server 那边会把同一台机器当成源源不断的新节点，比直接失败更难排查。
     pub fn resolve_node_id(&self) -> anyhow::Result<String> {
         if let Some(id) = &self.node_id {
             return Ok(id.clone());
         }
-        for p in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
-            if let Ok(text) = std::fs::read_to_string(p) {
-                let id = text.trim();
-                if !id.is_empty() {
-                    return Ok(id.to_string());
-                }
-            }
-        }
-        bail!("读不到 /etc/machine-id，请显式配置 node_id");
+        machine_id().ok_or_else(|| anyhow::anyhow!("{}", MACHINE_ID_MISSING))
     }
 
     /// 定下 token：`token` 优先，其次读 `token_file` 首行。
@@ -156,6 +181,54 @@ impl AgentConfig {
             bail!("token_file {} 是空的", path.display());
         }
         Ok(token)
+    }
+}
+
+/// 取不到机器标识时的提示，按平台指出该去看哪里。
+#[cfg(not(windows))]
+const MACHINE_ID_MISSING: &str =
+    "读不到 /etc/machine-id（也读不到 /var/lib/dbus/machine-id），请显式配置 node_id";
+/// 见上。
+#[cfg(windows)]
+const MACHINE_ID_MISSING: &str = concat!(
+    "读不到 HKLM\\SOFTWARE\\Microsoft\\Cryptography 的 MachineGuid，",
+    "请显式配置 node_id"
+);
+
+/// 本机的机器标识，取不到返回 `None`。
+///
+/// systemd 生成的 `machine-id` 是 32 位十六进制；`/var/lib/dbus/machine-id`
+/// 是它在没有 systemd 的系统上的老位置，很多发行版把前者软链到后者。
+#[cfg(not(windows))]
+fn machine_id() -> Option<String> {
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let id = text.trim();
+            if !id.is_empty() {
+                return Some(id.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// 本机的机器标识，取不到返回 `None`。
+///
+/// 值形如 `4f1a2b3c-...`（带连字符的 GUID，无花括号）。这里**原样返回**，
+/// 不做大小写或格式归一：`node_id` 是与 Server 之间的约定标识，
+/// 换一台 Server、换一个版本都必须得到同一个字符串，任何「顺手规范化」
+/// 都会在将来变成一次静默的节点身份漂移。只去掉首尾空白——注册表值理论上
+/// 不该带空白，但真带了的话，那是脏数据而不是标识的一部分。
+#[cfg(windows)]
+fn machine_id() -> Option<String> {
+    use strixmaid_core::platform::windows::{HKLM, reg_string};
+
+    let raw = reg_string(HKLM, r"SOFTWARE\Microsoft\Cryptography", "MachineGuid")?;
+    let id = raw.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_owned())
     }
 }
 
@@ -180,8 +253,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.data_dir, PathBuf::from("/var/lib/strixmaid-agent"));
-        assert_eq!(cfg.db_path(), PathBuf::from("/var/lib/strixmaid-agent/strixmaid-agent.db"));
+        assert_eq!(cfg.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
+        assert_eq!(
+            cfg.db_path(),
+            Path::new(DEFAULT_DATA_DIR).join("strixmaid-agent.db")
+        );
         assert_eq!(cfg.sync_interval_secs, 20);
         assert_eq!(cfg.metrics.interval_secs, 2, "metrics 与 Server 同构同默认");
     }
@@ -217,12 +293,80 @@ sync_interval_secs = 1"#)
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("token");
         std::fs::write(&f, "  s3cret \n下一行不算\n").unwrap();
+        // TOML 的双引号串把反斜杠当转义符，Windows 路径（`C:\Users\...`）原样塞
+        // 进去会解析失败；单引号的字面量串不做任何转义，两个平台通用。
         let cfg = from_toml(&format!(
-            "server_url = \"ws://s\"\ntoken_file = \"{}\"",
+            "server_url = \"ws://s\"\ntoken_file = '{}'",
             f.display()
         ))
         .unwrap();
         assert_eq!(cfg.resolve_token().unwrap(), "s3cret");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 显式配置的_node_id_压过机器标识() {
+        let cfg = from_toml(
+            r#"
+            server_url = "ws://s"
+            token = "t"
+            node_id = "手工指定"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.resolve_node_id().unwrap(), "手工指定");
+    }
+
+    #[test]
+    fn 本机机器标识可读且稳定() {
+        let Some(first) = machine_id() else {
+            // 容器里 /etc/machine-id 可能是空的，Windows 上该注册表键理论上
+            // 也可能被裁剪掉。取不到时说明情况并跳过，而不是判本机不合格。
+            eprintln!("本机取不到机器标识，跳过：{MACHINE_ID_MISSING}");
+            return;
+        };
+        assert!(!first.trim().is_empty(), "取到的标识不该是空白");
+        assert_eq!(
+            machine_id().as_deref(),
+            Some(first.as_str()),
+            "同一次运行里连取两次必须一致——它是节点身份的唯一来源"
+        );
+        eprintln!("本机机器标识：{first}");
+
+        let cfg = from_toml(
+            r#"
+            server_url = "ws://s"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.resolve_node_id().unwrap(),
+            first,
+            "未配置 node_id 时应当回落到机器标识"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_上的标识来自_machine_guid() {
+        use strixmaid_core::platform::windows::{HKLM, reg_string};
+
+        let Some(guid) = reg_string(HKLM, r"SOFTWARE\Microsoft\Cryptography", "MachineGuid") else {
+            eprintln!("本机 HKLM\\SOFTWARE\\Microsoft\\Cryptography 下没有 MachineGuid，跳过");
+            return;
+        };
+        assert_eq!(
+            machine_id().as_deref(),
+            Some(guid.trim()),
+            "原样取用，不做大小写或格式归一"
+        );
+        // MachineGuid 是不带花括号的 GUID：8-4-4-4-12。
+        assert_eq!(guid.trim().len(), 36, "取到的不像 GUID：{guid}");
+        assert_eq!(
+            guid.trim().matches('-').count(),
+            4,
+            "取到的不像 GUID：{guid}"
+        );
     }
 }

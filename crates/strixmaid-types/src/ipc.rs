@@ -282,18 +282,28 @@ pub enum FromHelper {
         /// PAM 错误描述（`pam_strerror`），不含任何凭据。
         reason: String,
     },
-    /// worker 已 fork + exec。**下一帧**是带 `SCM_RIGHTS` 的 fd 传递帧。
+    /// worker 已拉起。
+    ///
+    /// Unix 上 **下一帧**是带 `SCM_RIGHTS` 的 fd 传递帧；Windows 上通道的句柄值
+    /// 就写在本帧的 `worker_handle` 字段里。两个平台搬运附件的机制不同，
+    /// 论证见 `strixmaid_core::session::channel` 的模块文档。
     WorkerSpawned {
         /// worker pid。主进程用它在登出时终止 worker。
         pid: i32,
         /// worker 实际运行的 uid（`as_root` 时为 0）。
         uid: u32,
-        /// `pam_open_session` 是否成功。非 root 环境下 pam_systemd 等会失败，
-        /// 此时降级继续、用户级 unit 不可用。
+        /// 会话是否已建立（Unix 的 `pam_open_session` / Windows 的 `LoadUserProfile`）。
+        /// 非特权环境下会失败，此时降级继续、用户级 unit 不可用。
         session_opened: bool,
         /// `session_opened == false` 时的原因，供日志与能力探测。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_error: Option<String>,
+        /// **Windows 专属**：helper 进程里那半条 worker 通道的句柄值。
+        ///
+        /// Unix 上恒为 `None`（fd 走下一帧的 `SCM_RIGHTS`）。主进程收到后用
+        /// `DuplicateHandle` 把它从 helper 进程里取走。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_handle: Option<u64>,
     },
     /// PAM 会话已关闭，helper 即将退出。
     SessionClosed,

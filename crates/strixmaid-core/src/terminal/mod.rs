@@ -33,7 +33,6 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
@@ -45,12 +44,14 @@ use strixmaid_types::rpc::{
 };
 use strixmaid_types::terminal::TerminalInfo;
 use strixmaid_types::{ApiError, ErrorCode};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::config::TerminalConfig;
+// `channel::Attachment` 要带路径用：本模块自己有一个 `Attachment`（附着的 WS 客户端），
+// 两者同名但完全无关。
+use crate::session::channel::{self, IpcChannel};
 use crate::session::WorkerHandle;
 use crate::store::now_unix;
 
@@ -429,8 +430,8 @@ pub struct Terminal {
     /// worker 经 `SCM_RIGHTS` 交回的 socketpair 一端。
     ///
     /// 用 `Arc` 共享而不是拆成读写两半：泵任务独占读，附着方并发写，
-    /// tokio 允许 `&UnixStream` 同时做这两件事。
-    stream: Arc<UnixStream>,
+    /// 两个平台的 `IpcChannel` 都允许 `&self` 同时做这两件事。
+    stream: Arc<IpcChannel>,
     state: StdMutex<TerminalState>,
     /// 关闭的唯一裁决点，见模块文档「关闭的四个来源与幂等」。
     closed: AtomicBool,
@@ -702,7 +703,7 @@ impl TerminalRegistry {
         let mut fds = fds;
         if fds.len() != 1 {
             return Err(ApiError::internal(format!(
-                "term.open 应附带 1 个 fd，实际 {}",
+                "term.open 应附带 1 个附件，实际 {}",
                 fds.len()
             )));
         }
@@ -1000,7 +1001,7 @@ async fn pump(
     let stream = Arc::clone(&term.stream);
     let mut buf = vec![0u8; READ_CHUNK];
     let reason = loop {
-        // 用就绪 API 而不是 `AsyncReadExt::read`：后者要 `&mut UnixStream`，
+        // 用就绪 API 而不是 `AsyncReadExt::read`：后者要 `&mut IpcChannel`，
         // 而这条 stream 与附着方的写共享同一个 `Arc`（见 [`Attachment::write`]）。
         // `readable()` 是取消安全的，被 `select!` 丢掉不会吞字节。
         let ready = tokio::select! {
@@ -1075,14 +1076,21 @@ async fn forward(term: &Arc<Terminal>, data: &[u8]) {
     }
 }
 
-/// 把 worker 交回的 fd 变成 tokio 的 `UnixStream`。
-fn wrap_stream(fd: OwnedFd) -> Result<UnixStream, ApiError> {
-    let std_stream = std::os::unix::net::UnixStream::from(fd);
-    std_stream
-        .set_nonblocking(true)
-        .map_err(|e| ApiError::internal(format!("终端 socket 设置非阻塞失败: {e}")))?;
-    UnixStream::from_std(std_stream)
-        .map_err(|e| ApiError::internal(format!("终端 socket 注册到 tokio 失败: {e}")))
+/// 把 worker 交回的附件变成一条可用的通道。
+fn wrap_stream(attachment: channel::Attachment) -> Result<IpcChannel, ApiError> {
+    #[cfg(unix)]
+    {
+        IpcChannel::from_owned_fd(attachment)
+            .map_err(|e| ApiError::internal(format!("终端通道注册到 tokio 失败: {e}")))
+    }
+    // SAFETY: 这是 worker 用 `IpcChannel::pair_for_transfer` 建的客户端一端，
+    // 带 `FILE_FLAG_OVERLAPPED`，刚由 `DuplicateHandle` 搬进本进程，
+    // 尚未注册到任何 I/O 完成端口。
+    #[cfg(windows)]
+    unsafe {
+        IpcChannel::from_client_handle(attachment)
+            .map_err(|e| ApiError::internal(format!("终端通道注册到 tokio 失败: {e}")))
+    }
 }
 
 /// 随机 hex。用 `rand::rng()`（CSPRNG，OS 熵播种）而不是任何计数器：
@@ -1095,7 +1103,6 @@ fn random_hex(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::OwnedFd;
     use std::sync::atomic::AtomicU32;
 
     use futures::future::BoxFuture;
@@ -1104,6 +1111,28 @@ mod tests {
 
     use super::*;
     use crate::worker::{self, Dispatcher};
+
+    /// 假 PTY 的 worker 侧那一端：测试往里写 = shell 有输出，丢掉它 = shell 退出。
+    ///
+    /// # 两个平台拿到的是不同的东西
+    ///
+    /// Unix 上是 socketpair 的一端，可以先以 `std` 的形式攥在手里、用到时再
+    /// 注册进 tokio；Windows 上的命名管道没有这种「先建好、以后再注册」的自由度
+    /// （见下面 `term.open` 处理器里的说明），拿到手的已经是一条注册好的
+    /// [`IpcChannel`]。两者都实现 `AsyncRead` + `AsyncWrite`，用例里的读写写法一致。
+    #[cfg(unix)]
+    type FakePty = tokio::net::UnixStream;
+    /// 见上。
+    #[cfg(windows)]
+    type FakePty = IpcChannel;
+
+    /// `ptys` 表里存着的形态。Unix 上存 `std` 的一端（`pty()` 时才注册进 tokio），
+    /// Windows 上只能存已注册的那一条。
+    #[cfg(unix)]
+    type StoredPty = std::os::unix::net::UnixStream;
+    /// 见上。
+    #[cfg(windows)]
+    type StoredPty = IpcChannel;
 
     // -------------------------------------------------------------- RingBuf
 
@@ -1178,7 +1207,7 @@ mod tests {
 
     // ------------------------------------------------------------- 测试脚手架
 
-    /// 进程内的假 worker：`term.open` 用一对 socketpair 冒充 PTY（worker 侧那一端
+    /// 进程内的假 worker：`term.open` 用一对进程内通道冒充 PTY（worker 侧那一端
     /// 留在 `ptys` 里，测试可以往里写来模拟 shell 输出、丢掉它来模拟 shell 退出），
     /// `term.close` / `term.resize` 只记账，供断言「发了几次、发给谁」。
     /// 进程内 worker 的独占锁。
@@ -1194,20 +1223,54 @@ mod tests {
     /// 真实部署里不存在这个前提：worker 是**另一个进程**，fd 号不共享，主进程一辈子
     /// 只有一个 runtime。所以这里用一把锁把「进程内 worker」串起来，而不是去弱化断言。
     ///
+    /// Windows 上没有观察到同一现象（句柄值不像 fd 那样「取最小可用号」，
+    /// 复用窗口小得多），但这把锁照样留着：它约束的是「同一进程里同时演两个角色」
+    /// 这件事本身，与用的是 fd 还是 `HANDLE` 无关，而且两个平台跑同一套用例
+    /// 才谈得上比较。
+    ///
     /// 用 tokio 的 `Mutex` 而不是 `std` 的：守卫要跨 `await` 持有整个用例；
     /// 顺带也不会中毒——一个用例 panic 不该把后面所有用例都拖垮。
     static IN_PROCESS_WORKER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// 造一条假 PTY：返回（留在假 worker 手里的那一端，随 `term.open` 交给主进程的附件）。
+    ///
+    /// # Windows 上为什么不能用 `IpcChannel::pair()` 再把一端交出去
+    ///
+    /// `pair()` 的两端都已经注册在**本进程**的 I/O 完成端口上，而附件是要被
+    /// 读端用 `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` 搬走的——那等于在 tokio
+    /// 背后把它正在用的句柄关掉，此后 tokio 对它的每一次操作都是未定义行为。
+    ///
+    /// 真 worker 走的是 [`IpcChannel::pair_for_transfer`]：交出去的那一端用
+    /// `CreateFileW` 直接开，从一开始就不注册，由接收方在它自己的运行时里注册
+    /// （主进程侧即 [`wrap_stream`] → `IpcChannel::from_client_handle`）。
+    /// 假 worker 必须走同一条路，否则测到的就不是真实路径。
+    ///
+    /// Unix 上没有这个约束：`SCM_RIGHTS` 交出去的是 fd，接收方拿到的是一个
+    /// **新的** fd，与发送方那份互不相干，所以这里仍是原来的 socketpair。
+    async fn fake_pty() -> (StoredPty, channel::Attachment) {
+        #[cfg(unix)]
+        {
+            let (worker_side, main_side) = std::os::unix::net::UnixStream::pair().unwrap();
+            (worker_side, channel::Attachment::from(main_side))
+        }
+        #[cfg(windows)]
+        {
+            IpcChannel::pair_for_transfer("faketerm")
+                .await
+                .expect("建一对终端通道")
+        }
+    }
+
     struct FakeWorker {
         handle: WorkerHandle,
-        ptys: Arc<StdMutex<HashMap<u32, std::os::unix::net::UnixStream>>>,
+        ptys: Arc<StdMutex<HashMap<u32, StoredPty>>>,
         closes: Arc<StdMutex<Vec<u32>>>,
         resizes: Arc<StdMutex<Vec<(u32, u16, u16)>>>,
     }
 
     impl FakeWorker {
         async fn start() -> FakeWorker {
-            let ptys: Arc<StdMutex<HashMap<u32, std::os::unix::net::UnixStream>>> =
+            let ptys: Arc<StdMutex<HashMap<u32, StoredPty>>> =
                 Arc::new(StdMutex::new(HashMap::new()));
             let closes: Arc<StdMutex<Vec<u32>>> = Arc::new(StdMutex::new(Vec::new()));
             let resizes: Arc<StdMutex<Vec<(u32, u16, u16)>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -1225,8 +1288,7 @@ mod tests {
                         Box::pin(async move {
                             let req: TermOpenParams = serde_json::from_value(params)
                                 .map_err(|e| ApiError::invalid_request(e.to_string()))?;
-                            let (worker_side, main_side) =
-                                std::os::unix::net::UnixStream::pair().unwrap();
+                            let (worker_side, main_side) = fake_pty().await;
                             let pid = next_pid.fetch_add(1, Ordering::Relaxed);
                             ptys.lock().unwrap().insert(pid, worker_side);
                             let result = TermOpenResult {
@@ -1235,12 +1297,12 @@ mod tests {
                                 user: req.user.unwrap_or_else(|| "tester".into()),
                                 uid: 1000,
                             };
-                            Ok((
-                                serde_json::to_value(result).unwrap(),
-                                vec![OwnedFd::from(main_side)],
-                            ))
+                            Ok((serde_json::to_value(result).unwrap(), vec![main_side]))
                         })
-                            as BoxFuture<'static, Result<(Value, Vec<OwnedFd>), ApiError>>
+                            as BoxFuture<
+                                'static,
+                                Result<(Value, Vec<channel::Attachment>), ApiError>,
+                            >
                     }),
                 );
             }
@@ -1275,15 +1337,16 @@ mod tests {
                 });
             }
 
-            let (main_side, worker_side) = UnixStream::pair().unwrap();
+            let (main_side, worker_side) = IpcChannel::pair().unwrap();
             tokio::spawn(async move {
                 let _ = worker::serve(worker_side, Arc::new(d)).await;
             });
             // pid 传 -1：这个 worker 是进程内的，绝不能真去 kill 谁。
-            let handle =
-                WorkerHandle::connect(OwnedFd::from(main_side.into_std().unwrap()), -1, None)
-                    .await
-                    .expect("假 worker 握手失败");
+            // 附件照样收得到：`IpcChannel::pair()` 在 Windows 上把两端的对端
+            // 都设成本进程，`DuplicateHandle` 的源就是自己。
+            let handle = WorkerHandle::connect(main_side, -1, None)
+                .await
+                .expect("假 worker 握手失败");
 
             FakeWorker {
                 handle,
@@ -1294,15 +1357,21 @@ mod tests {
         }
 
         /// 取走 worker 侧的 PTY 端。丢掉返回值 = shell 退出（主进程读到 EOF）。
-        fn pty(&self, pid: u32) -> UnixStream {
+        fn pty(&self, pid: u32) -> FakePty {
             let s = self
                 .ptys
                 .lock()
                 .unwrap()
                 .remove(&pid)
                 .expect("没有这个 pid 对应的 PTY");
-            s.set_nonblocking(true).unwrap();
-            UnixStream::from_std(s).unwrap()
+            #[cfg(unix)]
+            {
+                s.set_nonblocking(true).unwrap();
+                FakePty::from_std(s).unwrap()
+            }
+            // Windows 上存进表里的已经是注册好的通道，直接交出去即可。
+            #[cfg(windows)]
+            s
         }
 
         fn closes(&self) -> Vec<u32> {

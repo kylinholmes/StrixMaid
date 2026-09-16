@@ -1,4 +1,6 @@
-//! helper 侧的 IPC 通道：fd 3 上的 socketpair，同步读写，外加 `SCM_RIGHTS` 发 fd。
+//! Unix 侧：fd 3 上的 socketpair，同步读写，外加 `SCM_RIGHTS` 发 fd。
+//!
+//! 接口形状与 Windows 侧一致，背景见 [父模块文档](super)。
 
 use std::io::IoSlice;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -7,6 +9,9 @@ use std::os::unix::net::UnixStream;
 use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 use nix::sys::stat::{SFlag, fstat};
 use strixmaid_types::ipc::{self, FromHelper, IpcError, IpcResult, ToHelper};
+
+/// 交给主进程的那半条 worker 通道。
+pub type WorkerChannel = OwnedFd;
 
 /// 与主进程的通道。
 pub struct Ipc {
@@ -78,6 +83,19 @@ impl Ipc {
     pub fn send_and_wait(&mut self, msg: FromHelper) -> IpcResult<Option<ToHelper>> {
         self.send(&msg)?;
         self.recv()
+    }
+
+    /// 交接的第一步。Unix 上通道不经帧传递，恒为 `None`。见[父模块文档](super)。
+    pub fn prepare_handover(_ch: &WorkerChannel) -> Option<u64> {
+        None
+    }
+
+    /// 交接的第二步：补一帧 `SCM_RIGHTS`。
+    ///
+    /// 发完就 drop 掉本进程那一份——内核已经把 fd 装进主进程了，
+    /// 留着只会让 worker 通道永远不关。
+    pub fn finish_handover(&mut self, ch: WorkerChannel) -> IpcResult<()> {
+        self.send_fd(&ch)
     }
 
     /// 经 `SCM_RIGHTS` 把一个 fd 传给主进程。payload 是单字节 `b'F'`——

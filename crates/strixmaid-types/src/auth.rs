@@ -293,7 +293,20 @@ pub struct SessionInfo {
 ///
 /// Debian 系是 `sudo`，RHEL / Arch 系是 `wheel`，老 Ubuntu 与 macOS 是 `admin`。
 /// 三者都列上，一份默认值覆盖常见发行版与开发机。
+#[cfg(not(windows))]
 pub const DEFAULT_ELEVATE_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
+
+/// 允许提权的默认组（Windows）。
+///
+/// 只有内建的 `Administrators`（`S-1-5-32-544`）。把 Unix 那三个也列上没有坏处
+/// 但会误导——Windows 上根本不存在名叫 `sudo` 的组，留着只会让人以为
+/// 「配置里写了就该生效」。
+///
+/// **按英文规范名匹配**：本地化的 Windows 上这个组的显示名可能是
+/// `Administratoren`（德）之类，helper 在解析令牌时会额外补一个英文规范名，
+/// 因此这里写英文即可。详见 `strixmaid_core::platform::windows::token`。
+#[cfg(windows)]
+pub const DEFAULT_ELEVATE_GROUPS: &[&str] = &["Administrators"];
 
 /// 这个用户是否有资格提权（成为 admin worker 的属主）。
 ///
@@ -327,12 +340,35 @@ mod elevate_tests {
 
     #[test]
     fn 按组放行() {
-        let allow = g(DEFAULT_ELEVATE_GROUPS);
+        // 与平台无关的那一半：规则本身。
+        let allow = g(&["sudo", "wheel", "admin"]);
         assert!(may_elevate(1000, &g(&["alice", "sudo"]), &allow));
         assert!(may_elevate(1000, &g(&["alice", "wheel"]), &allow));
         assert!(may_elevate(501, &g(&["staff", "admin"]), &allow), "macOS 的 admin 组");
         assert!(!may_elevate(1000, &g(&["alice", "users"]), &allow));
         assert!(!may_elevate(1000, &[], &allow), "没有任何组");
+    }
+
+    /// 本平台的默认组必须真的能放行本平台的管理员，否则「默认配置下谁都提不了权」
+    /// 这种事只会在用户第一次点提权时才被发现。
+    #[test]
+    fn 本平台的默认组能放行本平台的管理员() {
+        let allow = g(DEFAULT_ELEVATE_GROUPS);
+        assert!(!allow.is_empty(), "默认允许列表不该是空的");
+
+        #[cfg(windows)]
+        {
+            assert_eq!(DEFAULT_ELEVATE_GROUPS, ["Administrators"]);
+            assert!(may_elevate(1001, &g(&["Users", "Administrators"]), &allow));
+            assert!(!may_elevate(1001, &g(&["Users"]), &allow));
+            // Unix 的组名在 Windows 上不该有任何效力
+            assert!(!may_elevate(1001, &g(&["sudo", "wheel"]), &allow));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(DEFAULT_ELEVATE_GROUPS, ["sudo", "wheel", "admin"]);
+            assert!(may_elevate(1000, &g(&["alice", "sudo"]), &allow));
+        }
     }
 
     #[test]

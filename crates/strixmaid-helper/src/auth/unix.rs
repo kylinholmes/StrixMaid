@@ -1,4 +1,9 @@
-//! 自写的 PAM 应用侧 FFI（design.md §10「PAM 接入方式」）。
+//! Unix 侧的认证与会话：自写的 PAM 应用侧 FFI（design.md §10「PAM 接入方式」）。
+//!
+//! 本文件是 `auth` 的 Unix 实现，向上暴露 [`Pam`]（在[父模块](super)里叫
+//! `Session`）与 [`Pam::lookup_identity`]。Windows 侧的同形实现见
+//! [`super::windows`]，两边接口为什么能对齐、每一步各自对应什么系统调用，
+//! 写在[父模块文档](super)的对照表里。
 //!
 //! 只声明应用需要的十来个函数与常量，全部来自 Linux-PAM 的 `_pam_types.h` /
 //! `pam_appl.h`，二十年未变。不用 `pam-client` / `pam` crate（均已停更且要求
@@ -662,4 +667,96 @@ fn strerror(handle: *const PamHandleRaw, code: c_int) -> String {
     }
     // SAFETY: 静态 NUL 结尾字符串。
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+// ===========================================================================
+// 身份解析
+// ===========================================================================
+//
+// 这一段原来在 `main.rs` 里。`main.rs` 要做成平台中立的状态机，而「认证通过的
+// 用户是谁」两个平台的来源完全不同（Unix 查 NSS，Windows 读登录令牌），
+// 于是连同 `getgrouplist` 一起搬进各自的平台模块。函数体逐字未改。
+
+use nix::unistd::{Gid, Group, User};
+
+use super::Identity;
+
+/// 查一个用户所属的全部组（含主组），走 NSS。
+///
+/// `nix` 只在非 Apple 目标上提供 `getgrouplist`（macOS 的原型第二个参数与返回
+/// 语义都与 glibc 不同，`nix` 不想为此维护两套）。这里自己声明一层：
+/// 两个平台的 C 原型其实是同一个形状
+/// `int getgrouplist(const char *name, gid_t basegid, gid_t *groups, int *ngroups)`，
+/// 差别只在 macOS 把 `basegid` 与数组元素写成了 `int`。
+///
+/// 缓冲不够时 `getgrouplist` 返回 -1 并把所需个数写回 `ngroups`，据此重来一次；
+/// 第二次仍不够（两次调用之间用户被加了组）就放弃，返回 `None` 让调用方兜底。
+fn getgrouplist(name: &CString, base: Gid) -> Option<Vec<Gid>> {
+    // macOS 的 gid 数组元素是 c_int，Linux 是 gid_t；两者都是 32 位，
+    // 但类型不同，用别名把差异收在一处。
+    #[cfg(target_os = "macos")]
+    type RawGid = libc::c_int;
+    #[cfg(not(target_os = "macos"))]
+    type RawGid = libc::gid_t;
+
+    let mut ngroups: libc::c_int = 32;
+    for _ in 0..2 {
+        let mut buf = vec![0 as RawGid; ngroups.max(1) as usize];
+        // SAFETY: name 是以 NUL 结尾的合法 C 字符串；buf 有 ngroups 个元素，
+        // ngroups 如实描述其长度；内核/libc 只写这块缓冲与 ngroups 本身。
+        let rc = unsafe {
+            libc::getgrouplist(
+                name.as_ptr(),
+                base.as_raw() as RawGid,
+                buf.as_mut_ptr(),
+                &raw mut ngroups,
+            )
+        };
+        if rc >= 0 {
+            buf.truncate(ngroups.max(0) as usize);
+            return Some(buf.into_iter().map(|g| Gid::from_raw(g as libc::gid_t)).collect());
+        }
+        // rc < 0：ngroups 已被写成所需个数，下一轮按它重开。
+    }
+    None
+}
+
+impl Pam {
+    /// 用 NSS（glibc `getpwnam` —— helper 是动态链接的，LDAP / SSSD 用户也能解析到）
+    /// 查出认证用户的 uid / gid / 家目录 / shell / 组列表。
+    ///
+    /// 取 `&self` 只是为了与 Windows 侧同形：那边身份必须从
+    /// `LogonUserW` 拿到的令牌里读，不能仅凭一个名字重查
+    /// （见[父模块文档](super)）。本实现不需要句柄里的任何东西。
+    pub fn lookup_identity(&self, name: &str) -> Result<Identity, String> {
+        let user = User::from_name(name)
+            .map_err(|e| format!("getpwnam 失败: {e}"))?
+            .ok_or_else(|| "PAM 通过了认证但 NSS 里查不到该用户".to_string())?;
+
+        let c_name = CString::new(name).map_err(|_| "用户名含 NUL".to_string())?;
+        let gids = getgrouplist(&c_name, user.gid).unwrap_or_else(|| vec![user.gid]);
+        let mut groups: Vec<String> = Vec::with_capacity(gids.len());
+        for gid in gids {
+            // 查不到名字的 gid 用数字兜底，比丢掉强。
+            let gname = Group::from_gid(gid)
+                .ok()
+                .flatten()
+                .map(|g| g.name)
+                .unwrap_or_else(|| gid.to_string());
+            if !groups.contains(&gname) {
+                groups.push(gname);
+            }
+        }
+
+        Ok(Identity {
+            user: strixmaid_types::auth::AuthUser {
+                uid: user.uid.as_raw(),
+                gid: user.gid.as_raw(),
+                username: user.name.clone(),
+                groups,
+            },
+            home: user.dir,
+            shell: user.shell,
+        })
+    }
 }

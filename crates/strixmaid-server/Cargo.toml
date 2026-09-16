@@ -48,5 +48,18 @@ utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
+# Windows 服务（SCM）：`strixmaid service run` 由 SCM 拉起时要向它报告状态
+# 并接受停止请求，`service install` 等子命令反过来调用 SCM。见 src/service/。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Services",
+] }
+
 [dev-dependencies]
 tokio-tungstenite = "0.30.0"
+
+# 版本资源与应用程序清单（见 build.rs 的 “Windows 资源” 一节）。
+# cfg 按**宿主**匹配，Linux / macOS 上的构建不会拉到它。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"
