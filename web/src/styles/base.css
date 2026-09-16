@@ -1,18 +1,153 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: prefers-reduced-motion 的降级必须
    压过组件自身的 transition，这是 !important 少数正当的用途之一。 */
+/*
+ * 自托管字体。**声明一个字族名不等于那台机器上有这个字族。**
+ *
+ * 六套设计语言各自声明了自己的字族（fluent → Segoe UI、macos → SF Pro Text、
+ * adwaita → Adwaita Sans、breeze → Noto Sans、yaru → Ubuntu）。字族名只是
+ * 一个查找键，浏览器拿它去**看面板的那台机器**上找——不是去被管的那台。
+ * 于是在 Windows 上换到 Adwaita，字形一个都没变，变的只有颜色和圆角：
+ * Adwaita Sans 没装，整条栈一路落到 sans-serif。
+ *
+ * 所以把许可允许随产品再分发的那几套收进仓库，剩下两套只能靠本机：
+ *
+ * | 设计语言 | 字族 | 处理 |
+ * |---|---|---|
+ * | adwaita | Adwaita Sans / Adwaita Mono | 自托管（OFL 1.1） |
+ * | breeze | Noto Sans / Hack | 自托管（OFL 1.1 / MIT + Bitstream Vera） |
+ * | yaru | Ubuntu / Ubuntu Mono | 自托管（UFL 1.0） |
+ * | fluent | Segoe UI | **不自托管**，微软只许可随 Windows 使用 |
+ * | macos | SF Pro / SF Mono | **不自托管**，苹果只许可在 Apple 平台开发中使用 |
+ *
+ * 后两套在没装对应字体的机器上仍然只换颜色与几何，不换字形。这是许可决定的，
+ * 不是没做完；界面上不为此写说明文字，知道这件事的地方就是这张表。
+ *
+ * 版权声明、逐个文件的出处 URL 与许可全文见 `../assets/fonts/NOTICE.txt`
+ * 与 `../assets/fonts/licenses/`——OFL 第 2 条与 UFL 第 1 条都要求许可随字体走。
+ *
+ * **六套全声明不等于六套全下载。** `@font-face` 只是往浏览器的字体数据库里
+ * 登记一条规则，规则本身不触发请求；只有当某段文字最终匹配到这一条时才去取
+ * 那个 URL（CSS Fonts 4 §5：字体加载是惰性的）。同一时刻 `:root` 上只有一套
+ * 语言的 `--ui` / `--mono` 生效，能匹配上的至多是那一套的两三个字面。
+ * 这件事有一个前提：字体必须是 URL 引用。一旦被打包器内联成 data URI，
+ * 它就成了 CSS 字节流的一部分，跟着样式表无条件下载，惰性就没有了——
+ * 所以 `vite.config.ts` 里把 woff2 排除在 `assetsInlineLimit` 之外，
+ * 见那里的注释。
+ *
+ * 三条共同的约定：woff2、拉丁子集、`font-display: swap`。
+ * 中文**不**自托管：一个中文子集就是几 MB，`--cjk` 继续走本机字体。
+ * swap 的含义是「先用回落字形把字排出来，字体到了再换」——换字形时会闪一下，
+ * 但比 `block` 那三秒空白好：这是一块随时在刷新的监控面板，不是一篇文章。
+ */
+
+/* StrixMaid 那套自己的等宽字体。 */
 @font-face {
   font-family: "IBM Plex Mono";
   font-weight: 400;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/IBMPlexMono-Regular.latin.woff2") format("woff2");
+  src: url("../assets/fonts/IBMPlexMono-Regular.latin.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Mono";
   font-weight: 600;
   font-style: normal;
   font-display: swap;
-  src: url("../assets/IBMPlexMono-SemiBold.latin.woff2") format("woff2");
+  src: url("../assets/fonts/IBMPlexMono-SemiBold.latin.woff2") format("woff2");
+}
+
+/*
+ * Adwaita Sans 是可变字体，一个文件就把 400–700 这一段全覆盖了，
+ * 所以 `font-weight` 写的是区间而不是单值——界面上的 600 拿到的是真正的 600，
+ * 不是从相邻字重里挑一个最近的。
+ */
+@font-face {
+  font-family: "Adwaita Sans";
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaSans-Variable.latin.woff2") format("woff2");
+}
+/*
+ * Adwaita Mono（Iosevka 的定制版）上游只发静态字重，没有 600 这一档。
+ * 于是照实声明 400 与 700，界面上那些 `font-weight: 600` 由 CSS 的字体匹配
+ * 算法接过去——目标大于 500 时先朝上找，于是落在 700。这与仓库里 IBM Plex Mono
+ * 只发 400 / 600 两档、让 700 自己落到 600 是同一套规则，不额外编一档出来。
+ */
+@font-face {
+  font-family: "Adwaita Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaMono-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Adwaita Mono";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/AdwaitaMono-Bold.latin.woff2") format("woff2");
+}
+
+/* Noto Sans 同样是可变字体，一个文件覆盖 400–700。 */
+@font-face {
+  font-family: "Noto Sans";
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/NotoSans-Variable.latin.woff2") format("woff2");
+}
+/* Hack 只有 Regular 与 Bold，理由同 Adwaita Mono。 */
+@font-face {
+  font-family: "Hack";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Hack-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Hack";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Hack-Bold.latin.woff2") format("woff2");
+}
+
+/*
+ * Ubuntu 有 Light 300 / Regular 400 / Medium 500 / Bold 700 四档，没有 600。
+ * 取 Medium 而不是 Bold：界面上 32 处 `font-weight: 600` 表达的是「强调」
+ * 而不是「加粗」，Ubuntu Bold 压在 12–15px 的密排表格里太重。
+ * 按 CSS 的字体匹配算法，目标 600 与 700 在只有 400 / 500 两档时都朝下落到
+ * Medium——`DistroMark` 那一处 700 因此也是 Medium，这是已知的、可接受的差一档。
+ */
+@font-face {
+  font-family: "Ubuntu";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Ubuntu-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Ubuntu";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/Ubuntu-Medium.latin.woff2") format("woff2");
+}
+/* Ubuntu Mono 只有 Regular 与 Bold，理由同 Adwaita Mono。 */
+@font-face {
+  font-family: "Ubuntu Mono";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/UbuntuMono-Regular.latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Ubuntu Mono";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("../assets/fonts/UbuntuMono-Bold.latin.woff2") format("woff2");
 }
 
 /*

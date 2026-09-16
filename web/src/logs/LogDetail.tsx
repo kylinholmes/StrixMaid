@@ -56,7 +56,7 @@ export function LogDetail({ cursor, onClose }: { cursor: string; onClose: () => 
           {d && (
             <>
               <div className={s.msgBox}>{d.message}</div>
-              <KeyValueGrid items={facts} />
+              <KeyValueGrid items={facts} columns={1} />
               {fields.length > 0 && (
                 <details className={s.fields}>
                   <summary>全部字段（{fields.length}）</summary>

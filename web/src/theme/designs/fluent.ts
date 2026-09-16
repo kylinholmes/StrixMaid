@@ -188,6 +188,13 @@ export const FLUENT = {
    * 本项目必须有，所以把项目自己的中文链插在 `sans-serif` / `monospace`
    * 这两个通用族之前，位置与 StrixMaid 那套一致。这一处是**折算**，
    * 不是原值：Fluent 没说过中文该回退到哪里。
+   *
+   * **Segoe UI 与 Consolas 只能当本地字体引，不能随包发。** 微软的字体许可
+   * 把它们的使用限定在 Windows 之上，没有随第三方产品再分发这一项。所以这一栈
+   * 里一个名字都没有对应的 `@font-face`：在 Windows 上看面板，Segoe UI 本来
+   * 就在，字形是对的；在 Linux 或 macOS 上选这一套，换到的只有颜色、圆角与
+   * 几何，字形落到栈后面的通用族。这是许可决定的，不是没做完。
+   * 另外四套里许可允许分发的三套走的是相反的路，见 `styles/base.css`。
    */
   family: {
     cjk: '"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC"',

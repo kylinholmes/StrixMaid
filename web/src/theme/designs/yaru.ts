@@ -211,8 +211,19 @@ export const YARU = {
    * - `$font-monospace: '"Ubuntu Mono variable", "Ubuntu Mono", Consolas, Monaco,
    *   Courier, monospace'`
    *
-   * 两条**逐字照抄，只多插了一段 `var(--cjk)`**（位置与其余几套语言一致，
-   * Canonical 没说过中文该回退到哪里）。
+   * 两条照抄，改动只有两处：多插了一段 `var(--cjk)`（位置与其余几套语言一致，
+   * Canonical 没说过中文该回退到哪里），以及把 `"Ubuntu"` / `"Ubuntu Mono"`
+   * 提到了各自那条栈的最前面。
+   *
+   * **为什么要提前。** 这两个名字现在指的是随包发的 woff2 子集
+   * （`styles/base.css` 的 `@font-face`，出处与许可见
+   * `assets/fonts/NOTICE.txt`），而 `"Ubuntu variable"` 只存在于装了 Ubuntu
+   * 字体的机器上。原来的顺序意味着「谁的机器上装了什么，就看到什么」：
+   * 同一套设计语言在 Ubuntu 机器上是 Canonical 那份变量字体、在 Windows 上
+   * 一路落到 Segoe UI。自托管的那份排头才谈得上「到哪台机器上都是这个字形」。
+   *
+   * `"Ubuntu variable"` 与后面整条本机回落一个都没删：woff2 取不到时
+   * （离线、被拦、资源没随包发出去），还得有东西顶上。
    *
    * 注意 vanillaframework.io 的文档页是**旧的**（还写着
    * `Ubuntu, Arial, "libra sans", sans-serif`），与仓库里的 SCSS 不一致；
@@ -220,8 +231,8 @@ export const YARU = {
    */
   family: {
     cjk: '"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC"',
-    ui: `"Ubuntu variable", "Ubuntu", -apple-system, "Segoe UI", "Roboto", "Oxygen", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", var(--cjk), sans-serif`,
-    mono: `"Ubuntu Mono variable", "Ubuntu Mono", Consolas, Monaco, Courier, var(--cjk), monospace`,
+    ui: `"Ubuntu", "Ubuntu variable", -apple-system, "Segoe UI", "Roboto", "Oxygen", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", var(--cjk), sans-serif`,
+    mono: `"Ubuntu Mono", "Ubuntu Mono variable", Consolas, Monaco, Courier, var(--cjk), monospace`,
   },
   /**
    * 字阶。**继承**（见模块文档第 2 类）+ px 折算。

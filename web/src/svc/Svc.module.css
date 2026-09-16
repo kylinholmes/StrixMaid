@@ -277,6 +277,34 @@ button.thBtn:hover {
   color: var(--ink-3);
 }
 
+/* 启用方式下拉。三个取值互斥,照 Windows 服务管理器的「启动类型」做成下拉,
+   而不是「开机自启」「屏蔽」两个开关按钮。
+   焦点不画环:base.css 把 select 归在文本输入一类(outline: none),
+   焦点表达统一成边框变 accent,与 Field 一致。 */
+.enableSel {
+  font: inherit;
+  font-size: var(--fs-400);
+  color: inherit;
+  background: var(--surface-2);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 2px var(--sp-4);
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.enableSel:focus-visible {
+  border-color: var(--accent);
+}
+
+/* 禁用态本身就是「这个 unit 改不了启用方式」的信号,不另加说明文字;
+   原因(static / indirect / …)走 title。 */
+.enableSel:disabled {
+  background: none;
+  color: var(--ink-3);
+  cursor: default;
+}
+
 /* 折叠块:依赖 / unit 文件 */
 .fold {
   margin-top: 14px;

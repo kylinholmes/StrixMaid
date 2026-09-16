@@ -10,7 +10,6 @@ import {
   KeyValueGrid,
   type KeyValueItem,
   StatusDot,
-  Tag,
 } from "@/components";
 import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
@@ -28,11 +27,62 @@ type UnitAction =
   | "mask"
   | "unmask";
 
-/** 确认弹层文案:写清后果,不写「确定吗」(spec §5.1)。start 无确认——它不打断任何东西。 */
-const CONFIRM: Record<
-  Exclude<UnitAction, "start">,
-  { label: string; consequence: string; destructive: boolean }
-> = {
+/** 启用方式下拉能选中的三个动作。unmask 不在其中:它是切换时自动补的前置步骤。 */
+type EnableChoice = "enable" | "disable" | "mask";
+
+/** 会走确认弹层的动作。start 不打断任何东西,unmask 不由用户直接发起。 */
+type Confirmable = Exclude<UnitAction, "start" | "unmask">;
+
+/**
+ * 启用方式的三个取值,照 Windows 服务管理器的「启动类型」做成下拉而不是两个开关:
+ * 三者互斥,下拉一眼看得出当前是哪一个。
+ *
+ * 动作在两个平台上分别落到:
+ * enable → `SERVICE_AUTO_START` / `systemctl enable`,
+ * disable → `SERVICE_DEMAND_START` / `systemctl disable`,
+ * mask → `SERVICE_DISABLED` / `systemctl mask`。
+ *
+ * 文案取自 UnitTable 的 `enableLabel`,同一个状态在列表和详情里叫法一致。
+ */
+const ENABLE_CHOICES: readonly { action: EnableChoice; label: string }[] = [
+  { action: "enable", label: "自启" },
+  { action: "disable", label: "手动" },
+  { action: "mask", label: "已屏蔽" },
+];
+
+/**
+ * 由 unit 文件自身决定、enable/disable/mask 都改不动的启用态。
+ * 选中它们里的任何一个都只会换来一条错误,所以下拉整体禁用,只如实显示当前值。
+ * `unknown` 一并算在内:后端没认出这个取值,前端更没有依据断定它可改。
+ */
+const FIXED_STATES: ReadonlySet<string> = new Set([
+  "static",
+  "indirect",
+  "alias",
+  "generated",
+  "transient",
+  "unknown",
+]);
+
+/** 启用态 → 下拉里对应的选项。只有持久化的那三个对得上,其余(含 runtime 变体)没有。 */
+function choiceOf(state: string | null | undefined): EnableChoice | null {
+  switch (state) {
+    case "enabled":
+      return "enable";
+    case "disabled":
+      return "disable";
+    case "masked":
+      return "mask";
+    default:
+      return null;
+  }
+}
+
+/** 当前启用态对不上三个选项时,占位项的取值。与任何 UnitAction 都不重名。 */
+const AS_IS = "as-is";
+
+/** 确认弹层文案:写清后果,不写「确定吗」(spec §5.1)。 */
+const CONFIRM: Record<Confirmable, { label: string; consequence: string; destructive: boolean }> = {
   stop: {
     label: "停止",
     consequence:
@@ -50,25 +100,19 @@ const CONFIRM: Record<
     destructive: false,
   },
   enable: {
-    label: "开机自启",
-    consequence: "写入持久化的启用链接,系统启动时自动拉起。不影响当前运行状态。",
+    label: "设为自启",
+    consequence: "系统启动时自动拉起。不影响当前运行状态。",
     destructive: false,
   },
   disable: {
-    label: "取消自启",
-    consequence: "删除启用链接,下次启动不再自动拉起。不影响当前运行状态。",
+    label: "设为手动",
+    consequence: "下次开机不再自动拉起,只在被显式启动或被依赖拉起时运行。不影响当前运行状态。",
     destructive: false,
   },
   mask: {
     label: "屏蔽",
-    consequence:
-      "把 unit 链到 /dev/null。此后任何启动尝试——包括其他 unit 的依赖拉起——都会失败,直到解除屏蔽。",
+    consequence: "此后任何启动尝试——包括其他 unit 的依赖拉起——都会失败,直到改回其他启用方式。",
     destructive: true,
-  },
-  unmask: {
-    label: "解除屏蔽",
-    consequence: "移除屏蔽链接,unit 恢复可启动。",
-    destructive: false,
   },
 };
 
@@ -86,7 +130,7 @@ export function UnitDetail({
   scope: Scope;
   onClose: () => void;
 }) {
-  const [pending, setPending] = useState<Exclude<UnitAction, "start"> | null>(null);
+  const [pending, setPending] = useState<Confirmable | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionNote, setActionNote] = useState<string | null>(null);
   const [depsOpen, setDepsOpen] = useState(false);
@@ -150,23 +194,32 @@ export function UnitDetail({
     retry: 0,
   });
 
+  const d = detail.data;
+  const masked = d?.enable_state === "masked" || d?.enable_state === "masked_runtime";
+
   const act = async (action: UnitAction) => {
     setActionErr(null);
     setActionNote(null);
-    const { error } = await api.POST("/api/v1/services/{unit}/action", {
-      params: { path: { unit }, query: { scope } },
-      body: { action },
-    });
-    if (error) {
-      const e = error as { message?: string; detail?: string };
-      setActionErr(e.message ?? "操作失败");
-    } else {
-      setActionNote(`${action} 已提交,状态以下方实时读数为准`);
-      void detail.refetch();
+    // 已屏蔽的 unit 要先解除屏蔽,enable/disable 才落得下去:systemd 会直接拒掉
+    // 对 masked unit 的 enable,SCM 那边 unmask 也只是把 DISABLED 抬回 DEMAND_START。
+    // 只对这两个动作补,不对 start/stop 补——顺手解屏蔽是用户没要求的副作用。
+    const steps: UnitAction[] =
+      masked && (action === "enable" || action === "disable") ? ["unmask", action] : [action];
+    for (const step of steps) {
+      const { error } = await api.POST("/api/v1/services/{unit}/action", {
+        params: { path: { unit }, query: { scope } },
+        body: { action: step },
+      });
+      if (error) {
+        const e = error as { message?: string; detail?: string };
+        setActionErr(e.message ?? "操作失败");
+        return;
+      }
     }
+    setActionNote(`${action} 已提交,状态以下方实时读数为准`);
+    void detail.refetch();
   };
 
-  const d = detail.data;
   const dot =
     d?.active_state === "active"
       ? "run"
@@ -176,11 +229,39 @@ export function UnitDetail({
           ? "stop"
           : "unknown";
 
+  // 启用方式:对得上三个持久化取值就选中对应项;对不上的(runtime 变体、linked)
+  // 另开一个占位项如实显示当前值,不并进「自启」「已屏蔽」——它们只在本次启动内有效。
+  const enableState = d?.enable_state ?? null;
+  const choice = choiceOf(enableState);
+  const enableFixed = enableState === null || FIXED_STATES.has(enableState);
+
   const facts: KeyValueItem[] = [];
   if (d) {
     if (d.description !== d.name) facts.push({ k: "描述", v: d.description });
-    const en = enableLabel(d);
-    facts.push({ k: "启用", v: en.text });
+    facts.push({
+      k: "启用",
+      v: (
+        <select
+          className={s.enableSel}
+          aria-label="启用方式"
+          title={enableState ?? undefined}
+          value={choice ?? AS_IS}
+          disabled={enableFixed}
+          onChange={(e) => setPending(e.target.value as EnableChoice)}
+        >
+          {choice === null && (
+            <option value={AS_IS} disabled>
+              {enableLabel(d).text}
+            </option>
+          )}
+          {ENABLE_CHOICES.map((c) => (
+            <option key={c.action} value={c.action}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+      ),
+    });
     const enter = ts(d.active_enter_ts);
     if (enter) facts.push({ k: "进入当前状态", v: enter });
     if (d.n_restarts !== undefined && d.n_restarts !== null && d.n_restarts > 0)
@@ -197,9 +278,6 @@ export function UnitDetail({
     if (d.cgroup?.path) facts.push({ k: "cgroup", v: d.cgroup.path, mono: true });
   }
   const cg = d?.cgroup;
-
-  const masked = d?.enable_state === "masked" || d?.enable_state === "masked_runtime";
-  const enableable = d?.enable_state !== "static" && d?.enable_state !== "indirect" && !masked;
 
   return (
     <aside className={s.drawer} aria-label={`unit ${unit} 详情`}>
@@ -259,7 +337,7 @@ export function UnitDetail({
                 )}
               </div>
 
-              <KeyValueGrid items={facts} />
+              <KeyValueGrid items={facts} columns={1} />
 
               <details
                 className={s.fold}
@@ -396,30 +474,6 @@ export function UnitDetail({
                   <Button size="sm" variant="secondary" onClick={() => setPending("reload")}>
                     重载
                   </Button>
-                </div>
-                <div className={s.actionRow}>
-                  {enableable &&
-                    (d.enable_state === "enabled" || d.enable_state === "enabled_runtime" ? (
-                      <Button size="sm" variant="secondary" onClick={() => setPending("disable")}>
-                        取消自启
-                      </Button>
-                    ) : (
-                      <Button size="sm" variant="secondary" onClick={() => setPending("enable")}>
-                        开机自启
-                      </Button>
-                    ))}
-                  {!enableable && !masked && d.enable_state && (
-                    <Tag>{d.enable_state}：无法启停自启</Tag>
-                  )}
-                  {masked ? (
-                    <Button size="sm" variant="secondary" onClick={() => setPending("unmask")}>
-                      解除屏蔽
-                    </Button>
-                  ) : (
-                    <Button size="sm" variant="danger" onClick={() => setPending("mask")}>
-                      屏蔽
-                    </Button>
-                  )}
                 </div>
                 {actionErr && <p className={s.actionErr}>{actionErr}</p>}
                 {actionNote && <p className={s.actionNote}>{actionNote}</p>}

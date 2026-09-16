@@ -3,6 +3,11 @@
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: var(--sp-5) var(--sp-8);
 }
+/* 强制单列。用 `.grid.one` 而不是单靠书写顺序压过 .grid,特异性高一级,
+   不依赖 CSS Modules 输出的规则次序。 */
+.grid.one {
+  grid-template-columns: 1fr;
+}
 .item {
   min-width: 0;
 }

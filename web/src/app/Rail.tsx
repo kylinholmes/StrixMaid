@@ -175,9 +175,10 @@ function OpenBody({ identity, distro, sys }: BodyProps) {
  * 为两个选项建一整页不合算。等设置页真的开工,这里的两项原样搬过去即可。
  *
  * 为什么设计语言用单选列表而不是 `Segmented`:明暗永远只有两档,分段控件正合适;
- * 设计语言的档数跟着 `THEMES` 长(今天两套,将来 macOS / Adwaita / Breeze / Yaru),
- * 横排的分段控件在 184px 的侧栏里撑不下,且会随清单变宽。竖排的原生单选自带
- * 方向键遍历与 `radiogroup` 语义,档数再多也只是变长,不必回头换控件。
+ * 设计语言的档数跟着 `THEMES` 长(第五版起是六套:StrixMaid / Fluent / macOS /
+ * Adwaita / Breeze / Yaru),横排的分段控件在侧栏里撑不下,且会随清单变宽。
+ * 竖排的原生单选自带方向键遍历与 `radiogroup` 语义,档数再多也只是变长,
+ * 不必回头换控件——四套新语言加进来时这个组件一个字都没改。
  */
 function ThemeRow() {
   const { mode, design, identity, setMode, toggleMode, setDesign } = useTheme();

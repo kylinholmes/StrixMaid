@@ -210,10 +210,15 @@ export const MACOS = {
    * `-apple-system` 这一个值，没有给栈；没有后续文章。所以引的是 Apple 自家
    * 站点的实际取值，不是那篇文章。
    *
-   * **SF Mono 只能当本地字体引，不能随包发。** 它不随 macOS 安装
-   *（Apple 的「macOS 内置字体」支持文档里没有它），而 Apple 字体的许可写着
-   * 只可用于「为运行在 Apple 系统上的软件制作界面原型」。栈里写它的名字是让
-   * 装了 Xcode 的机器用上，不是要内嵌。
+   * **SF Pro Text 与 SF Mono 都只能当本地字体引，不能随包发。** SF Mono
+   * 不随 macOS 安装（Apple 的「macOS 内置字体」支持文档里没有它），而 Apple
+   * 字体的许可写着只可用于「为运行在 Apple 系统上的软件制作界面原型」——
+   * 这一条同样管着 SF Pro。栈里写它们的名字是让 Apple 机器（以及装了 Xcode 的
+   * 机器）用上，不是要内嵌。
+   *
+   * 后果要说清楚：在没装这两个字族的机器上选这一套，换到的只有颜色、圆角与
+   * 几何，字形落到 `system-ui` 及后面那串。这是许可决定的，不是没做完。
+   * 另外四套里许可允许分发的三套走的是相反的路，见 `styles/base.css`。
    */
   family: {
     cjk: '"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC"',

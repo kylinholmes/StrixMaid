@@ -215,6 +215,11 @@ export const ADWAITA = {
    * Inter 排在 Adwaita Sans 之后，因为官方文档说前者是后者的母体；Cantarell 再后，
    * 因为它是 GNOME 48 之前的默认值，装着旧系统的机器上还有。中文链插在通用族之前，
    * 位置与 StrixMaid 那套一致——Adwaita 没说过中文该回退到哪里。
+   *
+   * **这两个头名现在是随包发的 woff2**（`styles/base.css` 的 `@font-face`，
+   * 拉丁子集，出处与许可见 `assets/fonts/NOTICE.txt`）。上游两份字体都在
+   * OFL 1.1 之下，允许随产品再分发，于是这一套换到哪台机器上都真的换字形，
+   * 不是只换了颜色。后面整条回退链原样留着，woff2 取不到时还有东西顶上。
    */
   family: {
     cjk: '"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC"',

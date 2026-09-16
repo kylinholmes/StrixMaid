@@ -221,6 +221,11 @@ export const BREEZE = {
    *
    * **后面的回退链是折算**：上游发布的是字体名，不是 Web 的字族栈。
    * 中文链插在通用族之前，位置与 StrixMaid 那套一致。
+   *
+   * **这两个头名现在是随包发的 woff2**（`styles/base.css` 的 `@font-face`，
+   * 拉丁子集，出处与许可见 `assets/fonts/NOTICE.txt`）。Noto Sans 在 OFL 1.1
+   * 之下，Hack 在 MIT 加 Bitstream Vera 之下，两者都允许随产品再分发，
+   * 于是这一套换到哪台机器上都真的换字形。后面的回退链原样留着。
    */
   family: {
     cjk: '"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC"',
