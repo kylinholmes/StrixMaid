@@ -1,19 +1,19 @@
 .mark {
-  width: 16px;
-  height: 16px;
+  width: var(--icon);
+  height: var(--icon);
   flex: none;
   display: grid;
   place-items: center;
   font-family: var(--ui);
-  font-size: 10px;
+  font-size: var(--fs-200);
   font-weight: 700;
-  line-height: 1;
+  line-height: var(--lh-none);
   color: #fff;
 }
 .lg {
-  width: 22px;
-  height: 22px;
-  font-size: 13px;
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+  font-size: var(--fs-500);
 }
 .unknown {
   color: var(--ground);

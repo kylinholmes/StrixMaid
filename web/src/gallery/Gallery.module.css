@@ -11,9 +11,9 @@
   flex-wrap: wrap;
   gap: 8px 22px;
   align-items: center;
-  padding: 10px 20px;
+  padding: var(--sp-5) var(--sp-8);
   background: var(--surface);
-  border-bottom: 2px solid var(--line-strong);
+  border-bottom: var(--stroke-thick) solid var(--line-strong);
 }
 .ctl {
   display: flex;
@@ -22,7 +22,7 @@
 }
 .ctl > span {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-200);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -37,49 +37,50 @@
   color: var(--ink-2);
   max-width: 76ch;
   margin: 0 0 30px;
-  font-size: 13px;
+  font-size: var(--fs-500);
 }
 .lede b {
   color: var(--ink);
 }
 .lede code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-400);
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  padding: 0 4px;
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-2);
 }
 
 .sec {
   margin: 0 0 44px;
-  border-top: 2px solid var(--line-strong);
+  border-top: var(--stroke-thick) solid var(--line-strong);
   padding-top: 14px;
 }
 .secHead {
   display: flex;
   align-items: baseline;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--sp-6);
+  margin-bottom: var(--sp-6);
   flex-wrap: wrap;
 }
 .secNum {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-300);
   letter-spacing: 0.16em;
   color: var(--ink-3);
 }
 .secHead h2 {
-  font-size: 19px;
+  font-size: var(--fs-1000);
   font-weight: 600;
   margin: 0;
   letter-spacing: -0.005em;
 }
 .secNote {
-  font-size: 12.5px;
+  font-size: var(--fs-450);
   color: var(--ink-3);
-  margin: 0 0 12px;
+  margin: 0 0 var(--sp-6);
   max-width: 84ch;
-  line-height: 1.6;
+  line-height: var(--lh-normal);
 }
 .secNote b {
   color: var(--ink-2);
@@ -87,14 +88,15 @@
 
 .panel {
   background: var(--surface);
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
+  border-radius: var(--radius-md);
 }
 .pad {
   padding: 14px;
 }
 .row {
   display: flex;
-  gap: 10px;
+  gap: var(--sp-5);
   align-items: center;
   flex-wrap: wrap;
 }
@@ -117,7 +119,7 @@
 .ramp {
   display: flex;
   height: 54px;
-  border: 1px solid var(--line);
+  border: var(--stroke) solid var(--line);
 }
 .ramp > div {
   flex: 1;
@@ -128,20 +130,20 @@
   bottom: 3px;
   left: 4px;
   font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: var(--fs-50);
   opacity: 0.85;
 }
 .swatches {
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
-  margin-top: 12px;
+  margin-top: var(--sp-6);
 }
 .sw {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12px;
+  font-size: var(--fs-400);
   color: var(--ink-2);
 }
 .sw i {
@@ -153,7 +155,7 @@
 
 .label {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-200);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -163,20 +165,21 @@
   position: relative;
   height: 236px;
   background: var(--surface-2);
-  padding: 12px;
+  padding: var(--sp-6);
   overflow: hidden;
 }
 .menuBg {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: var(--fs-350);
   color: var(--ink-3);
   line-height: 26px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--stroke) solid var(--line);
 }
 
 /* 概念页 */
 .mock {
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
   background: var(--surface);
   height: 480px;
   display: flex;
@@ -191,19 +194,19 @@
 .mockTop {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-5);
   height: 34px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--line);
+  padding: 0 var(--sp-6);
+  border-bottom: var(--stroke) solid var(--line);
   background: var(--surface-2);
   flex: none;
 }
 .mockTop b {
-  font-size: 12.5px;
+  font-size: var(--fs-450);
 }
 .mockTop .os {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-300);
   color: var(--ink-3);
 }
 .mockBody {
@@ -213,7 +216,7 @@
   scrollbar-gutter: stable;
 }
 .mockDetail {
-  border-top: 1px solid var(--line-strong);
+  border-top: var(--stroke) solid var(--line-strong);
   background: var(--surface-2);
   padding: 12px 14px;
   flex: none;

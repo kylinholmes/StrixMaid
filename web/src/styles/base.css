@@ -15,7 +15,14 @@
   src: url("../assets/IBMPlexMono-SemiBold.latin.woff2") format("woff2");
 }
 
-/* border-radius: 0 全局无例外（spec §4） */
+/*
+ * 圆角归零是**重置**，不是主张。
+ *
+ * 浏览器给 input / button / fieldset 各自带着一点默认圆角，各家还不一样。
+ * 这一条把它们抹平，之后由各控件按 `--radius-*` 自己说要多圆：StrixMaid 那套
+ * 四档全是 0（spec §4 的「无例外」在那套语言里仍然成立），Fluent 那套是
+ * 2 / 4 / 8 / 胶囊。所以这里写 0 不等于全站方角，只等于「没人表态时方角」。
+ */
 *,
 *::before,
 *::after {
@@ -34,8 +41,8 @@ body {
   background: var(--ground);
   color: var(--ink);
   font-family: var(--ui);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: var(--fs-500);
+  line-height: var(--lh-normal);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -47,13 +54,15 @@ body {
 }
 
 /* 焦点：全站唯一样式（spec §5.4）。
-   留 2px 空是必需的——贴边会和控件自己的 1px 边框糊成「边框变粗了」。
-   用 accent：焦点是「你正在操作的地方」，正是身份层的领地。
+   三条轴都交给设计语言：环色 `--focus`、环宽 `--focus-width`、与控件的间距
+   `--focus-offset`。StrixMaid 是 accent 色、2px、外推 2px——贴边会和控件自己的
+   1px 边框糊成「边框变粗了」，而焦点是「你正在操作的地方」，正是身份层的领地。
+   Fluent 是黑白双色、2px、内收 2px，见下面那条唯一的作用域覆盖。
    唯一的例外是文本输入：它们的焦点表达是所在盒子的边框变 accent
    （Field/SearchBox 的 :focus-within），再套外环就是两层框。 */
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 input:focus-visible,
 textarea:focus-visible,
@@ -62,6 +71,30 @@ select:focus-visible {
 }
 :focus:not(:focus-visible) {
   outline: none;
+}
+
+/*
+ * **全站唯一一处 `[data-design]` 作用域覆盖。**
+ *
+ * Fluent 的焦点环是两层：外层 2px `colorStrokeFocus2`，内侧再叠一层 1px 的
+ * `colorStrokeFocus1`，两色互为反色，于是不论控件是深底还是浅底，总有一层
+ * 与底色形成对比（`react-tabster → createFocusOutlineStyle.ts` 画外层，
+ * 内层由各控件自己叠，例如 `react-button → useButtonStyles.styles.ts`
+ * 的 inset 内阴影）。
+ *
+ * 这一处 token 表达不了：`outline` 只能画一层，两层不同色的环必须再借一个
+ * 绘制通道（这里是 inset 内阴影）。环的颜色、宽度、偏移仍然全部走 token，
+ * 覆盖里只有「多画一层」这一件结构上的事。
+ *
+ * 用 `:where()` 把特异性压到 0，与被覆盖的 `:focus-visible` 同级：
+ * 控件自己的 box-shadow（NavRail 选中行的 3px accent 边条、Table 选中行）
+ * 特异性都更高，不会被这一条吃掉。
+ *
+ * 排除文本输入，理由同上面那条基础规则：它们的焦点表达是盒子边框变色，
+ * 不画环，那么内环也不该有。
+ */
+:where([data-design="fluent"]) :focus-visible:not(input, textarea, select) {
+  box-shadow: inset 0 0 0 var(--stroke) var(--focus-inner);
 }
 
 /*
@@ -75,21 +108,22 @@ select:focus-visible {
   stroke-linejoin: miter;
 }
 
-/* 方头滚动条 */
+/* 方头滚动条。滑块的圆角跟着设计语言走：StrixMaid 是 0，Fluent 是胶囊。 */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
 ::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+  width: var(--sp-6);
+  height: var(--sp-6);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--line-strong);
-  border: 3px solid var(--ground);
+  border: var(--stroke-thicker) solid var(--ground);
+  border-radius: var(--radius-pill);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--ink-3);

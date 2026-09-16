@@ -9,18 +9,18 @@
   flex-direction: column;
   width: var(--rail);
   background: var(--surface-2);
-  border-top: 4px solid var(--accent);
-  border-right: 1px solid var(--line);
+  border-top: var(--stroke-thickest) solid var(--accent);
+  border-right: var(--stroke) solid var(--line);
   /* 不设 overflow: hidden——机器菜单的下拉要伸出栏外;宽度动画期间内容自然回流 */
   transition:
-    width 440ms cubic-bezier(0.3, 0, 0.1, 1),
-    background-color 440ms cubic-bezier(0.3, 0, 0.1, 1),
-    border-color 440ms cubic-bezier(0.3, 0, 0.1, 1);
+    width var(--t-shape) var(--ease-shape),
+    background-color var(--t-shape) var(--ease-shape),
+    border-color var(--t-shape) var(--ease-shape);
 }
 
 .locked {
   width: 322px;
-  transition-duration: 320ms;
+  transition-duration: var(--t-shape-out);
   background: oklch(19% 0 0);
   border-right-color: oklch(45% 0 0);
   /* 门内重设中性阶:锁定形态不跟主题走,永远是这块暗色 */
@@ -47,7 +47,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  animation: bodyIn 240ms ease;
+  animation: bodyIn var(--t-enter) var(--ease);
 }
 
 @keyframes bodyIn {
@@ -78,7 +78,7 @@
 
 .sqPending {
   background: none;
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
 }
 
 .sqWarn {
@@ -91,12 +91,12 @@
 
 .sqNa {
   background: none;
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
 }
 
 .hr {
   flex: none;
-  border-top: 1px solid var(--line);
+  border-top: var(--stroke) solid var(--line);
 }
 
 /* ---- 锁定形态:机器头 + 页面目录 + 认证行 ---- */
@@ -107,8 +107,8 @@
 
 .meta {
   color: var(--ink-3);
-  font: 11px var(--mono);
-  margin: 2px 0 12px;
+  font: var(--fs-300) var(--mono);
+  margin: var(--sp-1) 0 var(--sp-6);
   padding-left: 27px;
   white-space: nowrap;
   overflow: hidden;
@@ -119,16 +119,16 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding-bottom: 8px;
+  padding-bottom: var(--sp-4);
 }
 
 .sec {
-  height: 24px;
+  height: var(--row-xs);
   display: flex;
   align-items: flex-end;
   padding: 0 24px 3px;
-  margin: 8px 0 4px;
-  font-size: 11px;
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--fs-300);
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--ink-3);
@@ -139,17 +139,17 @@
   align-items: center;
   gap: 9px;
   height: 28px;
-  padding: 0 24px;
+  padding: 0 var(--sp-9);
   color: var(--ink-2);
 }
 
 .pg .nm {
-  font-size: 13px;
+  font-size: var(--fs-500);
 }
 
 .pg .via {
   margin-left: auto;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
 }
 
@@ -167,23 +167,23 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 10px 24px;
+  padding: var(--sp-5) var(--sp-9);
   color: var(--ink-2);
-  border-top: 1px solid var(--line);
+  border-top: var(--stroke) solid var(--line);
 }
 
 .auth .via {
   margin-left: auto;
-  font: 11px var(--mono);
+  font: var(--fs-300) var(--mono);
   color: var(--ink-3);
 }
 
 .lockFoot {
   flex: none;
-  padding: 12px 24px;
+  padding: var(--sp-6) var(--sp-9);
   color: var(--ink-3);
-  font: 11px var(--mono);
-  border-top: 1px solid var(--line);
+  font: var(--fs-300) var(--mono);
+  border-top: var(--stroke) solid var(--line);
   display: flex;
   justify-content: space-between;
 }
@@ -193,10 +193,10 @@
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--sp-6);
   padding: 0 10px 6px 34px;
   color: var(--ink-3);
-  font-size: 11px;
+  font-size: var(--fs-300);
 }
 
 .hostat i {
@@ -208,7 +208,7 @@
 
 .foot {
   flex: none;
-  border-top: 1px solid var(--line);
+  border-top: var(--stroke) solid var(--line);
 }
 
 .frow {
@@ -217,7 +217,7 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 0 12px;
+  padding: 0 var(--sp-6);
   color: var(--ink-2);
   background: none;
   border: 0;
@@ -255,7 +255,7 @@
   width: 34px;
   padding: 0;
   justify-content: center;
-  border-left: 1px solid var(--line);
+  border-left: var(--stroke) solid var(--line);
 }
 
 /* 弹层开在行的上方:它贴着窗口底边,往下没有地方。
@@ -269,29 +269,30 @@
   display: flex;
   flex-direction: column;
   gap: 13px;
-  padding: 12px;
+  padding: var(--sp-6);
   background: var(--surface);
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-pop);
-  animation: popIn var(--t-pop) ease-out;
+  animation: popIn var(--t-pop) var(--ease-out);
 }
 
 .popRow {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: var(--sp-3);
 }
 
 .popLabel {
-  font-size: 12px;
+  font-size: var(--fs-400);
   letter-spacing: 0.04em;
   color: var(--ink-2);
 }
 
 .popHint {
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: var(--fs-350);
+  line-height: var(--lh-body);
   color: var(--ink-3);
 }
 
@@ -326,8 +327,8 @@
   display: grid;
   grid-template-columns: auto 1fr;
   align-items: center;
-  gap: 4px 8px;
-  font-size: 12.5px;
+  gap: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-450);
   color: var(--ink);
   cursor: pointer;
 }

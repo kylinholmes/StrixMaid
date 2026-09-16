@@ -6,9 +6,9 @@
 .btn {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-4);
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--sp-4) var(--sp-5);
   background: none;
   border: 0;
   font: inherit;
@@ -24,7 +24,7 @@
 .host {
   flex: 1;
   min-width: 0;
-  font: 600 13px var(--mono);
+  font: 600 var(--fs-500) var(--mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -38,7 +38,7 @@
 /* ---- 登录门里的大号形态:更大的字、无悬停底、下划线提示可点 ---- */
 .wide {
   gap: 9px;
-  padding: 2px 0;
+  padding: var(--sp-1) 0;
 }
 
 .wide:hover {
@@ -46,7 +46,7 @@
 }
 
 .wide .host {
-  font: 600 15px var(--mono);
+  font: 600 var(--fs-700) var(--mono);
   flex: initial;
 }
 

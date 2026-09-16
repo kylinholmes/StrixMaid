@@ -54,8 +54,12 @@ function initialDesign(): DesignPreference {
 /**
  * 把主题写进 :root。
  *
- * 中性色整套来自选中的设计语言（tokens.ts），值已经是最终的 CSS 颜色串，
- * 这里不再做任何换算。数据色是静态的，写在 tokens.css 里。
+ * 整套 token 来自选中的设计语言（theme/designs/），值已经是最终的 CSS 值串
+ * （颜色、像素、毫秒、缓动曲线），这里不做任何换算。第四版起这套 token 不止
+ * 颜色：圆角、字阶、控件尺寸、间距、描边、阴影、动效都在里面，键名与 CSS 变量
+ * 一一对应，所以这个循环一行都不必跟着轴的增减改。
+ *
+ * 数据色（`--cpu` 等）是静态的，不随设计语言变，仍然写在 tokens.css 里。
  *
  * `--accent` 分两层：先落主题自带的那档，认得出发行版再用发行版自己的盖掉。
  * 认不出时不盖，留主题那档——通用主题那档与「认不出」的灰同值，
@@ -65,6 +69,10 @@ function initialDesign(): DesignPreference {
  *
  * 发行版那档 accent **不看设计语言偏好**：它是「正在看哪台机器」的身份，
  * 选了 StrixMaid 的用户连上 Windows 仍然是蓝色 accent，只是中性色换成通用那套。
+ *
+ * `data-design` 是给那少数几处**结构性**差异用的作用域钩子。token 表达不了的
+ * 才配用它——今天全站只有一处（Fluent 的双描边焦点环，见 base.css）。
+ * 这个数字增长就说明轴划漏了，应当回去补轴，而不是继续往 CSS 里加分支。
  */
 export function applyTheme(mode: Mode, theme: Theme, distro: Distro): void {
   const root = document.documentElement;
@@ -75,6 +83,7 @@ export function applyTheme(mode: Mode, theme: Theme, distro: Distro): void {
     root.style.setProperty("--accent", distro.accent[mode]);
   }
   root.dataset.mode = mode;
+  root.dataset.design = theme.id;
   root.style.colorScheme = mode;
 }
 

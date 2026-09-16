@@ -5,7 +5,7 @@
   inset: 0;
   background: var(--scrim);
   z-index: 100;
-  animation: fade var(--t-pop) ease-out;
+  animation: fade var(--t-pop) var(--ease-out);
 }
 .dialog {
   position: fixed;
@@ -14,22 +14,23 @@
   transform: translate(-50%, -50%);
   width: min(420px, calc(100vw - 32px));
   background: var(--surface);
-  border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-pop);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
   z-index: 101;
-  animation: fade var(--t-pop) ease-out;
+  animation: fade var(--t-pop) var(--ease-out);
 }
 .head {
   padding: 11px 14px;
-  border-bottom: 1px solid var(--line);
-  font-size: 14px;
+  border-bottom: var(--stroke) solid var(--line);
+  font-size: var(--fs-600);
   font-weight: 600;
 }
 .body {
   padding: 13px 14px;
-  font-size: 12.5px;
+  font-size: var(--fs-450);
   color: var(--ink-2);
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 .body b {
   color: var(--ink);
@@ -38,9 +39,9 @@
 }
 .foot {
   padding: 11px 14px;
-  border-top: 1px solid var(--line);
+  border-top: var(--stroke) solid var(--line);
   display: flex;
-  gap: 8px;
+  gap: var(--sp-4);
   justify-content: flex-end;
 }
 
@@ -48,29 +49,38 @@
   position: absolute;
   min-width: 176px;
   background: var(--surface);
-  border: 1px solid var(--line-strong);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-pop);
   z-index: 50;
   padding: 0;
   margin: 0;
   list-style: none;
-  animation: fade var(--t-pop) ease-out;
+  animation: fade var(--t-pop) var(--ease-out);
 }
 .item {
   display: block;
   width: 100%;
   text-align: left;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-450);
   padding: 7px 12px;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--stroke) solid var(--line);
   color: var(--ink);
   cursor: pointer;
 }
+/* 首尾两条跟着菜单外框收角，理由同 Segmented：不用 overflow: hidden，
+   那会裁掉往外推 2px 的焦点环。圆角为 0 的语言下这几条是空操作。 */
+.item:first-child {
+  border-start-start-radius: var(--radius-md);
+  border-start-end-radius: var(--radius-md);
+}
 .item:last-child {
   border-bottom: 0;
+  border-end-start-radius: var(--radius-md);
+  border-end-end-radius: var(--radius-md);
 }
 .item:hover:not(:disabled) {
   background: var(--surface-3);
