@@ -1,4 +1,4 @@
-//! Windows 平台原语：宽字符、句柄 RAII、注册表、令牌/SID、卷、ntdll、PDH。
+//! Windows 平台原语：宽字符、句柄 RAII、注册表、令牌/SID、卷、ntdll、PDH、图标。
 //!
 //! 与 [`crate::platform::macos`] 同一定位：这一层刻意很薄，只放**不含业务判断**
 //! 的东西——一次 `RegGetValueW`、一次 `LookupAccountSidW`、一次
@@ -23,6 +23,7 @@
 //! 每处 `unsafe` 都单独标注其安全前提。
 
 pub mod handle;
+pub mod icon;
 pub mod ntdll;
 pub mod pdh;
 pub mod registry;
@@ -31,6 +32,7 @@ pub mod volume;
 pub mod wide;
 
 pub use handle::{OwnedHandleExt, close_handle, invalid_handle};
+pub use icon::icon_png;
 pub use ntdll::{boot_time_unix, system_processes};
 pub use registry::{HKLM, RegRoot, reg_dword, reg_qword, reg_string, reg_subkeys};
 pub use token::{

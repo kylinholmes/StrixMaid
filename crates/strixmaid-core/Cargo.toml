@@ -45,8 +45,18 @@ plist = "1.7.4"
 # 用原始 FFI（windows-sys）而不是高层封装（windows crate）：与 helper 的自写
 # PAM、`platform/iokit.rs` 同一取向——只声明用得到的那部分表面。
 [target.'cfg(windows)'.dependencies]
+# 进程图标的 PNG 编码。Windows 的图标是 GDI 的 `HICON`（内部是两张位图），
+# 而浏览器只认图片格式，中间必然要有一次编码。
+#
+# 不自己写编码器：PNG 的 CRC、zlib 流与逐扫描线过滤器都是正确性负债，写错的
+# 表现又极其隐蔽——一部分解码器容忍、另一部分不容忍，问题会以「某些浏览器上
+# 图标不显示」的形式出现。也不走 WIC：`windows-sys` 是裸 FFI，没有 COM 辅助，
+# 用它调 WIC 要手写 vtable 与引用计数，代价远超一个只做编码的纯 Rust 库。
+png = "0.18"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    # 图标 → 像素：`GetDIBits` / `CreateCompatibleDC` / `GetObjectW`。
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
@@ -74,4 +84,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Time",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
+    # 图标本体：`PrivateExtractIconsW` / `GetIconInfo` / `DestroyIcon`。
+    "Win32_UI_WindowsAndMessaging",
 ] }

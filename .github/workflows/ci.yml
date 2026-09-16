@@ -21,6 +21,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # web/dist 不在 git 里，而 rust-embed 的 `folder` 在 **debug 下同样**
+      # 于编译期求值——目录不存在就直接报 "folder does not exist"。
+      # 所以凡是要编 strixmaid-server 的 job 都得先构建前端，不只是出包那几个。
+      - uses: oven-sh/setup-bun@v2
+      - name: 构建前端（rust-embed 的 folder 必须存在）
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
       - name: clippy（零警告是质量门槛）
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: clippy（无 UI 变体也必须干净）
@@ -45,6 +54,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 同 check job：web/dist 不在 git 里，rust-embed 的 folder 在 debug 下
+      # 也要求目录存在，所以这里同样得先构建前端。
+      - uses: oven-sh/setup-bun@v2
+      - name: 构建前端（rust-embed 的 folder 必须存在）
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
       # 先 build 再 test：有用例会 spawn 真实的 helper 与 worker 可执行文件，
       # 它们得先存在于 target 目录里（与上面 check job 里同一个理由）。
       - name: build

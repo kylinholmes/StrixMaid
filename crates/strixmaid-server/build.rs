@@ -47,6 +47,69 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows_resource();
     }
+
+    check_ui_dist();
+}
+
+/// release + `ui` feature 下确认前端产物存在。
+///
+/// # 为什么这里只检查、不去跑 `bun run build`
+///
+/// 让 build.rs 调包管理器会把 `cargo build` 变成非 hermetic 的:要联网
+/// (`bun install`)、要 JS 工具链、每次 `cargo check` 都可能触发。
+/// 交叉编译、离线构建、`cargo install` 都会因此破掉。
+/// 构建前端是**打包脚本**的职责(`scripts/package.sh`、
+/// `scripts/package-windows.ps1`),那里本来就要装 bun。
+///
+/// 所以这里只做一件事:在缺产物时给出一句说得清的话,而不是让
+/// `rust-embed` 抛一个指向 `../../web/dist` 的、看不出该干什么的错误。
+///
+/// # debug 与 release 要的不是同一件事
+///
+/// 两档的要求不同，这一点起初弄错过，代价是 CI 的 `check` 与 `windows` 两个
+/// job 一起红：
+///
+/// | 构建 | `rust-embed` 的行为 | 硬性要求 |
+/// |---|---|---|
+/// | debug | 运行期从磁盘读（前端热更新不受影响） | **目录必须存在**，内容可以为空 |
+/// | release | 编译期把文件嵌进二进制 | 目录存在**且**有 `index.html` |
+///
+/// 「debug 不需要产物」是错的：`#[derive(RustEmbed)]` 的 `folder` 在**两档**
+/// 都会在编译期求值，目录不存在就直接报 `folder '…/web/dist' does not exist`。
+/// `web/dist` 从 git 里摘掉之后，任何不构建前端的 job 都会撞上这条。
+///
+/// 用 `PROFILE` 判断而不是 `debug_assertions`：build.rs 自身是用宿主 profile
+/// 编译的，读不到目标 crate 的 cfg。两者在默认配置下一致；若有人把 release
+/// 的 `debug-assertions` 打开，这里会多要求一个 `index.html`，属于提示过度
+/// 而非漏报，比反过来安全。
+fn check_ui_dist() {
+    // 产物路径变化时重跑，避免「补上产物后仍然报错」。
+    println!("cargo:rerun-if-changed=../../web/dist/index.html");
+
+    if std::env::var("CARGO_FEATURE_UI").is_err() {
+        return;
+    }
+
+    let dir = std::path::Path::new("../../web/dist");
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    // debug 只要目录在就够；release 还要真有东西可嵌。
+    let ok = dir.is_dir() && (!release || dir.join("index.html").is_file());
+    if ok {
+        return;
+    }
+
+    // 直接 panic 而不是 `cargo:warning`：缺了产物，`rust-embed` 随后一定会失败，
+    // 只是那条错误指向宏内部、看不出该做什么。既然结果都是构建失败，
+    // 不如在这里以一句可操作的话结束。
+    panic!(
+        "缺少前端产物 web/dist{}。\n\
+         web/dist 不在 git 里（它是 web/src 的派生物），需要先构建前端：\n\
+         \n    cd web && bun install --frozen-lockfile && bun run build\n\
+         \n或直接用打包脚本（scripts/package.sh、scripts/package-windows.ps1），\
+         它们会自动构建前端。\n\
+         若这个二进制本来就不需要内置 UI，用 --no-default-features 关掉 ui feature。",
+        if release { "/index.html" } else { " 目录" },
+    );
 }
 
 /// 嵌入版本资源与应用程序清单。

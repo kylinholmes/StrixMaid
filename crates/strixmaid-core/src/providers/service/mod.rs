@@ -29,6 +29,11 @@
 //! user manager」，构造时可用 `with_user_uid` 指定 uid——跨用户由 worker 机制解决：worker 以登录
 //! 用户身份运行，在它里面构造的 provider 天然就是那个用户的。
 
+/// 服务图标与其缓存。与四条实现路径都无关（图标是可执行映像自身的属性，
+/// 不是服务管理器给出的事实），因此不在 [`ServiceProvider`] 这个 trait 里，
+/// 而是一个独立的、与平台无关的外壳。见该模块的文档。
+pub mod icon;
+
 #[cfg(target_os = "linux")]
 pub mod bus;
 #[cfg(target_os = "linux")]

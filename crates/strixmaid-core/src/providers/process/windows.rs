@@ -596,6 +596,55 @@ fn split_command_line(cmdline: &str) -> Vec<String> {
     out
 }
 
+/// 按**映像名**反查一个正在运行的同名进程的 exe 完整路径。
+///
+/// # 为什么是「去当前进程表反查」，而不是去 `PATH` 里找同名文件
+///
+/// 这一条是安全要害，不是性能取舍。图标端点的入参是用户可控的名字，
+/// 三种可能的解析方式里只有这一种是安全的：
+///
+/// | 解析方式 | 问题 |
+/// |---|---|
+/// | 调用方直接传路径 | 等于开一个「读任意文件并返回其内容」的口子 |
+/// | 拿名字去 `PATH` 搜同名文件 | 机器上可能装了三个 `python.exe`，`PATH` 上那个未必是正在跑的那个，图标对不上真实运行的程序 |
+/// | **去当前进程表反查**（本函数） | 匹配不到就是匹配不到，天然没有路径注入的余地 |
+///
+/// 第三种还有一个附带性质：名字里就算带了 `..` 或分隔符也不可能匹配到任何
+/// 进程（内核给出的映像名从不含路径），所以**不需要**再做一遍路径消毒。
+/// 端点层仍然会先拒绝这类名字，那是为了万一日后有人把解析方式改成查文件时
+/// 这道闸还在，见 [`crate::providers::process::icon::validate_name`]。
+///
+/// # 取不到路径是常态
+///
+/// 非管理员身份下，受保护进程与其它用户的进程 `OpenProcess` 直接被拒，
+/// 拿不到路径。因此这里**逐个试**，返回第一个真的取到路径的同名进程，
+/// 而不是「第一个同名进程的路径（可能是 `None`）」——同名的五个 `chrome.exe`
+/// 里只要有一个打得开就够了。全都打不开时如实返回 `None`，不拿占位值冒充
+/// （任务管理器不提权时那些行同样没有图标）。
+///
+/// 大小写按 ASCII 折叠：Windows 的文件名比较是大小写不敏感的，而映像名
+/// 实际上全是 ASCII。非 ASCII 的名字退化成精确匹配，不会误匹配到别的程序。
+pub fn image_path_by_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let procs = ntdll::system_processes().ok()?;
+    for p in procs {
+        // pid 0 / 4 不是可执行映像（空闲进程与内核本体），没有 exe 路径可言。
+        if p.pid == PID_IDLE || p.pid == PID_SYSTEM || !p.name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let Ok(handle) = open_process(p.pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+            continue;
+        };
+        // SAFETY: 句柄刚由 OpenProcess 返回，带 PROCESS_QUERY_LIMITED_INFORMATION。
+        if let Some(path) = unsafe { image_path(handle.raw()) } {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// `OpenProcess` 的薄封装：失败时带上 Win32 错误码，供 [`write_error`] 分类。
 fn open_process(pid: u32, access: u32) -> io::Result<Owned> {
     // SAFETY: OpenProcess 不解引用任何指针；失败时返回空句柄，由 Owned::new 挡下。

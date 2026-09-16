@@ -38,7 +38,7 @@ use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
 
-use super::wide::{from_wide, to_wide};
+use super::wide::{from_wide, from_wide_nul, to_wide};
 use super::{error_from_code, last_error};
 
 /// 一个注册表根键。见模块文档「根键为什么包一层 `RegRoot`」。
@@ -108,10 +108,16 @@ pub fn reg_string(root: RegRoot, subkey: &str, value: &str) -> Option<String> {
     if rc != ERROR_SUCCESS {
         return None;
     }
-    // 回填的是字节数；去掉结尾 NUL 再转。
+    // 回填的是字节数；在**第一个** NUL 处截断，不能只去掉结尾的那个。
+    //
+    // 差别出在 `REG_EXPAND_SZ` 上：`RegGetValueW` 先把原始值拷进缓冲再就地展开，
+    // 而展开后的串往往比原串短（`%SystemRoot%\System32\alg.exe` 29 字符 →
+    // `C:\Windows\System32\alg.exe` 27 字符），回填的字节数却仍按原串算。
+    // 于是结尾 NUL 之后还残留着原串的尾巴（这个例子里是 `e\0`），
+    // 只 `trim_end_matches('\0')` 会把它留在结果里，得到
+    // `C:\Windows\System32\alg.exe\0e` 这种看起来正常、拿去开文件却必然失败的路径。
     let chars = (cap as usize / 2).min(buf.len());
-    let s = from_wide(&buf[..chars]);
-    let s = s.trim_end_matches('\0').to_owned();
+    let s = from_wide_nul(&buf[..chars]);
     (!s.is_empty()).then_some(s)
 }
 
@@ -256,6 +262,27 @@ mod tests {
         assert_eq!(reg_dword(HKLM, CURRENT_VERSION, "没有这个值"), None);
         // 类型不符：ProductName 是 REG_SZ，按 DWORD 读必须失败而不是给个垃圾值
         assert_eq!(reg_dword(HKLM, CURRENT_VERSION, "ProductName"), None);
+    }
+
+    /// 可展开串（`REG_EXPAND_SZ`）读回来不能夹带原串的残留。
+    ///
+    /// 服务的 `ImagePath` 绝大多数是这个类型，且展开后普遍变短
+    /// （`%SystemRoot%\…` → `C:\Windows\…`），正是最容易暴露这个问题的一批值。
+    #[test]
+    fn 可展开串在第一个_nul_处截断() {
+        const SERVICES: &str = r"SYSTEM\CurrentControlSet\Services";
+        let mut 读到 = 0usize;
+        for name in reg_subkeys(HKLM, SERVICES) {
+            let Some(path) = reg_string(HKLM, &format!(r"{SERVICES}\{name}"), "ImagePath") else {
+                continue;
+            };
+            读到 += 1;
+            assert!(
+                !path.contains('\0'),
+                "{name} 的 ImagePath 里夹带了 NUL：{path:?}"
+            );
+        }
+        assert!(读到 > 50, "只读到 {读到} 条 ImagePath，本用例没有真的验到东西");
     }
 
     #[test]

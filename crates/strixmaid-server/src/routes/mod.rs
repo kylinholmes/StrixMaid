@@ -24,6 +24,8 @@ pub mod terminals;
 
 use std::sync::Arc;
 
+use strixmaid_core::providers::process::ProcProvider;
+use strixmaid_core::providers::service::icon::ServiceIcons;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -54,9 +56,9 @@ use crate::state::AppState;
         (name = "capabilities", description = "两层能力探测：system / user"),
         (name = "audit", description = "审计日志查询（需管理访问）"),
         (name = "system", description = "主机信息、健康状态与时间"),
-        (name = "services", description = "systemd unit 列表、详情与操作"),
+        (name = "services", description = "systemd unit 列表、详情、操作与服务图标"),
         (name = "logs", description = "journald 日志查询与 boot 列表"),
-        (name = "processes", description = "进程列表、详情、信号与 renice"),
+        (name = "processes", description = "进程列表、详情、信号、renice 与程序图标"),
         (name = "metrics", description = "指标：可用序列、自动选层查询与实时快照"),
         (name = "files", description = "只读文件浏览（在登录用户的 worker 内执行）"),
         (name = "nodes", description = "多节点：登记、列表与在线状态（写操作需管理访问）"),
@@ -70,9 +72,20 @@ pub struct ApiDoc;
 /// 它们原先的状态唯一的作用是持有 provider，而请求现在一律经 worker 执行
 /// （`roadmap/01-worker-execution.md` §4.3），需要的只是 [`AuthState`]
 /// ——从中按会话取 worker。
+///
+/// 例外只有图标那几个端点：图标是可执行映像自身的属性，与登录用户无关，
+/// 缓存挂在主进程的 [`ProcProvider`] / [`ServiceIcons`] 上，因此这里要多带
+/// `proc` 与 `service_icons` 两项。理由见 [`processes`] 与 [`services`] 的模块文档。
 pub struct ApiStates {
     pub app: AppState,
     pub auth: Arc<AuthState>,
+    /// 主进程自己的进程 provider。**只**给 [`processes::icon`] 用
+    /// （图标缓存与预热任务挂在它上面），其余进程端点仍然一律经 worker。
+    pub proc: ProcProvider,
+    /// 服务图标的缓存。**只**给 [`services::icon`] 与 [`services::icon_generic`] 用，
+    /// 其余服务端点仍然一律经 worker。与 `proc` 分开是因为两者的缓存 key 语义不同
+    /// （那边是进程名，这边是二进制路径）。
+    pub service_icons: ServiceIcons,
     pub capabilities: Arc<capabilities::CapabilityState>,
     pub audit: Arc<audit::AuditState>,
     pub metrics: Arc<metrics::MetricsState>,
@@ -92,8 +105,8 @@ pub fn api_v1(s: ApiStates) -> OpenApiRouter<()> {
 
     let protected = OpenApiRouter::new()
         .merge(system::router(s.auth.clone()))
-        .merge(processes::router(s.auth.clone()))
-        .merge(services::router(s.auth.clone()))
+        .merge(processes::router(s.auth.clone(), s.proc))
+        .merge(services::router(s.auth.clone(), s.service_icons))
         .merge(logs::router(s.auth.clone()))
         .merge(metrics::router(s.metrics))
         .merge(audit::router(s.audit))

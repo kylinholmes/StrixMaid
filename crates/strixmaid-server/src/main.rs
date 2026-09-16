@@ -233,6 +233,7 @@ pub(crate) async fn serve_with(
     use strixmaid_core::metrics::MetricsEngine;
     use strixmaid_core::providers::log::pick_log_provider;
     use strixmaid_core::providers::process::ProcProvider;
+    use strixmaid_core::providers::service::icon::ServiceIcons;
     use strixmaid_core::providers::service::pick_service_provider;
     use strixmaid_core::providers::system::HostProvider;
     use strixmaid_core::session::SessionManager;
@@ -302,15 +303,17 @@ pub(crate) async fn serve_with(
     // ---- provider 选择与能力探测 ----
     //
     // 请求**不再**经过这里的 provider（`roadmap/01` §4.3：一律走 worker）。
-    // 主进程仍然构造它们，只为三件与登录用户无关的事：启动期的 system 层能力探测、
-    // `services.changed` 的事件源、以及后续 `system.health` 频道的定时检查。
+    // 主进程仍然构造它们，只为四件与登录用户无关的事：启动期的 system 层能力探测、
+    // `services.changed` 的事件源、后续 `system.health` 频道的定时检查，
+    // 以及进程图标的缓存与预热（见下面的 `icon_warmer`）。
     reporter.stage("能力探测");
     let svc = pick_service_provider().await;
     let log = pick_log_provider().await;
+    let proc = ProcProvider::new();
     let mut registry = CapabilityRegistry::from_config(&config);
     registry
         .register(Box::new(HostProvider::new()))
-        .register(Box::new(ProcProvider::new()));
+        .register(Box::new(proc.clone()));
     if let Some(p) = &svc {
         registry.register(Box::new(Arc::clone(p)));
     }
@@ -366,11 +369,20 @@ pub(crate) async fn serve_with(
         }
     };
 
+    // ---- 进程图标预热（见 `strixmaid_core::providers::process::icon`）----
+    //
+    // **在后台跑，绝不阻塞启动**：`spawn` 之后立刻往下走，服务照常开始接受请求。
+    // 第一轮预热在任务内部完成，之后每 2 分半钟补热一轮（TTL 的一半）。
+    // 本平台不提供图标时（Linux / macOS 的空实现）返回 `None`，一个任务也不起。
+    let icon_warmer = proc.spawn_icon_warmer();
+
     // ---- 路由 ----
     reporter.stage("装配路由");
     let states = routes::ApiStates {
         app: AppState::new(),
         auth: auth.clone(),
+        proc,
+        service_icons: ServiceIcons::new(),
         capabilities: Arc::new(routes::capabilities::CapabilityState::new(
             report.system,
             host_identity,
@@ -467,6 +479,9 @@ pub(crate) async fn serve_with(
     terminal_sweeper.abort();
     health_task.abort();
     audit_pruner.abort();
+    if let Some(warmer) = icon_warmer {
+        warmer.abort();
+    }
 
     match kind {
         ShutdownKind::Graceful => {
