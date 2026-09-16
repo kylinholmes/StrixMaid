@@ -204,12 +204,20 @@ export const GENERIC_THEME: Theme = {
  * 分不开，退到 `colorNeutralStroke2`（1.86:1）。Fluent 的暗色描边整体比亮色重，
  * 两档本来就不是镜像关系。
  *
- * ## 与通用主题冲突的两处，都按 Fluent 来
+ * ## 与通用主题冲突的两处
  *
- * - 暗色正文取纯白。通用主题把它钳在 L92 以避开光晕，而 Windows 自己的
- *   暗色正文就是纯白（`colorNeutralForeground1` = `Global.Color.White`）。
- * - 亮色面板 L96 左右，高于通用主题给自己定的 L94 上限。用户已确认
- *   #F5F5F5 就是要的那一档。
+ * **暗色正文没有取 Fluent 的纯白。** `colorNeutralForeground1` 在暗色下是
+ * `Global.Color.White`，而通用主题把正文钳在 L92 以避开暗底上的光晕。
+ * 这一处两边可以同时满足：通用主题那条 L92 换算成 sRGB 是 `#E4E4E4`，
+ * 而 Fluent 的 `Grey.90` 是 `#E6E6E6`——几乎同一亮度。取 Grey.90 之后
+ * 它**既是 Fluent 官方色阶里的值，又落在防光晕的钳位上**，不必二选一。
+ * 对面板 11.66:1，远高于正文所需的 4.5:1。
+ *
+ * 想换回纯白只改这一行（`tokens.dark.ink`），测试不会挡；中间档是
+ * `Grey.94` `#F0F0F0`（12.77:1）。
+ *
+ * **亮色面板 L96 左右**，高于通用主题给自己定的 L94 上限。这一处没有折中的
+ * 余地，用户已确认 `#F5F5F5` 就是要的那一档。
  */
 export const FLUENT_THEME: Theme = {
   id: "fluent",
@@ -238,7 +246,9 @@ export const FLUENT_THEME: Theme = {
       sel: "#474747",
       "ink-3": "#ADADAD",
       "ink-2": "#D6D6D6",
-      ink: "#FFFFFF",
+      // Grey.90。不是 `colorNeutralForeground1`（纯白），理由见模块文档
+      // 「与通用主题冲突的两处」——这一档同时满足 Fluent 与防光晕的钳位。
+      ink: "#E6E6E6",
       accent: "#2B88D8",
     },
   },
