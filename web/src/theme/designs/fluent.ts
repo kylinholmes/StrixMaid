@@ -280,7 +280,7 @@ export const FLUENT = {
     "row-toolbar": "40px",
     "row-sm": "24px",
     "row-xs": "24px",
-    rail: "184px",
+    rail: "216px",
     "rail-narrow": "44px",
     icon: "20px",
     "icon-lg": "24px",

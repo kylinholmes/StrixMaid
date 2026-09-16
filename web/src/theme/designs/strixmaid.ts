@@ -177,7 +177,7 @@ export const STRIXMAID = {
     "row-toolbar": "40px",
     "row-sm": "26px",
     "row-xs": "24px",
-    rail: "184px",
+    rail: "216px",
     "rail-narrow": "44px",
     icon: "16px",
     "icon-lg": "22px",

@@ -66,7 +66,11 @@ const SHARED_EXPECTED: Readonly<Record<string, string>> = {
   "row-toolbar": "40px",
   "row-sm": "26px",
   "row-xs": "24px",
-  rail: "184px",
+  // 侧栏展开宽度是**重构之后有意加宽的**（184 → 216px），不是搬运出的偏差。
+  // 这张表的其余每一条都必须与重构前逐字相同，只有这条是例外，所以单独标出来：
+  // 184px 在装下「图标 + 中文标签 + 底部那行两个按钮」之后已经很挤，
+  // 横排的分段控件在那个宽度里根本放不下。216 = 27×8，仍在 8 的栅格上。
+  rail: "216px",
   "rail-narrow": "44px",
   icon: "16px",
   "icon-lg": "22px",
