@@ -40,8 +40,16 @@ pub use unix::{FdFrameReader, recv_fd, write_msg_with_fds};
 pub use windows::{FdFrameReader, write_msg_with_fds};
 
 /// 给 fd 打上 `FD_CLOEXEC`（Unix 专属，见 [`unix::set_cloexec`]）。
+///
+/// `pub(crate)` 而不是 `pub`：被重导出的那一项本身就是 `pub(crate)`，用 `pub use`
+/// 转出去是 E0364。两个调用点（`session::helper`、`worker::terminal::unix`）都在
+/// 本 crate 内，从来不需要 `pub`。
+///
+/// 这一行的 cfg 只在 macOS 上成立（Linux 有原子的 `SOCK_CLOEXEC`，Windows 没有
+/// `unix` 模块），所以 Linux 与 Windows 两条 CI 都编不到它——macOS 进 CI 的第一次
+/// 就把它挡下了。
 #[cfg(all(unix, not(target_os = "linux")))]
-pub use unix::set_cloexec;
+pub(crate) use unix::set_cloexec;
 
 /// 异步读一帧的 JSON 部分；对端在帧边界上关闭 → `Ok(None)`。
 pub async fn read_frame<R: AsyncRead + Unpin + ?Sized>(
