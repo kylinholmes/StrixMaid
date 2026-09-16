@@ -234,3 +234,115 @@
 .frow svg {
   flex: none;
 }
+
+/*
+ * 「主题」行:一行两个按钮。左半是亮暗开关(一点就换,不折进弹层),
+ * 右半的箭头开外观弹层。两个都套 .frow 拿到行的尺寸与悬停,
+ * 再各自改宽度——.frow 的 width:100% 在 flex 里会互相挤,所以下面重设。
+ */
+.split {
+  position: relative;
+  display: flex;
+}
+
+.fmain {
+  flex: 1;
+  min-width: 0;
+}
+
+.fmore {
+  flex: none;
+  width: 34px;
+  padding: 0;
+  justify-content: center;
+  border-left: 1px solid var(--line);
+}
+
+/* 弹层开在行的上方:它贴着窗口底边,往下没有地方。
+   比侧栏宽是有意的——分段控件放不进 184px,而侧栏本来就不裁剪浮层。 */
+.pop {
+  position: absolute;
+  bottom: 100%;
+  left: 8px;
+  width: 236px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+  animation: popIn var(--t-pop) ease-out;
+}
+
+.popRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.popLabel {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+}
+
+.popHint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+@keyframes popIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 设计语言:竖排单选,档数跟着注册表长,加一套只是多一行。
+   用原生 radio 是为了白拿方向键遍历与 radiogroup 语义;
+   accent-color 让选中点跟着主题色走,不必自绘。 */
+.radios {
+  /* fieldset 自带 margin/padding 与 min-inline-size: min-content。
+     不给它 display: flex——legend 是浏览器特殊排版的元素，
+     放进 flex 容器各家行为不一致，档与档之间的间距改用相邻兄弟选择器。 */
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+  border: 0;
+}
+
+.radios legend {
+  padding: 0;
+  margin-bottom: 7px;
+}
+
+.radio {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.radio + .radio {
+  margin-top: 7px;
+}
+
+.radio input {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 第二行的说明缩到与文字对齐 */
+.radio .popHint {
+  grid-column: 2;
+}

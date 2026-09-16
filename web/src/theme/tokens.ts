@@ -9,6 +9,10 @@
  * 界面「哪个平台都不像」。Windows 用户每天看见的是 Fluent 那几档灰，
  * 不是按 OKLCH 推出来的近似色。
  *
+ * 用哪套设计语言由两件事共同决定：**用户选的那一档偏好**（`DesignPreference`：
+ * 「系统」或指名某一套）与**被管机器的平台**。两者都交给 `pickTheme` 判，
+ * 调用点不写 if。可选的语言清单从 `THEMES` 推导，界面不另存一份。
+ *
  * **身份与设计语言是两件事，类型上不合并。** 本文件只回答「用哪套设计语言」；
  * 方块上的字、品牌色、accent 是发行版身份，在 distro.ts 里。两者将来会分叉：
  * Ubuntu 装 KDE 应当是 Ubuntu 的橙色方块配 Breeze 的中性色。
@@ -127,14 +131,19 @@ function fromRamp(ramp: Ramp, accent: string): TokenSet {
  * 认得出发行版时 `applyTheme` 会用发行版自己的那档盖掉它。
  * 两处数值的一致由 tokens.test.ts 守着，不要单独改其中一边。
  */
-export const GENERIC_THEME: Theme = {
+export const GENERIC_THEME = {
   id: "generic",
-  name: "通用",
+  // 界面上这一套就叫 StrixMaid——设置里的选项、合集页的标题取的都是这个字段。
+  // id 仍然是 `generic`，因为它同时是「认不出平台」的回落档，存储里存的是 id。
+  // 文档与注释里沿用「通用主题」的叫法，说的是同一套。
+  name: "StrixMaid",
   tokens: {
     light: fromRamp(RAMP.light, "#5A5A5A"),
     dark: fromRamp(RAMP.dark, "#9A9A9A"),
   },
-};
+  // `as const` 是为了把 `id` 留成字面量类型：设计语言的清单（`ThemeId`、
+  // `DESIGN_OPTIONS`）全部从 `THEMES` 推导，推导链的源头必须是字面量。
+} as const satisfies Theme;
 
 /**
  * Fluent：Windows 的设计语言。
@@ -219,7 +228,7 @@ export const GENERIC_THEME: Theme = {
  * **亮色面板 L96 左右**，高于通用主题给自己定的 L94 上限。这一处没有折中的
  * 余地，用户已确认 `#F5F5F5` 就是要的那一档。
  */
-export const FLUENT_THEME: Theme = {
+export const FLUENT_THEME = {
   id: "fluent",
   name: "Fluent",
   tokens: {
@@ -252,9 +261,21 @@ export const FLUENT_THEME: Theme = {
       accent: "#2B88D8",
     },
   },
-};
+  // `as const` 的理由见 GENERIC_THEME
+} as const satisfies Theme;
 
-export const THEMES: readonly Theme[] = [GENERIC_THEME, FLUENT_THEME];
+/**
+ * 设计语言注册表。**这是唯一的一份清单**：设置里的选项、对比度测试要验的面板，
+ * 全部从这里推导，加一套语言只在这里多一行（将来一套语言一个文件时就是多一个
+ * import），界面与测试都不必回头改。
+ *
+ * `as const` 让 `ThemeId` 能收成字面量联合，于是「选了一套还没实现的语言」
+ * 在类型上就通不过，不必等到运行时回落。
+ */
+export const THEMES = [GENERIC_THEME, FLUENT_THEME] as const;
+
+/** 已注册的设计语言 id。从 `THEMES` 推导，不要另写一份。 */
+export type ThemeId = (typeof THEMES)[number]["id"];
 
 /**
  * 挑主题所依据的那台机器的身份。
@@ -279,16 +300,85 @@ const THEME_BY_DESKTOP: Readonly<Record<string, Theme>> = {};
 const THEME_BY_OS: Readonly<Record<string, Theme>> = { windows: FLUENT_THEME };
 
 /**
+ * 设计语言偏好：**用户自己选的那一档**，不是被管机器的属性。
+ *
+ * - `system`：跟随被管机器的平台（今天 Windows → Fluent，将来 macOS → HIG、
+ *   Linux 按桌面环境 → Adwaita / Breeze / Yaru）；
+ * - 其余取值是某套设计语言的 `Theme.id`：强制用那一套，不看对面是什么机器。
+ *
+ * 可选的具体语言**从 `THEMES` 推导**，不是写死的联合类型。界面上只应当出现
+ * 真的实现了的那几套：列一个选了没反应、或者静默回落的选项，等于在界面上编能力。
+ *
+ * 默认取 `system`。今天在 Linux 与 macOS 上这一档的结果就是 StrixMaid 那套，
+ * 与加这个设置之前零差异；只有 Windows 用户会看见 Fluent，而那正是要的效果。
+ *
+ * **这一档不影响 accent。** accent 回答的是「正在看哪台机器」，属于身份层
+ * （distro.ts），与界面长什么样是两件事：选了 StrixMaid 的用户连上 Windows，
+ * 拿到的仍然是 Fluent 蓝的方块与蓝色 accent，只是中性色换成 StrixMaid 那套。
+ * 由此每个发行版的 accent 都可能落在**任意一套**已注册语言的面板上，
+ * 对比度因此要对全部面板都验，见 tokens.test.ts。
+ */
+export type DesignPreference = "system" | ThemeId;
+
+/** 读不到偏好、或存着的值非法时用这一档，理由见 `DesignPreference`。 */
+export const DEFAULT_DESIGN: DesignPreference = "system";
+
+export interface DesignOption {
+  readonly value: DesignPreference;
+  readonly label: string;
+}
+
+/**
+ * 控件上的各档：「系统」+ 注册表里的每一套，顺序就是控件里的顺序。
+ *
+ * **由 `THEMES` 生成，不要写死。** 下一轮重构会把一套设计语言拆成一个文件
+ * （`theme/designs/<name>.ts`），那时加一套语言就是加一个文件、在注册表里多一行；
+ * 清单硬编码在界面里的话，每加一套都得回来改 UI，那个结构就白做了。
+ * 显示用的名字取 `Theme.name`，每套语言自己带着。
+ */
+export const DESIGN_OPTIONS: readonly DesignOption[] = [
+  { value: "system", label: "系统" },
+  ...THEMES.map((t) => ({ value: t.id, label: t.name })),
+];
+
+/**
+ * 任意值 → 偏好。认不出一律回落到默认档。
+ *
+ * 入口收在这里而不是在读 localStorage 的地方判断，是因为合法值的清单只应当有
+ * 一份：`DESIGN_OPTIONS` 跟着注册表长，存储层不必跟着改。旧版本存下的、
+ * 手改过的、指向已经删掉的那套语言的值，到这里一律回落。
+ */
+export function asDesign(value: unknown): DesignPreference {
+  return DESIGN_OPTIONS.some((o) => o.value === value)
+    ? (value as DesignPreference)
+    : DEFAULT_DESIGN;
+}
+
+/**
  * 选一套设计语言。**这是唯一的入口**，加维度只改这里，不动调用点。
  *
- * 优先级是**桌面环境 > 操作系统 > 通用**。桌面环境排在前面，因为界面长什么样
- * 由桌面环境决定，不由发行版决定：Ubuntu 装 KDE 该用 Breeze，
- * Fedora 装 GNOME 该用 Adwaita，而没有桌面的服务器两者都不是，落回通用。
- * Windows 上没有这个分叉，`osId` 一档就够。
+ * 两个维度的优先级是**用户偏好 > 机器**：偏好指名了某一套就直接给那一套，
+ * 连机器是什么都不必看——这一档的语义是「不要跟着对面变」，
+ * 把它放在最前面，调用点就不需要为这个设置写任何 if。
+ *
+ * 偏好为 `system` 时才按机器挑，优先级是**桌面环境 > 操作系统 > 通用**。
+ * 桌面环境排在前面，因为界面长什么样由桌面环境决定，不由发行版决定：
+ * Ubuntu 装 KDE 该用 Breeze，Fedora 装 GNOME 该用 Adwaita，
+ * 而没有桌面的服务器两者都不是，落回通用。Windows 上没有这个分叉，`osId` 一档就够。
  *
  * 认不出时返回通用主题，不假装认识这台机器——与 `findDistro` 的同一条约定。
+ *
+ * `design` 有默认值而不是必传：默认档的结果与加这个参数之前逐字相同，
+ * 于是「只问机器该用什么」的调用点（测试、将来的预览）可以继续只传一个参数。
  */
-export function pickTheme(identity: PlatformIdentity): Theme {
+export function pickTheme(
+  identity: PlatformIdentity,
+  design: DesignPreference = DEFAULT_DESIGN,
+): Theme {
+  // 指名的那套认不出来（存储里是旧 id、那套语言已经删掉）就当成「系统」，
+  // 而不是抛错或给一块空白。`asDesign` 在入口处已经拦过一道，这里是第二道。
+  const forced = design === "system" ? undefined : THEMES.find((t) => t.id === design);
+  if (forced) return forced;
   const desktop = identity.desktop?.toLowerCase();
   if (desktop && THEME_BY_DESKTOP[desktop]) return THEME_BY_DESKTOP[desktop];
   const os = identity.osId?.toLowerCase();

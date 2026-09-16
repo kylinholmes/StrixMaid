@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DISTROS, UNKNOWN_DISTRO } from "./distro";
 import {
+  asDesign,
+  DEFAULT_DESIGN,
+  DESIGN_OPTIONS,
+  type DesignPreference,
   FLUENT_THEME,
   GENERIC_THEME,
   type Mode,
@@ -161,6 +165,101 @@ describe("pickTheme（挑设计语言）", () => {
   });
 });
 
+/**
+ * 设计语言偏好这一维。
+ *
+ * 上面那一组 `pickTheme` 的断言全部只传一个参数，钉的是**偏好缺省**时的行为；
+ * 缺省档是「系统」，所以那一组的意图没有变：它们问的仍然是「这台机器该用什么」。
+ */
+describe("pickTheme（设计语言偏好）", () => {
+  it("默认是「系统」——不传偏好与显式传「系统」结果相同", () => {
+    expect(DEFAULT_DESIGN).toBe("system");
+    expect(pickTheme({ osId: "windows" })).toBe(pickTheme({ osId: "windows" }, "system"));
+    expect(pickTheme({ osId: "ubuntu" })).toBe(pickTheme({ osId: "ubuntu" }, "system"));
+  });
+
+  it("选「系统」时跟随机器：Windows 拿 Fluent，其余通用", () => {
+    expect(pickTheme({ osId: "windows" }, "system")).toBe(FLUENT_THEME);
+    for (const d of DISTROS.filter((x) => x.id !== "windows")) {
+      expect(pickTheme({ osId: d.id }, "system"), d.id).toBe(GENERIC_THEME);
+    }
+  });
+
+  // 「强制某一套」对**每一套**已注册语言都成立，不是只对 StrixMaid 那套。
+  // 遍历 THEMES 而不是列举，加一套语言时这条自动覆盖它。
+  it("指名某一套时不看机器：任何机器都拿到指名的那一套", () => {
+    for (const t of THEMES) {
+      for (const osId of ["windows", "ubuntu", "macos", "haiku", "", null]) {
+        expect(pickTheme({ osId }, t.id), `${t.id} ← ${osId}`).toBe(t);
+      }
+    }
+  });
+
+  // 偏好排在机器前面判。将来 THEME_BY_DESKTOP 填上 Adwaita / Breeze 之后，
+  // 桌面环境同样不得绕过这一档——这条现在就钉住，那时不必回头补。
+  it("指名某一套时连桌面环境这一档也不看", () => {
+    for (const t of THEMES) {
+      expect(pickTheme({ osId: "ubuntu", desktop: "kde" }, t.id), t.id).toBe(t);
+      expect(pickTheme({ osId: "windows", desktop: "gnome" }, t.id), t.id).toBe(t);
+    }
+  });
+
+  // 类型上挡得住的事情运行时也要挡：存储里可能留着旧 id，或者某套语言被删掉了。
+  it("指名一套不存在的语言时回落到「系统」，不抛错也不给空白", () => {
+    const stale = "breeze" as DesignPreference;
+    expect(pickTheme({ osId: "windows" }, stale)).toBe(FLUENT_THEME);
+    expect(pickTheme({ osId: "ubuntu" }, stale)).toBe(GENERIC_THEME);
+  });
+});
+
+/**
+ * 设置里的那份清单。
+ *
+ * 这一组才是「加一套设计语言不用回头改 UI」的保证：清单由注册表生成，
+ * 且每一档都真的切得过去。列一个选了没反应的选项等于在界面上编能力。
+ */
+describe("DESIGN_OPTIONS（设置里的清单）", () => {
+  it("就是「系统」+ 注册表里的每一套，顺序一致", () => {
+    expect(DESIGN_OPTIONS.map((o) => o.value)).toEqual(["system", ...THEMES.map((t) => t.id)]);
+  });
+
+  it("显示的名字取自每套语言自己的 name，不在界面里另写一份", () => {
+    expect(DESIGN_OPTIONS.map((o) => o.label)).toEqual(["系统", ...THEMES.map((t) => t.name)]);
+  });
+
+  it("每一档都真的切得过去——没有选了没反应、或静默回落的选项", () => {
+    for (const o of DESIGN_OPTIONS) {
+      if (o.value === "system") continue;
+      expect(
+        THEMES.some((t) => t.id === o.value),
+        o.value,
+      ).toBe(true);
+      // 连的是哪台机器都不影响：指名了就一定拿到那一套
+      expect(pickTheme({ osId: "windows" }, o.value).id, o.value).toBe(o.value);
+      expect(pickTheme({}, o.value).id, o.value).toBe(o.value);
+    }
+  });
+
+  it("「系统」排在第一档，且就是默认档", () => {
+    expect(DESIGN_OPTIONS[0]?.value).toBe("system");
+    expect(DEFAULT_DESIGN).toBe("system");
+  });
+});
+
+describe("asDesign（偏好的回落）", () => {
+  it("控件上的每一档都原样返回", () => {
+    for (const o of DESIGN_OPTIONS) expect(asDesign(o.value)).toBe(o.value);
+  });
+
+  // 存储里只可能有本项目自己写进去的值，所以是精确匹配，不做大小写归一：
+  // 对不上就说明那是手改的、或旧版本留下的，回落比猜用户想要什么稳妥。
+  it("读不到、空值、大小写不对、指向不存在的语言时一律回落到「系统」", () => {
+    for (const v of [null, undefined, "", "Generic", "FLUENT", "strixmaid", "breeze", 0, {}]) {
+      expect(asDesign(v), String(v)).toBe("system");
+    }
+  });
+});
+
 describe("发行版 accent", () => {
   it("每个发行版都有亮暗两档，格式为 #RRGGBB", () => {
     for (const d of [...DISTROS, UNKNOWN_DISTRO]) {
@@ -185,9 +284,12 @@ describe("发行版 accent", () => {
 
   // 上面几条只看格式，看不出一个凭感觉填的颜色是否真的达标——这条才是执行者。
   //
-  // 面板不再是全局那一块灰：每个发行版按它**实际会拿到的那套设计语言**的面板算。
-  // 今天只有 Windows 落在 Fluent 上（面板 #F5F5F5 / #292929），其余仍是通用那套，
-  // 所以 Linux 与 macOS 这十三档的数值与第二版完全一致。
+  // **对每一套设计语言的面板都验，不是只验「它实际会拿到的那一套」。**
+  // 设计语言现在是用户选的（`DesignPreference`），而 accent 是机器身份、不跟着选，
+  // 于是同一个 accent 可能落在通用面板（oklch 93% / 26.4%）上，
+  // 也可能落在 Fluent 面板（#F5F5F5 / #292929）上：Windows 机器选「系统」是后者，
+  // 选「StrixMaid」是前者。只验其中一套，另一套就成了没人看过的组合。
+  // 将来加设计语言时这条自动覆盖新面板（遍历的是 `THEMES`），不必回头补。
   //
   // **门槛是 3:1 而不是 4.5:1**，因为 `--accent` 在本项目里一次都没用在文字上：
   // 4px 上边框（Rail）、3px 内阴影边条（NavRail / Table）、边框色（Field /
@@ -197,16 +299,17 @@ describe("发行版 accent", () => {
   // **这条依赖是活的**：哪天 accent 被用到 `color:` 上（链接、标签、图例），
   // 门槛必须退回 4.5:1，届时 Windows 的两档 Fluent 原色需要重选
   // （见 distro.ts 里那条的注释）。改这个数字之前先 grep 一遍 `var(--accent`。
-  it(`每个 accent 对它自己那套面板都 ≥${MIN_RATIO}:1`, () => {
+  it(`每个 accent 对每一套设计语言的面板都 ≥${MIN_RATIO}:1`, () => {
     for (const d of [...DISTROS, UNKNOWN_DISTRO]) {
-      const theme = pickTheme({ osId: d.id });
-      for (const mode of MODES) {
-        const panel = relLum(srgbOf(theme.tokens[mode].surface));
-        const ratio = contrast(relLum(hexToSrgb(d.accent[mode])), panel);
-        expect(
-          ratio,
-          `${d.id} 的 ${mode} accent ${d.accent[mode]} 对 ${theme.id} 的面板只有 ${ratio.toFixed(2)}:1`,
-        ).toBeGreaterThanOrEqual(MIN_RATIO);
+      for (const theme of THEMES) {
+        for (const mode of MODES) {
+          const panel = relLum(srgbOf(theme.tokens[mode].surface));
+          const ratio = contrast(relLum(hexToSrgb(d.accent[mode])), panel);
+          expect(
+            ratio,
+            `${d.id} 的 ${mode} accent ${d.accent[mode]} 对 ${theme.id} 的面板只有 ${ratio.toFixed(2)}:1`,
+          ).toBeGreaterThanOrEqual(MIN_RATIO);
+        }
       }
     }
   });

@@ -36,7 +36,7 @@ import {
   ToolbarSpacer,
 } from "@/components";
 import { DISTROS, UNKNOWN_DISTRO } from "@/theme/distro";
-import type { NeutralToken } from "@/theme/tokens";
+import { DESIGN_OPTIONS, type NeutralToken } from "@/theme/tokens";
 import { useTheme } from "@/theme/useTheme";
 import { SERVICES, type Service, series } from "./data";
 import s from "./Gallery.module.css";
@@ -107,7 +107,7 @@ const RAMP_SWATCHES: readonly NeutralToken[] = [
 const INK_SWATCHES = new Set<NeutralToken>(["ink-3", "ink-2", "ink"]);
 
 export function Gallery() {
-  const { mode, theme, distro, setMode, setPlatform } = useTheme();
+  const { mode, theme, distro, design, setMode, setDesign, setPlatform } = useTheme();
   const [selected, setSelected] = useState<string | null>("containerd.service");
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
@@ -152,6 +152,17 @@ export function Gallery() {
             ]}
           />
         </div>
+        {/* 与侧栏底部那个弹层里的是同一个设置（同一个 store、同一份 localStorage），
+            摆在这里是因为这一页正是肉眼比对两套设计语言的地方 */}
+        <div className={s.ctl}>
+          <span>设计语言</span>
+          <Segmented
+            label="设计语言"
+            value={design}
+            onChange={setDesign}
+            options={DESIGN_OPTIONS}
+          />
+        </div>
         <div className={s.ctl}>
           <span>左栏</span>
           <Segmented
@@ -170,9 +181,10 @@ export function Gallery() {
         <p className={s.lede}>
           全部组件按{" "}
           <code>docs/superpowers/specs/2026-08-29-frontend-design-language-design.md</code>{" "}
-          实现。中性色按平台整套切换，当前这套是 <b>{theme.name}</b>——
-          <b>切到 Windows 会换成 Fluent 的中性色，切回 Linux 是通用那套，数据色一动不动</b>。
-          发行版只决定 <code>--accent</code>，切到「认不出」会回落成错开明度的灰。
+          实现。中性色整套切换，当前这套是 <b>{theme.name}</b>——设计语言选「系统」时
+          <b>切到 Windows 会换成 Fluent 的中性色，切回 Linux 是 StrixMaid 那套，数据色一动不动</b>
+          ；指名某一套则一律用那一套，不看机器。 发行版只决定 <code>--accent</code>
+          （不受设计语言影响，它是身份不是样式），切到「认不出」会回落成错开明度的灰。
         </p>
 
         <Section
