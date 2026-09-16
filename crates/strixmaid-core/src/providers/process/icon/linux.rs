@@ -18,6 +18,7 @@
 //!    - `StartupWMClass=` 精确等于进程名（最可靠，条目作者就是为这件事写的）；
 //!    - `Exec=` 的第一个词（去掉路径与 `%f`/`%U` 这类字段码）等于进程名；
 //!    - 文件名去掉 `.desktop` 后等于进程名（兜底，误配率最高）。
+//!
 //!    规范：Desktop Entry Specification。注意 `NoDisplay=true` 与
 //!    `Hidden=true` 的条目要跳过。
 //! 2. **桌面条目 → 图标名**。读 `Icon=` 的值。它可能是**绝对路径**
