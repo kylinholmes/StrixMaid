@@ -74,10 +74,36 @@ use strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS;
 // `Config::default()` 里是确定的（示例配置、错误信息、测试都要引用它）。
 // `%ProgramData%` 在实际部署里几乎总是 `C:\ProgramData`——它被改掉的机器
 // 极少，而那种机器上用 `--config` 或 `STRIXMAID_DATA_DIR` 显式指定即可。
+//
+// **macOS 自成一组**（2026-09 起它从开发平台提升为交付目标）。它既不是 FHS
+// 也不是 Windows，而是 BSD 的 hier(7) 布局：有 `/etc`、有 `/var`，但
+// **没有 `/run`**，也**没有 `/var/lib`**。原先 macOS 跟着 Linux 走
+// `#[cfg(not(windows))]`，`run_dir` 因此默认指向一条本机根本不存在、
+// 且开机后也不会被任何人创建的路径——那是 bug，不是风格差异。
+// 逐条的依据写在各常量的文档注释里。
+//
+// 分支写成 `all(not(windows), not(target_os = "macos"))` 而不是 `unix`：
+// 保持「除 Windows 与 macOS 之外的一切」仍走原来那组取值，与改动前逐字等价。
 // ---------------------------------------------------------------------------
 
 /// 默认配置文件路径（§12）。
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/strixmaid/config.toml";
+/// 见上。
+///
+/// macOS 取与 Linux **相同**的值，这是刻意的而不是漏改：
+///
+/// * hier(7) 给 `/etc` 的定义就是「system configuration files and scripts」。
+///   macOS 上它是 `/private/etc` 的符号链接，位于数据卷、root 可写，
+///   不在 SIP 的保护清单里；
+/// * 更硬的约束来自 PAM。OpenPAM 只认 `/etc/pam.d/<服务名>`，装这个软件
+///   本来就必须往 `/etc` 下放一份（`packaging/pam.d/strixmaid.macos`）。
+///   把主配置挪到 `/Library/Application Support` 只会让同一套安装物
+///   一半在 `/etc`、一半在 `/Library`，运维要记两个地方；
+/// * 不用 `/usr/local/etc`：那是 Homebrew 的前缀（Apple Silicon 上还改成了
+///   `/opt/homebrew`），属于包管理器的约定而非系统约定，且 `/usr/local`
+///   在一台干净的 macOS 上并不存在。
+#[cfg(target_os = "macos")]
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/strixmaid/config.toml";
 /// 见上。
 #[cfg(windows)]
@@ -94,15 +120,48 @@ pub const CONFIG_PATH_ENV: &str = "STRIXMAID_CONFIG";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:9700";
 
 /// 默认数据目录（§12）。
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/strixmaid";
+/// 见上。
+///
+/// macOS 上**没有 `/var/lib`**——那是 FHS 的目录，hier(7) 里没有它。
+/// 对应物是 `/var/db`，hier(7) 的原话是「misc. automatically generated
+/// system-specific database files」，而这里放的正是程序自己生成的 SQLite 库
+/// （指标 / 会话 / 审计）。系统自带的 `/var/db/sudo`、`/var/db/dhcpclient`
+/// 是同一类东西，可以照着找。
+///
+/// 不用 `/Library/Application Support/StrixMaid`：那是给**应用程序**的支持
+/// 文件准备的，Finder 里可见、会被迁移助理一并搬走；而这里是一个只有 root
+/// 能读的指标与审计库（目录权限 0700），不该出现在用户会去翻的地方。
+///
+/// SIP 保护的是 `rootless.conf` 里逐条列出的路径（`/var/db` 下确有几个
+/// Apple 自己的子目录在列），`/var/db` 本身不在其中，root 可以在它下面
+/// 新建子目录。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_DATA_DIR: &str = "/var/db/strixmaid";
 /// 见上。
 #[cfg(windows)]
 pub const DEFAULT_DATA_DIR: &str = r"C:\ProgramData\StrixMaid\data";
 
 /// 默认运行目录（§12）。
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub const DEFAULT_RUN_DIR: &str = "/run/strixmaid";
+/// 见上。
+///
+/// **macOS 上没有 `/run`**。BSD 传统里这个位置叫 `/var/run`，hier(7) 的
+/// 措辞是「system information files describing various info about system
+/// since it was booted」——"since it was booted" 也点明了它的生命周期：
+/// 内容随每次启动重置，其中的子目录**不能假定跨重启存在**。
+///
+/// 两处与 Linux 的实际差别，安装脚本与 `docs/macos-platform.md` 里都记了：
+///
+/// * launchd 没有 systemd `RuntimeDirectory=` 的对应物，不会替进程建这个目录；
+/// * 因此需要用到它的那天，得由进程自己 `mkdir` 或由安装脚本在开机后补建。
+///
+/// 当前代码路径其实还用不到它：helper 走 socketpair，不落文件系统 socket
+/// （见 `session::channel`）。保留该项只为配置形状在三个平台上一致。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_RUN_DIR: &str = "/var/run/strixmaid";
 /// 见上。
 ///
 /// Windows 上没有 tmpfs 那样的「重启即空」目录，用 `ProgramData` 下的子目录。
@@ -520,9 +579,13 @@ pub struct Config {
     /// 监听地址，形如 `IP:端口`。默认 `127.0.0.1:9700`。
     /// MVP 不做 TLS，对外暴露走反向代理。
     pub listen: String,
-    /// 数据目录，SQLite 数据库存放于此。默认 `/var/lib/strixmaid`。
+    /// 数据目录，SQLite 数据库存放于此。
+    /// 默认见 [`DEFAULT_DATA_DIR`]（Linux `/var/lib/strixmaid`、
+    /// macOS `/var/db/strixmaid`、Windows `C:\ProgramData\StrixMaid\data`）。
     pub data_dir: PathBuf,
-    /// 运行目录，helper 的 Unix socket 存放于此。默认 `/run/strixmaid`。
+    /// 运行目录，helper 的 Unix socket 存放于此。
+    /// 默认见 [`DEFAULT_RUN_DIR`]（Linux `/run/strixmaid`、
+    /// macOS `/var/run/strixmaid`、Windows `C:\ProgramData\StrixMaid\run`）。
     pub run_dir: PathBuf,
     /// `strixmaid-helper` 二进制路径。默认 `strixmaid-helper`——
     /// 不含 `/` 的名字会被 `Command::new` 按 `PATH` 查找。
@@ -1024,8 +1087,10 @@ listen = "127.0.0.1:9700"
 data_dir = @DATA_DIR@
 
 # 运行目录。
-# Linux / macOS：helper 的 Unix socket（helper.sock，权限 0600）存放于此，
+# Linux：helper 的 Unix socket（helper.sock，权限 0600）存放于此，
 # 通常由 systemd unit 的 RuntimeDirectory=strixmaid 自动创建。
+# macOS：位置同理（/var/run 下），但 launchd 没有 RuntimeDirectory 的对应物，
+# 且 /var/run 的内容每次开机都会重置，目录要由安装脚本或进程自己建。
 # Windows：helper 走命名管道，不落文件系统，本项当前用不到。
 run_dir = @RUN_DIR@
 
@@ -1127,7 +1192,15 @@ const PLATFORM_NOTE: &str = r"#
 ";
 
 /// 见上。
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+const PLATFORM_NOTE: &str = r"#
+# 本文件是 macOS 版：数据目录在 /var/db、运行目录在 /var/run，
+# 不是 Linux 的 /var/lib 与 /run（那两条路径在 macOS 上不存在）。
+# 服务宿主是 launchd 而非 systemd，日志由 plist 的 StandardOutPath 收走。
+";
+
+/// 见上。
+#[cfg(all(not(windows), not(target_os = "macos")))]
 const PLATFORM_NOTE: &str = "";
 
 // ===========================================================================

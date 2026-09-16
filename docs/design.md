@@ -42,15 +42,14 @@
 
 `worker` 不是独立二进制，而是主二进制的子命令（`strixmaid worker`）。helper 只负责「PAM 认证 → setuid → exec strixmaid worker」，因此可以做到极小。
 
-> **交付目标只有 Linux。** 工程同时能在 macOS 上编译、运行、联调，那是**开发平台**支持：
-> 每个 provider 补了一套 macOS 原生实现（launchd / 统一日志 / libproc / mach），
-> 覆盖差异与平台 API 的坑逐条记在 [`macos-dev-platform.md`](./macos-dev-platform.md)。
-> Linux 实现的内容未因此改动一个字节。
+> **第一个交付目标是 Linux**，上面这张表说的就是它。macOS 与 Windows 后来各自
+> 成为交付目标，形态见下面两节补充。每个 provider 都补了一套 macOS 原生实现
+> （launchd / 统一日志 / libproc / mach），覆盖差异与平台 API 的坑逐条记在
+> [`macos-platform.md`](./macos-platform.md)。Linux 实现的内容未因此改动一个字节。
 
 #### Windows 补充（2026-09）
 
-**Windows 后来成为第二个交付目标**，与 macOS 那一层不是同一件事：macOS 是开发平台，
-取不到的数据可以整项不做；Windows 是有人会拿来跑生产的平台，缺一项就少一块视野。
+**Windows 后来成为第二个交付目标**：有人会拿它跑生产，缺一项就少一块视野，
 因此它享受与 Linux 相同的质量门槛（CI 里 `cargo clippy --workspace --all-targets
 -- -D warnings` 与 `cargo test --workspace` 各跑一遍），取舍标准仍是 §1 的第 2 条。
 完整说明见 [`windows-platform.md`](./windows-platform.md)。
@@ -72,6 +71,31 @@
 读 + 执行权限，否则登录之后什么都干不了。
 
 Linux 与 macOS 实现的内容未因此改动一个字节。
+
+#### macOS 补充（2026-09）
+
+**macOS 也提升为交付目标**，与 Windows 同级：有 launchd 服务定义、安装与卸载脚本、
+发布包与 CI 门槛。此前它只是开发平台（「取不到的数据可以整项不做」），provider 那一层
+的实现未变，变的是「缺项要说清楚是平台没有还是还没做」以及多了一整套交付物。
+完整说明见 [`macos-platform.md`](./macos-platform.md)。
+
+三个产物在 macOS 上的形态：
+
+| 产物 | 链接方式 | 与 Linux 的差别 |
+|---|---|---|
+| `strixmaid` | 系统 dylib（libSystem 等） | 无额外子命令；服务宿主是 launchd，不需要 Windows 那种 `service` 子命令族 |
+| `strixmaid-agent` | 同上 | 随发布包分发 |
+| `strixmaid-helper` | 同上，外加 `/usr/lib/libpam.2.dylib` | PAM 是 **OpenPAM**，常量数值与 Linux-PAM 不同；服务文件缺失时整体回退到全拒的 `/etc/pam.d/other`，所以模板必须装 |
+
+两条边界写在这里，免得下游误以为漏了：
+
+* **只出 Apple Silicon**（`aarch64-apple-darwin`），不做 Intel，不做 universal。
+* **暂不做代码签名与公证**。后果是浏览器下载的包会被 Gatekeeper 打上隔离标记，
+  用户需要 `xattr -dr com.apple.quarantine` 或在系统设置里放行一次
+  （`macos-platform.md` §7.5）。这是已知取舍，不是缺陷。
+
+「静态单二进制优先」（§1 第 4 条）在 macOS 上与 Windows 同理：Apple 不提供静态的
+libSystem，所以标准同样改成「不依赖任何需要另外安装的运行时」。
 
 ### 2.2 进程拓扑
 
@@ -283,7 +307,7 @@ GET /api/v1/capabilities
 
 #### Windows 补充：字段名不变，语义是「这项能力可用」
 
-与 macOS 同一个决定（见 [`macos-dev-platform.md`](./macos-dev-platform.md) §3.6）：
+与 macOS 同一个决定（见 [`macos-platform.md`](./macos-platform.md) §3.6）：
 `SystemCapabilities` 的字段名沿用 Linux 实现的名字，**语义是「这项能力可用」而不是
 「装了这个软件」**。与其为第二、第三个平台在 API 契约里加字段（下游代码生成器全要
 跟着改），不如让「后端具体是谁」留在 `providers` 列表里。
@@ -673,7 +697,7 @@ helper 是「需要动态链接或需要切换身份的操作」的唯一出口�
 |---|---|
 | 配置格式 | TOML |
 | 优先级 | 内置默认 < `/etc/strixmaid/config.toml` < 环境变量 `STRIXMAID_*` < 命令行 |
-| 数据目录 | `/var/lib/strixmaid/`（SQLite） |
+| 数据目录 | `/var/lib/strixmaid/`（SQLite）。**本表是 Linux 的取值**，macOS 与 Windows 各见下面的补充 |
 | 运行目录 | `/run/strixmaid/`（helper socket） |
 | 日志 | stderr，交由 journald 收集，不自写日志文件 |
 | 默认监听 | `127.0.0.1:9700`（端口待最终确认） |
@@ -725,6 +749,37 @@ Windows 上没有 FHS，等价物是 `%ProgramData%\StrixMaid`——那正是「
 
 详见 [`windows-platform.md`](./windows-platform.md) 与
 [`packaging/windows/README.md`](../packaging/windows/README.md)。
+
+#### macOS 补充：路径、服务宿主与安装物
+
+macOS 既不是 FHS 也不是 Windows，而是 BSD 的 hier(7) 布局：有 `/etc`、有 `/var`，
+但**没有 `/run`**，也**没有 `/var/lib`**。此前 macOS 跟着 Linux 走
+`#[cfg(not(windows))]`，`run_dir` 因此指向一条本机根本不存在的路径；现在单列一组。
+
+| 项 | Linux | macOS |
+|---|---|---|
+| 配置文件 | `/etc/strixmaid/config.toml` | 同左（hier(7) 的 `/etc`；而且 OpenPAM 只认 `/etc/pam.d/<服务名>`） |
+| 数据目录 | `/var/lib/strixmaid/` | `/var/db/strixmaid/`（hier(7)：自动生成的系统数据库文件） |
+| 运行目录 | `/run/strixmaid/` | `/var/run/strixmaid/`（**没有 `/run`**；内容每次开机重置） |
+| 二进制 | `/usr/bin/` | `/usr/local/bin/`（`/usr` 只读并受 SIP 保护，`/usr/local` 是放行给第三方的） |
+| 服务宿主 | systemd unit | launchd，**LaunchDaemon**（`/Library/LaunchDaemons/io.strixmaid.{server,agent}.plist`） |
+| 日志 | stderr → journald | `/var/log/strixmaid/{server,agent}.log`（launchd 不把 stdout 送进统一日志，不设就丢 `/dev/null`） |
+| PAM 模板 | `/etc/pam.d/strixmaid` | 同左，且**必须装**：缺文件时 OpenPAM 回退到全拒的 `other` |
+| 安装物 | tar.gz + `install.sh` | tar.gz + `packaging/macos/install.sh` / `uninstall.sh` |
+
+三条与 Linux 不同的部署约束：
+
+1. **选 LaunchDaemon 而不是 LaunchAgent。** Agent 只在某个用户登录之后才存在，
+   而全局指标采集必须在无人登录时持续运行，主进程也需要 root。
+2. **装载用 `launchctl bootstrap`，不用已过时的 `launchctl load`。** 后者在 plist
+   有问题时经常退出 0 却什么也没做。
+3. **没有「装好但开机不自启」这一档。** plist 一进 `/Library/LaunchDaemons`，
+   下次开机就会被装载；要装而不启用得显式 `launchctl disable`。
+
+卸载语义与 Windows、deb 一致：**默认保留配置与数据**，`--purge` 才删。
+
+详见 [`macos-platform.md`](./macos-platform.md) §7 与
+[`packaging/macos/README.md`](../packaging/macos/README.md)。
 
 ### 12.1 OpenAPI 导出
 
@@ -823,4 +878,4 @@ Phase 0 期间固化的几条实现约定：
 ---
 
 > 现状与目标的差距分析见 [`gap-analysis.md`](./gap-analysis.md)，后续工作方案见 [`roadmap/`](./roadmap/README.md)。
-> macOS 开发平台的适配说明见 [`macos-dev-platform.md`](./macos-dev-platform.md)。
+> macOS 开发平台的适配说明见 [`macos-platform.md`](./macos-platform.md)。

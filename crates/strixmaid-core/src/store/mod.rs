@@ -247,7 +247,10 @@ impl Store {
 
     /// 同 [`Store::open`]，但指定保留期预设。
     pub async fn open_with(path: &Path, retention: RetentionPreset) -> Result<Store> {
-        // 数据目录默认 /var/lib/strixmaid/，首次启动时可能不存在。
+        // 数据目录的默认值按平台不同（见 config::DEFAULT_DATA_DIR：Linux
+        // /var/lib/strixmaid、macOS /var/db/strixmaid、Windows ProgramData 下），
+        // 三个平台上首次启动时都可能还不存在——Linux 有 systemd 的
+        // StateDirectory= 兜底，launchd 则没有对应物，所以这里自己建。
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
         {

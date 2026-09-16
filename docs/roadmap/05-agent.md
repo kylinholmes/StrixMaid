@@ -54,7 +54,7 @@ strixmaid-agent [--config /etc/strixmaid/agent.toml]
 | `node_id` | 稳定标识；缺省取 `/etc/machine-id` |
 | `node_name` | 显示名，缺省主机名 |
 | `token` | 预共享 token；也可 `token_file` |
-| `data_dir` | 本地 SQLite，默认 `/var/lib/strixmaid-agent` |
+| `data_dir` | 本地 SQLite，默认 Linux `/var/lib/strixmaid-agent`、macOS `/var/db/strixmaid-agent`、Windows `C:\ProgramData\StrixMaid\agent-data` |
 | `metrics.*` | 同 Server 的 `MetricsConfig` |
 | `tls.insecure` | 开发用，默认 false |
 

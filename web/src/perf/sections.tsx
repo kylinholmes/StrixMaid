@@ -36,8 +36,12 @@ import s from "./Perf.module.css";
  * 图表布局遵循任务管理器的经验：同量纲合图，异量纲分层。
  * 网络的收/发、磁盘的读/写是同一张图里的两条线（一粗一细 + 图例），
  * 不为每个指标单开整高图；errors 这类几乎恒零的计数进数字区，不占图。
+ *
+ * 高度只有副图这一个定值。每个资源的**首图**不写死高度：它是 `.stack` 里唯一
+ * 会长的弹性项，吃掉一屏里其余区块用剩的全部竖向空间（任务管理器的主图也是
+ * 这样占据主要高度的）。视口高矮、有没有副图、数字区几行，都会改变这个值，
+ * 换成另一个写死的数字只会在别的窗口尺寸上重新留白或者被截断。
  */
-const H_MAIN = 180;
 const H_SUB = 110;
 
 interface SectionProps {
@@ -45,13 +49,21 @@ interface SectionProps {
   onLayer: (layer: string | null) => void;
 }
 
+/**
+ * 图表区的两种视图：总体一张大图 ⇄ 每个成员一张小图。
+ * 只有成员数 ≥ 2 的资源给这个切换（见 `PerfPage` 的 `VIEW_SPLIT`）。
+ */
+export type PerfView = "all" | "each";
+
 /* ================= 通用小件 ================= */
 
-function Legend({
-  entries,
-}: {
-  entries: readonly { color: string; name: string; dash?: boolean }[];
-}) {
+interface LegendEntry {
+  color: string;
+  name: string;
+  dash?: boolean;
+}
+
+function Legend({ entries }: { entries: readonly LegendEntry[] }) {
   return (
     <div className={s.legend}>
       {entries.map((e) => (
@@ -121,6 +133,65 @@ export function useSystemInfo() {
 
 /* ================= 图 ================= */
 
+/**
+ * 图表外框：标题行 + 绘图区 + 图例行。绘图区的像素高度有两种来源——
+ * `height` 是调用方给定的定值（副图），`grow` 是先由弹性布局撑开、再量出来的值
+ * （每个资源的首图）。uPlot 与 canvas 都只认确定的像素数，撑开的那一种必须先量
+ * 后画，量不到（首帧、隐藏在别的路由里）就先不画，绝不拿一个猜的高度顶上。
+ *
+ * 标题行与图例行都可以不要：一条折线需要说明它画的是哪个指标、区间带是什么，
+ * 而逐核 / 逐设备网格每一格自己就写着名字与读数，再加一行标题一行图例是白说。
+ * 省掉它们不影响「切换前后区块高度不变」——那条约束落在 `.chartGrow` 的
+ * `flex: 1 0 0` + `min-height` 上，与框里装了什么无关。
+ */
+function ChartFrame({
+  title,
+  value,
+  grow,
+  height,
+  legend,
+  noFrame,
+  children,
+}: {
+  /** 不给就不渲染标题行 */
+  title?: string;
+  value?: string;
+  grow?: boolean;
+  height?: number;
+  legend?: readonly LegendEntry[];
+  /** 去掉外框的边框与填充色（里面自带格子时用），见 `.chartNoFrame` */
+  noFrame?: boolean;
+  children: (height: number) => React.ReactNode;
+}) {
+  const areaRef = useRef<HTMLDivElement>(null);
+  const [measured, setMeasured] = useState(0);
+
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!grow || !el) return;
+    const ro = new ResizeObserver(() => setMeasured(el.clientHeight));
+    ro.observe(el);
+    setMeasured(el.clientHeight);
+    return () => ro.disconnect();
+  }, [grow]);
+
+  const h = grow ? measured : (height ?? 0);
+  return (
+    <div className={cx(s.chartBlock, grow && s.chartGrow, noFrame && s.chartNoFrame)}>
+      {title !== undefined && (
+        <div className={s.chartTitle}>
+          <b>{title}</b>
+          <span>{value}</span>
+        </div>
+      )}
+      <div ref={areaRef} className={grow ? s.plotArea : undefined}>
+        {h > 0 && children(h)}
+      </div>
+      {legend && legend.length > 0 && <Legend entries={legend} />}
+    </div>
+  );
+}
+
 /** 单序列图（可挂第二条同量纲序列）：60 秒走 live 环，其余档走历史 band。 */
 function SeriesChart({
   expr,
@@ -134,6 +205,7 @@ function SeriesChart({
   onLayer,
   unitFmt,
   secondary,
+  grow,
 }: {
   expr: string;
   metric: string;
@@ -141,11 +213,14 @@ function SeriesChart({
   title: string;
   tone: string;
   yMax?: number;
-  height: number;
+  /** 定值高度（副图）。与 `grow` 二选一 */
+  height?: number;
   range: RangeKey;
   onLayer: (layer: string | null) => void;
   unitFmt: (v: number) => string;
   secondary?: { expr: string; metric: string; labels: string; name: string };
+  /** 首图：高度由弹性布局给，吃掉页面剩余的竖向空间 */
+  grow?: boolean;
 }) {
   const rings = useLive((st) => st.rings);
   const mode = useTheme((t) => t.mode);
@@ -179,7 +254,7 @@ function SeriesChart({
   let data: ReturnType<typeof liveSingle>;
   let plotSeries: PlotSeries[] = liveSeries(hue);
   let bands: ReturnType<typeof bandFill> | undefined;
-  let legendEntries: { color: string; name: string; dash?: boolean }[] = [];
+  let legendEntries: LegendEntry[] = [];
   let tipNames: (string | null)[] = [metric];
 
   if (live || !bs) {
@@ -227,25 +302,29 @@ function SeriesChart({
   const axisMax = yMax ?? dataMax(data) * 1.15;
 
   return (
-    <div className={s.chartBlock} key={mode}>
-      <div className={s.chartTitle}>
-        <b>{title}</b>
-        <span>{latest !== undefined ? unitFmt(latest) : "—"}</span>
-      </div>
-      <Plot
-        data={data}
-        series={plotSeries}
-        bands={bands}
-        yMax={yMax}
-        height={height}
-        tone={tone}
-        cornerTR={axisMax > 0 ? unitFmt(axisMax) : undefined}
-        cornerBL={rangeOf(range).label}
-        cornerBR="0"
-        tip={{ names: tipNames, unitFmt }}
-      />
-      {legendEntries.length > 0 && <Legend entries={legendEntries} />}
-    </div>
+    <ChartFrame
+      key={mode}
+      title={title}
+      value={latest !== undefined ? unitFmt(latest) : "—"}
+      grow={grow}
+      height={height}
+      legend={legendEntries}
+    >
+      {(h) => (
+        <Plot
+          data={data}
+          series={plotSeries}
+          bands={bands}
+          yMax={yMax}
+          height={h}
+          tone={tone}
+          cornerTR={axisMax > 0 ? unitFmt(axisMax) : undefined}
+          cornerBL={rangeOf(range).label}
+          cornerBR="0"
+          tip={{ names: tipNames, unitFmt }}
+        />
+      )}
+    </ChartFrame>
   );
 }
 
@@ -274,6 +353,7 @@ function AggChart({
   range,
   onLayer,
   unitFmt,
+  grow,
 }: {
   /** match:自定义 live 环匹配(多标签序列按前缀分不开组时用);缺省按 metrics 前缀 */
   groups: readonly {
@@ -286,10 +366,13 @@ function AggChart({
   title: string;
   tone: string;
   yMax?: number;
-  height: number;
+  /** 定值高度（副图）。与 `grow` 二选一 */
+  height?: number;
   range: RangeKey;
   onLayer: (layer: string | null) => void;
   unitFmt: (v: number) => string;
+  /** 首图：高度由弹性布局给，吃掉页面剩余的竖向空间 */
+  grow?: boolean;
 }) {
   const rings = useLive((st) => st.rings);
   const mode = useTheme((t) => t.mode);
@@ -358,24 +441,28 @@ function AggChart({
   const axisMax = yMax ?? dmax * 1.15;
 
   return (
-    <div className={s.chartBlock} key={mode}>
-      <div className={s.chartTitle}>
-        <b>{title}</b>
-        <span>{unitFmt(latest)}</span>
-      </div>
-      <Plot
-        data={[xs, ...ys] as Parameters<typeof Plot>[0]["data"]}
-        series={plotSeries}
-        yMax={yMax}
-        height={height}
-        tone={tone}
-        cornerTR={axisMax > 0 ? unitFmt(axisMax) : undefined}
-        cornerBL={rangeOf(range).label}
-        cornerBR="0"
-        tip={{ names: perGroup.map((g) => g.name), unitFmt }}
-      />
-      <Legend entries={perGroup.map((g, i) => ({ color: colors[i] ?? hue, name: g.name }))} />
-    </div>
+    <ChartFrame
+      key={mode}
+      title={title}
+      value={unitFmt(latest)}
+      grow={grow}
+      height={height}
+      legend={perGroup.map((g, i) => ({ color: colors[i] ?? hue, name: g.name }))}
+    >
+      {(h) => (
+        <Plot
+          data={[xs, ...ys] as Parameters<typeof Plot>[0]["data"]}
+          series={plotSeries}
+          yMax={yMax}
+          height={h}
+          tone={tone}
+          cornerTR={axisMax > 0 ? unitFmt(axisMax) : undefined}
+          cornerBL={rangeOf(range).label}
+          cornerBR="0"
+          tip={{ names: perGroup.map((g) => g.name), unitFmt }}
+        />
+      )}
+    </ChartFrame>
   );
 }
 
@@ -413,8 +500,6 @@ function PsiChart({
 
 /* ================= CPU ================= */
 
-export type CpuView = "all" | "cores";
-
 /**
  * CPU 段。视图切换只换图表区（总体大图 ⇄ 逻辑处理器网格/热力图）,
  * 数字与静态事实不随之消失;切换器由页头渲染（靠近时间档）,状态在 PerfPage。
@@ -424,12 +509,18 @@ export function CpuSection({
   rangeSecs,
   view,
   onLayer,
-}: SectionProps & { rangeSecs: number; view: CpuView }) {
+}: SectionProps & { rangeSecs: number; view: PerfView }) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
   const info = useSystemInfo();
 
-  const cores = discovery.data?.members("cpu.core.usage", "core") ?? [];
+  // 与页头切换器上那个数出自同一处口径,两边不会差一个
+  const cores = liveMembers(
+    rings,
+    "cpu.core.usage",
+    "core",
+    discovery.data?.members("cpu.core.usage", "core") ?? [],
+  );
   const ringOf = (core: string): Ring | undefined =>
     rings.get(seriesKey("cpu.core.usage", `core=${core}`));
 
@@ -473,7 +564,7 @@ export function CpuSection({
 
   return (
     <>
-      {view === "all" || cores.length === 0 ? (
+      {view === "all" || cores.length < 2 ? (
         <SeriesChart
           expr="cpu.usage"
           metric="cpu.usage"
@@ -481,77 +572,137 @@ export function CpuSection({
           title="CPU · cpu.usage"
           tone="--cpu"
           yMax={100}
-          height={H_MAIN}
+          grow
           range={range}
           onLayer={onLayer}
           unitFmt={(v) => fmtPct(v / 100)}
         />
       ) : (
-        /* 与总体图同一副骨架(标题行 + H_MAIN 内容区),切换前后区块高度不变,
-           下方数字|静态事实不跳。格子高度适应容器,装不下才转热力图(CoresView) */
-        <div className={s.chartBlock}>
-          <div className={s.chartTitle}>
-            <b>CPU · cpu.core.usage</b>
-            <span>{cores.length} 逻辑处理器</span>
-          </div>
-          <CoresView cores={cores} ringOf={ringOf} height={H_MAIN} rangeSecs={rangeSecs} />
-        </div>
+        /* 与总体图同一个 grow 外框,切换前后区块高度不变,下方数字|静态事实不跳。
+           不给标题行也不给图例:每一格自己写着「核 N」与读数,一眼看得出是逐核,
+           再加两行字是白说。格子摊满容器,摊不下才转热力图 */
+        <ChartFrame grow noFrame>
+          {(h) => <CoresView cores={cores} ringOf={ringOf} height={h} rangeSecs={rangeSecs} />}
+        </ChartFrame>
       )}
 
       {/* 副图行:主图之外的第二层信息。视图切换(总体⇄逐核)不影响这里 */}
-      {(() => {
-        const kernelParts = (
-          [
-            ["cpu.system", "内核态"],
-            ["cpu.iowait", "IO 等待"],
-            ["cpu.irq", "中断"],
-            ["cpu.steal", "被偷走"],
-          ] as const
-        ).filter(([m]) => discovery.data?.has(m));
-        const hasPsi = discovery.data?.has("psi.cpu.some") ?? false;
-        if (kernelParts.length === 0 && !hasPsi) return null;
-        return (
-          <div className={s.subRow}>
-            {kernelParts.length > 0 && (
-              <AggChart
-                groups={kernelParts.map(([m, name]) => ({ name, metrics: [m], exprs: [m] }))}
-                title="CPU · 内核细分"
-                tone="--cpu"
-                height={H_SUB}
-                range={range}
-                onLayer={onLayer}
-                unitFmt={(v) => fmtPct(v / 100)}
-              />
-            )}
-            {hasPsi && (
-              <PsiChart
-                kind="cpu"
-                title="CPU · psi.cpu（压力）"
-                tone="--cpu"
-                range={range}
-                onLayer={onLayer}
-              />
-            )}
-          </div>
-        );
-      })()}
+      {discovery.data?.has("psi.cpu.some") && (
+        <div className={s.subRow}>
+          <PsiChart
+            kind="cpu"
+            title="CPU · psi.cpu（压力）"
+            tone="--cpu"
+            range={range}
+            onLayer={onLayer}
+          />
+        </div>
+      )}
 
       <StatFact stats={stats} facts={facts} />
     </>
   );
 }
 
-/* 逐核视图:格子尺寸是**写死的**(样稿密度),不随容器伸缩 */
-const CORE_GAP = 4;
-const CORE_CELL_W = 132; // 固定格宽
-const CORE_PLOT_H = 54; // 固定小图高(样稿值)
-const CORE_CELL_H = 74; // 标签 15 + 小图 54 + 边框内边距 5
+/*
+ * 网格类视图（逐核小图、成员格）的几何常数。格子**摊满**容器：
+ * 列数与行高由容器实测尺寸算出，这几个数是可行性的边界，不是格子的尺寸——
+ * 写死格宽格高的话，容器一变高就在下面留一大片白。
+ */
+const GRID_GAP = 4;
+/**
+ * 目标宽高比：列数在宽度允许的范围里挑一个最接近它的。
+ *
+ * 2.4 偏扁了——22 个接口在 1920 上只排 6 列、格子是 1.82，16 核排 4 列、
+ * 格子 2.74。任务管理器的逐核格子大致在 1.4 左右。取 1.5 之后同样的容器：
+ * 22 个 → 8 列（1.17）、20 核 → 7 列（1.15）、16 核 → 6 列（1.35）。
+ */
+const GRID_ASPECT = 1.5;
+/**
+ * 宽高比的下限：比这更窄要重罚。
+ *
+ * 只把目标调低会在**设备少、容器高**时选出比高还窄的格子（4 个设备时算出过
+ * 0.67）。这些小图的横轴是时间，压窄等于直接砍掉能看到的时间窗口——
+ * 同样偏离目标，偏宽只是浪费一点面积，偏窄是丢信息，两者代价不对等。
+ * 所以罚则是单边的：宁可偏宽也不偏窄。
+ */
+const GRID_MIN_ASPECT = 1;
+/** 越过下限之后每单位的罚分。取 4 使它足以压过 [`GRID_RAGGED`] 的末行惩罚 */
+const GRID_NARROW_PENALTY = 4;
+/**
+ * 末行缺几格的代价，按「缺掉的格数占一行的比例」计。
+ * 只看宽高比的话，4 块盘会被摆成 3 列 ×2 行——上面一排三个、下面孤零零一个，
+ * 而 2×2 明明齐整。缺 2/3 行比缺 2/12 行难看得多，所以按比例而不是按个数罚。
+ */
+const GRID_RAGGED = 1.5;
+
+/** 逐核格子里除小图外的那一截：上内边距 2 + 标签盒 15 + 上下边框 2（见 `.core`） */
+const CORE_CHROME_H = 19;
+/** 逐核小图再矮就看不出波形，此时这块面积装不下一核一图 */
+const CORE_MIN_PLOT_H = 26;
+/** 逐核格子最窄多少像素还画得出波形 */
+const CORE_MIN_W = 116;
+/** 成员格的边框占掉的高度（`.cell` 的上下各一道），小图铺满其余部分 */
+const CELL_BORDER_H = 2;
+/** 成员格的下限尺寸：与样稿一致，摊不下时就退回它并让区域内滚动 */
+const CELL_MIN_W = 132;
+const CELL_MIN_H = 82;
+
+interface GridLayout {
+  cols: number;
+  cellH: number;
+}
 
 /**
- * 逐核视图:容器高度固定(与总体图等高),**格子反过来适应容器**——
- * 行数由高度定(每行给 mockup 密度的一格),列数摊开全部核;
- * 摊出来的格子太窄(< CORE_MIN_W)说明这块面积装不下逐核小图,转热力图。
- * 「超多核」不再是写死的 32,是几何上装不装得下。
+ * 在宽度允许的列数里挑一种摆法：行高由容器高度整除得出，格子摊满这块面积。
+ * 挑的是「宽高比接近 `GRID_ASPECT`、末行又不太空」的那一种——纯按宽度铺满会得到
+ * 又高又窄的格子，波形在里面看不出起伏。一种都摆不下（行高低于下限）时返回 `null`。
+ */
+function gridLayout(
+  n: number,
+  w: number,
+  h: number,
+  minCellW: number,
+  minCellH: number,
+): GridLayout | null {
+  const maxCols = Math.max(1, Math.min(n, Math.floor((w + GRID_GAP) / (minCellW + GRID_GAP))));
+  let best: (GridLayout & { score: number }) | null = null;
+  for (let cols = 1; cols <= maxCols; cols++) {
+    const rows = Math.ceil(n / cols);
+    const cellW = (w - GRID_GAP * (cols - 1)) / cols;
+    const cellH = Math.floor((h - GRID_GAP * (rows - 1)) / rows);
+    if (cellH < minCellH) continue;
+    const aspect = cellW / cellH;
+    const narrow = aspect < GRID_MIN_ASPECT ? (GRID_MIN_ASPECT - aspect) * GRID_NARROW_PENALTY : 0;
+    const score =
+      Math.abs(aspect - GRID_ASPECT) + narrow + (GRID_RAGGED * (cols * rows - n)) / cols;
+    if (best === null || score < best.score) best = { cols, cellH, score };
+  }
+  return best === null ? null : { cols: best.cols, cellH: best.cellH };
+}
+
+/** 容器宽度：网格的列数与行高都要先知道它，而它由弹性布局给，只能量。 */
+function useBoxWidth(ref: React.RefObject<HTMLElement | null>): number {
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    const ro = new ResizeObserver(() => setW(host.clientWidth));
+    ro.observe(host);
+    setW(host.clientWidth);
+    return () => ro.disconnect();
+  }, [ref]);
+  return w;
+}
+
+/**
+ * 逐核视图（08 §6.6）：容器高度由外层弹性布局给定，**格子反过来适应容器**——
+ * 列数由宽度与目标宽高比定，行高由容器高度整除，摊满整块面积。
+ * 摊不下（核太多，行高低于下限）时转热力图；「超多核」不是写死的 32，
+ * 是几何上装不装得下。
+ *
+ * 逐核与成员格长得像，但不是一回事，不合并：核是一颗 CPU 内部的构成，
+ * 成员是若干同类设备，后者每一格都能点进去看自己的详情，前者不能。
  */
 function CoresView({
   cores,
@@ -565,72 +716,53 @@ function CoresView({
   rangeSecs: number;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [w, setW] = useState(0);
+  const w = useBoxWidth(hostRef);
+  const mode = useTheme((t) => t.mode);
+  void mode; // 主题切换时 cssVar 解析值变化，线色要跟着重算
 
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const ro = new ResizeObserver(() => setW(host.clientWidth));
-    ro.observe(host);
-    setW(host.clientWidth);
-    return () => ro.disconnect();
-  }, []);
-
-  // 格子固定 132×74:一行放几个 = 容器宽度整除,行数 = 核数除上去;
-  // 固定高度的容器里摆不下这些行 → 转热力图。剩余空间留白,不拉伸格子。
-  let grid: { cols: number } | null = null;
-  if (w > 0) {
-    const cols = Math.max(
-      1,
-      Math.min(cores.length, Math.floor((w + CORE_GAP) / (CORE_CELL_W + CORE_GAP))),
-    );
-    const rows = Math.ceil(cores.length / cols);
-    if (rows * (CORE_CELL_H + CORE_GAP) - CORE_GAP <= height) grid = { cols };
-  }
+  const ready = w > 0 && cores.length > 0;
+  const grid = ready
+    ? gridLayout(cores.length, w, height, CORE_MIN_W, CORE_CHROME_H + CORE_MIN_PLOT_H)
+    : null;
 
   return (
-    <>
-      <div ref={hostRef} className={s.coreArea} style={{ height }}>
-        {w === 0 ? null : grid ? (
-          <div
-            className={s.cores}
-            style={{ gridTemplateColumns: `repeat(${grid.cols}, ${CORE_CELL_W}px)` }}
-          >
-            {cores.map((core) => {
-              const ring = ringOf(core);
-              const latest = ring?.v[ring.v.length - 1];
-              return (
-                <div key={core} className={s.core}>
-                  <div className={s.coreLabel}>
-                    <span>核 {core}</span>
-                    <span>{typeof latest === "number" ? fmtPct(latest / 100) : "—"}</span>
-                  </div>
-                  <Plot
-                    data={liveSingle(ring, Math.min(rangeSecs, 180))}
-                    series={liveSeries(cssVar("--cpu"))}
-                    yMax={100}
-                    height={CORE_PLOT_H}
-                    tone="--cpu"
-                    noCursor
-                  />
+    <div ref={hostRef} className={s.coreArea} style={{ height }}>
+      {!ready ? null : grid ? (
+        <div
+          className={s.cores}
+          style={{
+            gridTemplateColumns: `repeat(${grid.cols}, minmax(0, 1fr))`,
+            gridAutoRows: `${grid.cellH}px`,
+            gap: GRID_GAP,
+          }}
+        >
+          {cores.map((core) => {
+            const ring = ringOf(core);
+            const latest = ring?.v[ring.v.length - 1];
+            return (
+              <div key={core} className={s.core}>
+                <div className={s.coreLabel}>
+                  <span className={s.coreName}>核 {core}</span>
+                  <span className={s.coreVal}>
+                    {typeof latest === "number" ? fmtPct(latest / 100) : "—"}
+                  </span>
                 </div>
-              );
-            })}
-          </div>
-        ) : (
-          <CoreHeatmap cores={cores} ringOf={ringOf} maxHeight={height} />
-        )}
-      </div>
-      {/* 与总体图的图例行同高,保证两种视图区块高度逐像素一致 */}
-      <Legend
-        entries={[
-          {
-            color: cssVar("--cpu"),
-            name: grid ? "cpu.core.usage · 每核一图" : "cpu.core.usage · 色深 = 当前占用",
-          },
-        ]}
-      />
-    </>
+                <Plot
+                  data={liveSingle(ring, Math.min(rangeSecs, 180))}
+                  series={liveSeries(cssVar("--cpu"))}
+                  yMax={100}
+                  height={grid.cellH - CORE_CHROME_H}
+                  tone="--cpu"
+                  noCursor
+                />
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <CoreHeatmap cores={cores} ringOf={ringOf} maxHeight={height} />
+      )}
+    </div>
   );
 }
 
@@ -801,11 +933,23 @@ export function MemSection({ range, onLayer }: SectionProps) {
     });
   for (const [metric, label] of [
     ["mem.available", "可用"],
-    ["mem.cached", "缓存"],
+    ["mem.cached", "已缓存"],
     ["mem.swap_used", "交换已用"],
   ] as const) {
     const v = latestOf(rings, seriesKey(metric, ""));
     if (v !== null) stats.push({ k: label, v: fmtBytes(v) });
+  }
+  const swapTotalNow = latestOf(rings, seriesKey("mem.swap_total", ""));
+  if (swapTotalNow !== null) {
+    const swapUsedNow = latestOf(rings, seriesKey("mem.swap_used", ""));
+    stats.push({
+      k: "交换总量",
+      v: fmtBytes(swapTotalNow),
+      sub:
+        swapUsedNow !== null && swapTotalNow > 0
+          ? `（${fmtPct(swapUsedNow / swapTotalNow)}）`
+          : undefined,
+    });
   }
   for (const [metric, label] of [
     ["psi.memory.some", "内存停滞"],
@@ -833,7 +977,7 @@ export function MemSection({ range, onLayer }: SectionProps) {
         title="内存 · mem.used"
         tone="--mem"
         yMax={total ?? undefined}
-        height={H_MAIN}
+        grow
         range={range}
         onLayer={onLayer}
         unitFmt={fmtBytes}
@@ -879,63 +1023,126 @@ export function MemSection({ range, onLayer }: SectionProps) {
 
 /* ================= 成员格 ================= */
 
+/*
+ * 成员格要的资源描述。与 `model.ts` 的 `RESOURCES` 同源，但那份是数组，
+ * 取出来要处理「找不到」的分支；这里三条是本文件自己渲染的三段，写成常量更直白。
+ */
+const DISK_RESOURCE: ResourceDef = {
+  id: "disk",
+  label: "磁盘",
+  tone: "--disk",
+  probes: ["disk."],
+  memberLabel: "dev",
+  memberMetric: "disk.util",
+};
+
+const NET_RESOURCE: ResourceDef = {
+  id: "net",
+  label: "网络",
+  tone: "--net",
+  probes: ["net."],
+  memberLabel: "iface",
+  memberMetric: "net.tx_bytes",
+};
+
+const GPU_RESOURCE: ResourceDef = {
+  id: "gpu",
+  label: "GPU",
+  tone: "--gpu",
+  probes: ["gpu."],
+  memberLabel: "gpu",
+  memberMetric: "gpu.usage",
+};
+
+/**
+ * 成员格（08 §6.4）：一格一设备——迷你走势 + 名字 + 当前值 + 6% 资源色底板，
+ * 点进去是该设备的详情页。它同时是「总体 ⇄ 逐设备」切换器的第二档，
+ * 高度由外层弹性布局给，与总体图等高。
+ *
+ * 格子摊满这块面积；设备多到摊不下就退回样稿尺寸、区域内部滚动——
+ * 滚动发生在格子网格里面，区块本身的高度不变，切换前后下方内容不跳。
+ */
 function MemberGrid({
   resource,
   members,
+  height,
   cellValue,
   tagOf,
 }: {
   resource: ResourceDef;
   members: readonly string[];
+  height: number;
   cellValue: (m: string) => { big: string; small?: string };
   tagOf?: (m: string) => string | null;
 }) {
   const rings = useLive((st) => st.rings);
   const navigate = useNavigate();
+  const hostRef = useRef<HTMLDivElement>(null);
+  const w = useBoxWidth(hostRef);
+  const mode = useTheme((t) => t.mode);
+  void mode; // 主题切换时 cssVar 解析值变化，线色要跟着重算
   const hue = cssVar(resource.tone);
   const metric = resource.memberMetric ?? "";
   const isPct = metric === "disk.util" || metric === "gpu.usage";
 
+  const ready = w > 0 && members.length > 0;
+  const fitted = ready ? gridLayout(members.length, w, height, CELL_MIN_W, CELL_MIN_H) : null;
+  const cols =
+    fitted?.cols ??
+    Math.max(1, Math.min(members.length, Math.floor((w + GRID_GAP) / (CELL_MIN_W + GRID_GAP))));
+  const cellH = fitted?.cellH ?? CELL_MIN_H;
+
   return (
-    <div className={s.members}>
-      {members.map((m) => {
-        const ring = rings.get(seriesKey(metric, `${resource.memberLabel}=${m}`));
-        const val = cellValue(m);
-        const tag = tagOf?.(m);
-        return (
-          <button
-            key={m}
-            type="button"
-            className={s.cell}
-            style={{ "--cell-tone": `var(${resource.tone})` } as React.CSSProperties}
-            onClick={() => navigate(`/performance/${resource.id}/${encodeURIComponent(m)}`)}
-          >
-            <div className={s.cellPlot}>
-              <Plot
-                data={liveSingle(ring, 90)}
-                series={[{ stroke: hue, width: 1.5, fill: withAlpha(hue, 0.14) }]}
-                yMax={isPct ? 100 : undefined}
-                height={80}
-                tone={resource.tone}
-                noCursor
-              />
-            </div>
-            <span className={s.cellName}>{m}</span>
-            {tag && <span className={s.cellTag}>{tag}</span>}
-            <span className={s.cellVal}>
-              {val.big}
-              {val.small && <small className={s.cellSub}>{val.small}</small>}
-            </span>
-          </button>
-        );
-      })}
+    <div
+      ref={hostRef}
+      className={cx(s.members, fitted === null && s.membersScroll)}
+      style={{
+        height,
+        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+        gridAutoRows: `${cellH}px`,
+        gap: GRID_GAP,
+      }}
+    >
+      {!ready
+        ? null
+        : members.map((m) => {
+            const ring = rings.get(seriesKey(metric, `${resource.memberLabel}=${m}`));
+            const val = cellValue(m);
+            const tag = tagOf?.(m);
+            return (
+              <button
+                key={m}
+                type="button"
+                className={s.cell}
+                style={{ "--tone": `var(${resource.tone})` } as React.CSSProperties}
+                onClick={() => navigate(`/performance/${resource.id}/${encodeURIComponent(m)}`)}
+              >
+                <div className={s.cellPlot}>
+                  <Plot
+                    data={liveSingle(ring, 90)}
+                    series={[{ stroke: hue, width: 1.5, fill: withAlpha(hue, 0.14) }]}
+                    yMax={isPct ? 100 : undefined}
+                    height={cellH - CELL_BORDER_H}
+                    tone={resource.tone}
+                    noCursor
+                  />
+                </div>
+                <span className={s.cellName}>{m}</span>
+                {tag && <span className={s.cellTag}>{tag}</span>}
+                <span className={s.cellVal}>
+                  {val.big}
+                  {val.small && <small className={s.cellSub}>{val.small}</small>}
+                </span>
+              </button>
+            );
+          })}
     </div>
   );
 }
 
 /* ================= 磁盘 ================= */
 
-export function DiskSection({ range, onLayer }: SectionProps) {
+export function DiskSection({ range, view, onLayer }: SectionProps & { view: PerfView }) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
   const info = useSystemInfo();
@@ -946,30 +1153,60 @@ export function DiskSection({ range, onLayer }: SectionProps) {
     discovery.data?.members("disk.util", "dev") ?? [],
   );
   const hasRates = discovery.data?.has("disk.") ?? false;
+  const split = view === "each" && devs.length > 0;
 
   return (
     <>
-      {hasRates && (
-        <AggChart
-          groups={[
-            {
-              name: "读",
-              metrics: ["disk.read_bytes"],
-              exprs: devs.map((d) => `disk.read_bytes{dev=${d}}`),
-            },
-            {
-              name: "写",
-              metrics: ["disk.write_bytes"],
-              exprs: devs.map((d) => `disk.write_bytes{dev=${d}}`),
-            },
-          ]}
-          title="磁盘 · 吞吐"
-          tone="--disk"
-          height={H_MAIN}
-          range={range}
-          onLayer={onLayer}
-          unitFmt={(v) => `${fmtBytes(v)}/s`}
-        />
+      {split ? (
+        /* 与总体图同一个 grow 外框,切换前后区块高度不变。不给标题行也不给图例:
+           每一格自己写着设备名、读数与介质角标,一眼看得出是逐设备 */
+        <ChartFrame grow noFrame>
+          {(h) => (
+            <MemberGrid
+              resource={DISK_RESOURCE}
+              members={devs}
+              height={h}
+              cellValue={(d) => {
+                const util = latestOf(rings, seriesKey("disk.util", `dev=${d}`));
+                const rd = latestOf(rings, seriesKey("disk.read_bytes", `dev=${d}`)) ?? 0;
+                const wr = latestOf(rings, seriesKey("disk.write_bytes", `dev=${d}`)) ?? 0;
+                return {
+                  big: util !== null ? fmtPct(util / 100) : "—",
+                  small: `${fmtBytes(rd + wr)}/s`,
+                };
+              }}
+              tagOf={(d) => {
+                const disk = (info.data?.disks ?? []).find((x) => x.name === d);
+                if (!disk) return null;
+                // §5.5:rotational → HDD;名字 nvme 开头 → NVMe;其余 SSD
+                return disk.rotational ? "HDD" : d.startsWith("nvme") ? "NVMe" : "SSD";
+              }}
+            />
+          )}
+        </ChartFrame>
+      ) : (
+        hasRates && (
+          <AggChart
+            groups={[
+              {
+                name: "读",
+                metrics: ["disk.read_bytes"],
+                exprs: devs.map((d) => `disk.read_bytes{dev=${d}}`),
+              },
+              {
+                name: "写",
+                metrics: ["disk.write_bytes"],
+                exprs: devs.map((d) => `disk.write_bytes{dev=${d}}`),
+              },
+            ]}
+            title="磁盘 · 吞吐"
+            tone="--disk"
+            grow
+            range={range}
+            onLayer={onLayer}
+            unitFmt={(v) => `${fmtBytes(v)}/s`}
+          />
+        )
       )}
       {discovery.data?.has("psi.io.some") && (
         <div className={s.subRow}>
@@ -983,94 +1220,85 @@ export function DiskSection({ range, onLayer }: SectionProps) {
         </div>
       )}
 
-      {devs.length > 0 && (
-        <>
-          {(() => {
-            // 数字区按 §6.2 聚合:饱和度取最大并说明是谁,速率与 IOPS 求和,
-            // await 是每次 IO 的平均等待——跨盘合计没有物理意义,宁可标「不可合计」
-            const stats: NumItem[] = [];
-            let busiest: { d: string; v: number } | null = null;
-            let iops: number | null = null;
-            for (const d of devs) {
-              const u = latestOf(rings, seriesKey("disk.util", `dev=${d}`));
-              if (u !== null && (busiest === null || u > busiest.v)) busiest = { d, v: u };
-              const io = latestOf(rings, seriesKey("disk.iops", `dev=${d}`));
-              if (io !== null) iops = (iops ?? 0) + io;
-            }
-            if (busiest !== null)
-              stats.push({
-                k: "最忙",
-                v: fmtPct(busiest.v / 100),
-                sub: devs.length > 1 ? busiest.d : undefined,
-              });
-            const rd = latestSum(rings, "disk.read_bytes");
-            const wr = latestSum(rings, "disk.write_bytes");
-            if (rd !== null) stats.push({ k: "合计读取", v: `${fmtBytes(rd)}/s` });
-            if (wr !== null) stats.push({ k: "合计写入", v: `${fmtBytes(wr)}/s` });
-            if (iops !== null) stats.push({ k: "合计 IOPS", v: String(Math.round(iops)) });
-            stats.push({ k: "平均响应", v: "—", sub: "不可合计" });
-            const psi = latestOf(rings, seriesKey("psi.io.some", ""));
-            if (psi !== null) stats.push({ k: "IO 停滞", v: fmtPct(psi / 100) });
+      {devs.length > 0 &&
+        (() => {
+          // 数字区按 §6.2 聚合:饱和度取最大并说明是谁,速率与 IOPS 求和。
+          // await 是每次 IO 的平均等待,跨盘求和没有物理意义,取最慢的那块并指名道姓
+          const stats: NumItem[] = [];
+          let busiest: { d: string; v: number } | null = null;
+          let slowest: { d: string; v: number } | null = null;
+          let iops: number | null = null;
+          for (const d of devs) {
+            const u = latestOf(rings, seriesKey("disk.util", `dev=${d}`));
+            if (u !== null && (busiest === null || u > busiest.v)) busiest = { d, v: u };
+            const aw = latestOf(rings, seriesKey("disk.await", `dev=${d}`));
+            if (aw !== null && (slowest === null || aw > slowest.v)) slowest = { d, v: aw };
+            const io = latestOf(rings, seriesKey("disk.iops", `dev=${d}`));
+            if (io !== null) iops = (iops ?? 0) + io;
+          }
+          if (busiest !== null)
+            stats.push({
+              k: "最忙",
+              v: fmtPct(busiest.v / 100),
+              sub: devs.length > 1 ? busiest.d : undefined,
+            });
+          const rd = latestSum(rings, "disk.read_bytes");
+          const wr = latestSum(rings, "disk.write_bytes");
+          if (rd !== null) stats.push({ k: "合计读取", v: `${fmtBytes(rd)}/s` });
+          if (wr !== null) stats.push({ k: "合计写入", v: `${fmtBytes(wr)}/s` });
+          if (iops !== null) stats.push({ k: "合计 IOPS", v: String(Math.round(iops)) });
+          if (slowest !== null)
+            stats.push({
+              k: devs.length > 1 ? "最慢响应" : "平均响应",
+              v: `${slowest.v.toFixed(1)} ms`,
+              sub: devs.length > 1 ? slowest.d : undefined,
+            });
+          const psi = latestOf(rings, seriesKey("psi.io.some", ""));
+          if (psi !== null) stats.push({ k: "IO 停滞", v: fmtPct(psi / 100) });
 
-            const facts: NumItem[] = [];
-            const disks = info.data?.disks ?? [];
-            if (disks.length > 0) {
-              facts.push({ k: "设备数", v: String(disks.length) });
-              facts.push({
-                k: "总容量",
-                v: fmtBytes(disks.reduce((a, x) => a + x.size_bytes, 0)),
-              });
-              const media = new Map<string, number>();
-              for (const x of disks) {
-                const m = x.rotational ? "HDD" : x.name.startsWith("nvme") ? "NVMe" : "SSD";
-                media.set(m, (media.get(m) ?? 0) + 1);
-              }
-              facts.push({
-                k: "介质",
-                v: [...media.entries()].map(([m, n]) => `${m} ×${n}`).join(" · "),
-              });
-              const bad = disks.filter((x) => x.smart_healthy === false).length;
-              const known = disks.filter(
-                (x) => x.smart_healthy !== null && x.smart_healthy !== undefined,
-              ).length;
-              facts.push({
-                k: "SMART",
-                v: known === 0 ? "未检测" : bad === 0 ? "全部正常" : `${bad} 块异常`,
-              });
-            }
-            const fsCount = (info.data?.filesystems ?? []).length;
-            if (fsCount > 0) facts.push({ k: "挂载点", v: String(fsCount) });
-            return <StatFact stats={stats} facts={facts} />;
-          })()}
-          <h2 className={s.sectionTitle}>块设备</h2>
-          <MemberGrid
-            resource={{
-              id: "disk",
-              label: "磁盘",
-              tone: "--disk",
-              probes: ["disk."],
-              memberLabel: "dev",
-              memberMetric: "disk.util",
-            }}
-            members={devs}
-            cellValue={(d) => {
-              const util = latestOf(rings, seriesKey("disk.util", `dev=${d}`));
-              const rd = latestOf(rings, seriesKey("disk.read_bytes", `dev=${d}`)) ?? 0;
-              const wr = latestOf(rings, seriesKey("disk.write_bytes", `dev=${d}`)) ?? 0;
-              return {
-                big: util !== null ? fmtPct(util / 100) : "—",
-                small: `${fmtBytes(rd + wr)}/s`,
-              };
-            }}
-            tagOf={(d) => {
-              const disk = (info.data?.disks ?? []).find((x) => x.name === d);
-              if (!disk) return null;
-              // §5.5:rotational → HDD;名字 nvme 开头 → NVMe;其余 SSD
-              return disk.rotational ? "HDD" : d.startsWith("nvme") ? "NVMe" : "SSD";
-            }}
-          />
-        </>
-      )}
+          const facts: NumItem[] = [];
+          const disks = info.data?.disks ?? [];
+          const media = (x: (typeof disks)[number]) =>
+            x.rotational ? "HDD" : x.name.startsWith("nvme") ? "NVMe" : "SSD";
+          const one = disks.length === 1 ? disks[0] : undefined;
+          if (one) {
+            // 只有一块盘时,「合计」就是这一块,直接把这块盘的静态事实摊开
+            if (one.model) facts.push({ k: "型号", v: one.model });
+            facts.push({ k: "容量", v: fmtBytes(one.size_bytes) });
+            facts.push({ k: "介质", v: media(one) });
+            if (one.removable) facts.push({ k: "可移动", v: "是" });
+            if (one.read_only) facts.push({ k: "只读", v: "是" });
+          } else if (disks.length > 0) {
+            facts.push({ k: "设备数", v: String(disks.length) });
+            facts.push({
+              k: "总容量",
+              v: fmtBytes(disks.reduce((a, x) => a + x.size_bytes, 0)),
+            });
+            const kinds = new Map<string, number>();
+            for (const x of disks) kinds.set(media(x), (kinds.get(media(x)) ?? 0) + 1);
+            facts.push({
+              k: "介质",
+              v: [...kinds.entries()].map(([m, n]) => `${m} ×${n}`).join(" · "),
+            });
+            const removable = disks.filter((x) => x.removable).length;
+            if (removable > 0) facts.push({ k: "可移动", v: `${removable} 块` });
+            const readOnly = disks.filter((x) => x.read_only).length;
+            if (readOnly > 0) facts.push({ k: "只读", v: `${readOnly} 块` });
+          }
+          if (disks.length > 0) {
+            const bad = disks.filter((x) => x.smart_healthy === false).length;
+            const known = disks.filter(
+              (x) => x.smart_healthy !== null && x.smart_healthy !== undefined,
+            ).length;
+            facts.push({
+              k: "SMART",
+              v: known === 0 ? "未检测" : bad === 0 ? "全部正常" : `${bad} 块异常`,
+            });
+          }
+          const fsCount = (info.data?.filesystems ?? []).length;
+          if (fsCount > 0) facts.push({ k: "挂载点", v: String(fsCount) });
+          return <StatFact stats={stats} facts={facts} />;
+        })()}
 
       <MountTable
         filesystems={info.data?.filesystems ?? []}
@@ -1084,7 +1312,7 @@ export function DiskSection({ range, onLayer }: SectionProps) {
 
 /* ================= 网络 ================= */
 
-export function NetSection({ range, onLayer }: SectionProps) {
+export function NetSection({ range, view, onLayer }: SectionProps & { view: PerfView }) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
   const info = useSystemInfo();
@@ -1103,29 +1331,61 @@ export function NetSection({ range, onLayer }: SectionProps) {
     return false;
   };
   const ifaces = [...all].sort((a, b) => Number(hasTraffic(b)) - Number(hasTraffic(a)));
+  const split = view === "each" && ifaces.length > 0;
 
   return (
     <>
-      <AggChart
-        groups={[
-          {
-            name: "接收",
-            metrics: ["net.rx_bytes"],
-            exprs: all.map((i) => `net.rx_bytes{iface=${i}}`),
-          },
-          {
-            name: "发送",
-            metrics: ["net.tx_bytes"],
-            exprs: all.map((i) => `net.tx_bytes{iface=${i}}`),
-          },
-        ]}
-        title="网络 · 吞吐"
-        tone="--net"
-        height={H_MAIN}
-        range={range}
-        onLayer={onLayer}
-        unitFmt={fmtRateBits}
-      />
+      {split ? (
+        /* 与总体图同一个 grow 外框,切换前后区块高度不变。不给标题行也不给图例:
+           每一格自己写着设备名与读数,一眼看得出是逐设备 */
+        <ChartFrame grow noFrame>
+          {(h) => (
+            <MemberGrid
+              resource={NET_RESOURCE}
+              members={ifaces}
+              height={h}
+              cellValue={(i) => {
+                const rx = latestOf(rings, seriesKey("net.rx_bytes", `iface=${i}`)) ?? 0;
+                const tx = latestOf(rings, seriesKey("net.tx_bytes", `iface=${i}`)) ?? 0;
+                const errs = latestOf(rings, seriesKey("net.errors", `iface=${i}`));
+                return {
+                  big: fmtRateBits(rx + tx),
+                  small: errs && errs >= 1 ? `错误 ${Math.round(errs)}/s` : undefined,
+                };
+              }}
+              tagOf={(i) => {
+                const n = (info.data?.networks ?? []).find((x) => x.name === i);
+                return n?.speed_mbps
+                  ? n.speed_mbps >= 10_000
+                    ? "10G"
+                    : `${Math.round(n.speed_mbps / 1000)}G`
+                  : null;
+              }}
+            />
+          )}
+        </ChartFrame>
+      ) : (
+        <AggChart
+          groups={[
+            {
+              name: "接收",
+              metrics: ["net.rx_bytes"],
+              exprs: all.map((i) => `net.rx_bytes{iface=${i}}`),
+            },
+            {
+              name: "发送",
+              metrics: ["net.tx_bytes"],
+              exprs: all.map((i) => `net.tx_bytes{iface=${i}}`),
+            },
+          ]}
+          title="网络 · 吞吐"
+          tone="--net"
+          grow
+          range={range}
+          onLayer={onLayer}
+          unitFmt={fmtRateBits}
+        />
+      )}
       {(() => {
         const stats: NumItem[] = [
           { k: "合计接收", v: fmtRateBits(latestSum(rings, "net.rx_bytes") ?? 0) },
@@ -1136,61 +1396,50 @@ export function NetSection({ range, onLayer }: SectionProps) {
 
         const facts: NumItem[] = [];
         const nets = info.data?.networks ?? [];
-        facts.push({ k: "接口数", v: String(all.length) });
-        if (nets.length > 0) {
-          const up = nets.filter((n) => n.carrier);
-          facts.push({ k: "有载波", v: String(up.length) });
-          const speeds = new Map<string, number>();
-          for (const n of up) {
-            if (!n.speed_mbps) continue;
-            const label =
-              n.speed_mbps >= 1000 ? `${Math.round(n.speed_mbps / 1000)}G` : `${n.speed_mbps}M`;
-            speeds.set(label, (speeds.get(label) ?? 0) + 1);
+        const one = nets.length === 1 ? nets[0] : undefined;
+        if (one) {
+          // 只有一个接口时,「合计」就是这一个,直接把它的静态事实摊开
+          facts.push({ k: "接口", v: one.name });
+          facts.push({ k: "载波", v: one.carrier ? "已连接" : "无载波" });
+          if (one.speed_mbps) facts.push({ k: "速率", v: `${one.speed_mbps} Mb/s` });
+          if (one.mac) facts.push({ k: "MAC", v: one.mac });
+          facts.push({ k: "MTU", v: String(one.mtu) });
+          if (one.driver) facts.push({ k: "驱动", v: one.driver });
+        } else {
+          facts.push({ k: "接口数", v: String(all.length) });
+          if (nets.length > 0) {
+            const up = nets.filter((n) => n.carrier);
+            facts.push({ k: "有载波", v: String(up.length) });
+            const speeds = new Map<string, number>();
+            for (const n of up) {
+              if (!n.speed_mbps) continue;
+              const label =
+                n.speed_mbps >= 1000 ? `${Math.round(n.speed_mbps / 1000)}G` : `${n.speed_mbps}M`;
+              speeds.set(label, (speeds.get(label) ?? 0) + 1);
+            }
+            if (speeds.size > 0)
+              facts.push({
+                k: "链路",
+                v: [...speeds.entries()].map(([sp, n]) => `${sp} ×${n}`).join(" · "),
+              });
+            const mtus = [...new Set(up.map((n) => n.mtu))];
+            if (mtus.length > 0)
+              facts.push({ k: "MTU", v: mtus.length === 1 ? String(mtus[0]) : mtus.join(" / ") });
+            // 驱动读不到的（虚拟接口）不占位置,只汇总读得到的那些
+            const drivers = new Map<string, number>();
+            for (const n of nets) {
+              if (!n.driver) continue;
+              drivers.set(n.driver, (drivers.get(n.driver) ?? 0) + 1);
+            }
+            if (drivers.size > 0)
+              facts.push({
+                k: "驱动",
+                v: [...drivers.entries()].map(([d, n]) => (n > 1 ? `${d} ×${n}` : d)).join(" · "),
+              });
           }
-          if (speeds.size > 0)
-            facts.push({
-              k: "链路",
-              v: [...speeds.entries()].map(([sp, n]) => `${sp} ×${n}`).join(" · "),
-            });
-          const mtus = [...new Set(up.map((n) => n.mtu))];
-          if (mtus.length > 0)
-            facts.push({ k: "MTU", v: mtus.length === 1 ? String(mtus[0]) : mtus.join(" / ") });
         }
         return <StatFact stats={stats} facts={facts} />;
       })()}
-      {ifaces.length > 0 && (
-        <>
-          <h2 className={s.sectionTitle}>接口</h2>
-          <MemberGrid
-            resource={{
-              id: "net",
-              label: "网络",
-              tone: "--net",
-              probes: ["net."],
-              memberLabel: "iface",
-              memberMetric: "net.tx_bytes",
-            }}
-            members={ifaces}
-            cellValue={(i) => {
-              const rx = latestOf(rings, seriesKey("net.rx_bytes", `iface=${i}`)) ?? 0;
-              const tx = latestOf(rings, seriesKey("net.tx_bytes", `iface=${i}`)) ?? 0;
-              const errs = latestOf(rings, seriesKey("net.errors", `iface=${i}`));
-              return {
-                big: fmtRateBits(rx + tx),
-                small: errs && errs >= 1 ? `错误 ${Math.round(errs)}/s` : undefined,
-              };
-            }}
-            tagOf={(i) => {
-              const n = (info.data?.networks ?? []).find((x) => x.name === i);
-              return n?.speed_mbps
-                ? n.speed_mbps >= 10_000
-                  ? "10G"
-                  : `${Math.round(n.speed_mbps / 1000)}G`
-                : null;
-            }}
-          />
-        </>
-      )}
     </>
   );
 }
@@ -1251,7 +1500,7 @@ function GpuComposition({ gpus }: { gpus: readonly string[] }) {
   );
 }
 
-export function GpuSection({ range, onLayer }: SectionProps) {
+export function GpuSection({ range, view, onLayer }: SectionProps & { view: PerfView }) {
   const rings = useLive((st) => st.rings);
   const discovery = useDiscovery();
   const info = useSystemInfo();
@@ -1262,10 +1511,31 @@ export function GpuSection({ range, onLayer }: SectionProps) {
     discovery.data?.members("gpu.usage", "gpu") ?? [],
   );
   const only = gpus.length === 1 ? gpus[0] : undefined;
+  const split = view === "each" && gpus.length > 0;
 
   return (
     <>
-      {only !== undefined ? (
+      {split ? (
+        /* 与总体图同一个 grow 外框,切换前后区块高度不变。不给标题行也不给图例:
+           每一格自己写着设备名与读数,一眼看得出是逐设备 */
+        <ChartFrame grow noFrame>
+          {(h) => (
+            <MemberGrid
+              resource={GPU_RESOURCE}
+              members={gpus}
+              height={h}
+              cellValue={(g) => {
+                const u = latestOf(rings, seriesKey("gpu.usage", `gpu=${g}`));
+                const mu = latestOf(rings, seriesKey("gpu.mem_used", `gpu=${g}`));
+                return {
+                  big: u !== null ? fmtPct(u / 100) : "—",
+                  small: mu !== null ? fmtBytes(mu) : undefined,
+                };
+              }}
+            />
+          )}
+        </ChartFrame>
+      ) : only !== undefined ? (
         <SeriesChart
           expr={`gpu.usage{gpu=${only}}`}
           metric="gpu.usage"
@@ -1273,7 +1543,7 @@ export function GpuSection({ range, onLayer }: SectionProps) {
           title="GPU · gpu.usage"
           tone="--gpu"
           yMax={100}
-          height={H_MAIN}
+          grow
           range={range}
           onLayer={onLayer}
           unitFmt={(v) => fmtPct(v / 100)}
@@ -1292,104 +1562,49 @@ export function GpuSection({ range, onLayer }: SectionProps) {
           title="GPU · gpu.usage（组内取最大）"
           tone="--gpu"
           yMax={100}
-          height={H_MAIN}
+          grow
           range={range}
           onLayer={onLayer}
           unitFmt={(v) => fmtPct(v / 100)}
         />
       )}
       <GpuComposition gpus={gpus} />
-      {/* 副图行:引擎细分 + 显存 + 温度。显存是容量按 §6.2 求和,温度取组内最热 */}
-      {(() => {
-        const engines = discovery.data?.members("gpu.engine.usage", "engine") ?? [];
-        const hasMem = discovery.data?.has("gpu.mem_used") ?? false;
-        const hasTemp = discovery.data?.has("gpu.temp") ?? false;
-        if (engines.length === 0 && !hasMem && !hasTemp) return null;
-        return (
-          <div className={s.subRow}>
-            {engines.length > 0 && (
-              <AggChart
-                groups={engines.map((e) => ({
-                  name: e,
-                  metrics: ["gpu.engine.usage"],
-                  exprs: gpus.map((g) => `gpu.engine.usage{engine=${e},gpu=${g}}`),
-                  match: (key) =>
-                    key.startsWith("gpu.engine.usage|") && key.includes(`engine=${e}`),
-                }))}
-                agg="max"
-                title={gpus.length > 1 ? "GPU · 引擎细分（组内取最大）" : "GPU · 引擎细分"}
-                tone="--gpu"
-                yMax={100}
-                height={H_SUB}
-                range={range}
-                onLayer={onLayer}
-                unitFmt={(v) => fmtPct(v / 100)}
-              />
-            )}
-            {hasMem &&
-              (only !== undefined ? (
-                <SeriesChart
-                  expr={`gpu.mem_used{gpu=${only}}`}
-                  metric="gpu.mem_used"
-                  labels={`gpu=${only}`}
-                  title="GPU · gpu.mem_used"
-                  tone="--gpu"
-                  height={H_SUB}
-                  range={range}
-                  onLayer={onLayer}
-                  unitFmt={fmtBytes}
-                />
-              ) : (
-                <AggChart
-                  groups={[
-                    {
-                      name: "显存合计",
-                      metrics: ["gpu.mem_used"],
-                      exprs: gpus.map((g) => `gpu.mem_used{gpu=${g}}`),
-                    },
-                  ]}
-                  title="GPU · gpu.mem_used（合计）"
-                  tone="--gpu"
-                  height={H_SUB}
-                  range={range}
-                  onLayer={onLayer}
-                  unitFmt={fmtBytes}
-                />
-              ))}
-            {hasTemp &&
-              (only !== undefined ? (
-                <SeriesChart
-                  expr={`gpu.temp{gpu=${only}}`}
-                  metric="gpu.temp"
-                  labels={`gpu=${only}`}
-                  title="GPU · gpu.temp"
-                  tone="--gpu"
-                  height={H_SUB}
-                  range={range}
-                  onLayer={onLayer}
-                  unitFmt={(v) => `${Math.round(v)} °C`}
-                />
-              ) : (
-                <AggChart
-                  groups={[
-                    {
-                      name: "最热",
-                      metrics: ["gpu.temp"],
-                      exprs: gpus.map((g) => `gpu.temp{gpu=${g}}`),
-                    },
-                  ]}
-                  agg="max"
-                  title="GPU · gpu.temp（组内取最大）"
-                  tone="--gpu"
-                  height={H_SUB}
-                  range={range}
-                  onLayer={onLayer}
-                  unitFmt={(v) => `${Math.round(v)} °C`}
-                />
-              ))}
-          </div>
-        );
-      })()}
+      {/* 副图行:只剩温度。引擎细分归到单卡 Detail(整组取最大没法定位是哪张卡在忙),
+          显存的量在下面的 GPU 内存块里,不用再占一张时序图 */}
+      {discovery.data?.has("gpu.temp") && (
+        <div className={s.subRow}>
+          {only !== undefined ? (
+            <SeriesChart
+              expr={`gpu.temp{gpu=${only}}`}
+              metric="gpu.temp"
+              labels={`gpu=${only}`}
+              title="GPU · gpu.temp"
+              tone="--gpu"
+              height={H_SUB}
+              range={range}
+              onLayer={onLayer}
+              unitFmt={(v) => `${Math.round(v)} °C`}
+            />
+          ) : (
+            <AggChart
+              groups={[
+                {
+                  name: "最热",
+                  metrics: ["gpu.temp"],
+                  exprs: gpus.map((g) => `gpu.temp{gpu=${g}}`),
+                },
+              ]}
+              agg="max"
+              title="GPU · gpu.temp（组内取最大）"
+              tone="--gpu"
+              height={H_SUB}
+              range={range}
+              onLayer={onLayer}
+              unitFmt={(v) => `${Math.round(v)} °C`}
+            />
+          )}
+        </div>
+      )}
       {(() => {
         const stats: NumItem[] = [];
         const u = latestMax(rings, "gpu.usage");
@@ -1409,36 +1624,25 @@ export function GpuSection({ range, onLayer }: SectionProps) {
           stats.push({ k: gpus.length > 1 ? "最高温度" : "温度", v: `${Math.round(temp)} °C` });
         if (gpus.length > 1) stats.push({ k: "卡数", v: String(gpus.length) });
 
-        const facts: NumItem[] = (info.data?.gpus ?? []).map((g) => ({
-          k: g.card || "GPU",
-          v: g.model || "—",
-          sub: [g.driver, g.vram_bytes ? fmtBytes(g.vram_bytes) : null, g.bus]
-            .filter(Boolean)
-            .join(" · "),
-        }));
+        const cards = info.data?.gpus ?? [];
+        const card = cards.length === 1 ? cards[0] : undefined;
+        // 只有一张卡时把它的静态事实逐条摊开;多卡时一张卡一行,挤在一起才对得上号
+        const facts: NumItem[] = card
+          ? [
+              { k: "型号", v: card.model || "—" },
+              ...(card.driver ? [{ k: "驱动", v: card.driver }] : []),
+              ...(card.vram_bytes ? [{ k: "显存", v: fmtBytes(card.vram_bytes) }] : []),
+              ...(card.bus ? [{ k: "总线", v: card.bus }] : []),
+            ]
+          : cards.map((g) => ({
+              k: g.card || "GPU",
+              v: g.model || "—",
+              sub: [g.driver, g.vram_bytes ? fmtBytes(g.vram_bytes) : null, g.bus]
+                .filter(Boolean)
+                .join(" · "),
+            }));
         return <StatFact stats={stats} facts={facts} />;
       })()}
-      {gpus.length > 1 && (
-        <MemberGrid
-          resource={{
-            id: "gpu",
-            label: "GPU",
-            tone: "--gpu",
-            probes: ["gpu."],
-            memberLabel: "gpu",
-            memberMetric: "gpu.usage",
-          }}
-          members={gpus}
-          cellValue={(g) => {
-            const u = latestOf(rings, seriesKey("gpu.usage", `gpu=${g}`));
-            const mu = latestOf(rings, seriesKey("gpu.mem_used", `gpu=${g}`));
-            return {
-              big: u !== null ? fmtPct(u / 100) : "—",
-              small: mu !== null ? fmtBytes(mu) : undefined,
-            };
-          }}
-        />
-      )}
     </>
   );
 }
@@ -1492,7 +1696,7 @@ export function MemberDetail({
           labels={lbl}
           title={`${member} · 吞吐`}
           tone="--net"
-          height={H_MAIN}
+          grow
           range={range}
           onLayer={onLayer}
           unitFmt={fmtRateBits}
@@ -1520,6 +1724,8 @@ export function MemberDetail({
       if (n.speed_mbps) facts.push({ k: "速率", v: `${n.speed_mbps} Mb/s` });
       if (n.mac) facts.push({ k: "MAC", v: n.mac });
       if (n.mtu) facts.push({ k: "MTU", v: String(n.mtu) });
+      // 驱动:虚拟接口（bridge、tun、Hyper-V 虚拟交换机）读不到,留空不占位
+      if (n.driver) facts.push({ k: "驱动", v: n.driver });
       for (const a of (n.addrs ?? []).slice(0, 4)) facts.push({ k: "地址", v: a });
     }
   } else if (resource.id === "disk") {
@@ -1532,7 +1738,7 @@ export function MemberDetail({
           labels={lbl}
           title={`${member} · 吞吐`}
           tone="--disk"
-          height={H_MAIN}
+          grow
           range={range}
           onLayer={onLayer}
           unitFmt={(v) => `${fmtBytes(v)}/s`}
@@ -1585,6 +1791,7 @@ export function MemberDetail({
         },
       );
       if (d.removable) facts.push({ k: "可移动", v: "是" });
+      if (d.read_only) facts.push({ k: "只读", v: "是" });
       facts.push({
         k: "SMART",
         v:
@@ -1608,7 +1815,37 @@ export function MemberDetail({
           title={`${member} · gpu.usage`}
           tone="--gpu"
           yMax={100}
-          height={H_MAIN}
+          grow
+          range={range}
+          onLayer={onLayer}
+          unitFmt={(v) => fmtPct(v / 100)}
+        />,
+      );
+    // 引擎细分只在单卡视图下有意义：整组取最大会把「哪张卡在忙」这一层抹掉。
+    const engines = (discovery.data?.all ?? [])
+      .filter((m) => m.metric === "gpu.engine.usage" && labelValue(m.labels, "gpu") === member)
+      .map((m) => labelValue(m.labels, "engine"))
+      .filter((e): e is string => e !== null)
+      .filter((e, i, a) => a.indexOf(e) === i);
+    if (engines.length > 0)
+      charts.push(
+        <AggChart
+          key="engines"
+          groups={engines.map((e) => ({
+            name: e,
+            metrics: ["gpu.engine.usage"],
+            exprs: [`gpu.engine.usage{engine=${e},${lbl}}`],
+            // 同一个 metric 分不出组，得连 engine 和 gpu 一起认
+            match: (key: string) =>
+              key.startsWith("gpu.engine.usage|") &&
+              key.includes(`engine=${e}`) &&
+              key.includes(lbl),
+          }))}
+          agg="max"
+          title={`${member} · 引擎细分`}
+          tone="--gpu"
+          yMax={100}
+          height={H_SUB}
           range={range}
           onLayer={onLayer}
           unitFmt={(v) => fmtPct(v / 100)}

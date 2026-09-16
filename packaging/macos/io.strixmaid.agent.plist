@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    StrixMaid agent 的 launchd 作业。对应 Linux 侧的 packaging/strixmaid-agent.service。
+
+    （注释里不出现两个连写的短横：XML 注释不允许含那个序列，写了整份 plist 就解析
+    不了。提到 systemd 的长选项时因此只写选项名。）
+
+    同样是 **LaunchDaemon**（装到 /Library/LaunchDaemons/），理由与主进程一致：
+    采集必须在无人登录时照常进行，而 LaunchAgent 只在某个用户登录期间存在。
+
+    ## 与 strixmaid-agent.service 的对应
+
+    * `ExecStart` 对应 `ProgramArguments`
+    * `ConditionPathExists=/etc/strixmaid/agent.toml` 对应 `KeepAlive` 里的 `PathState`
+    * `Restart=on-failure`：被 PathState 取代，见下
+    * `StartLimitIntervalSec` / `StartLimitBurst`：**没有对应物**，见下
+    * `TimeoutStopSec=20` 对应 `ExitTimeOut`
+    * `Environment=RUST_LOG=info` 对应 `EnvironmentVariables`
+
+    ## KeepAlive 为什么只写 PathState
+
+    agent 的 server_url 与 token 没有可猜的默认值，没写配置就起不来。systemd 用
+    `ConditionPathExists` 让它在缺配置时干脆不启动（status 显示 condition failed，
+    而不是每两秒崩一次刷日志）。
+
+    launchd 里最接近的是 `KeepAlive` 的 `PathState` 子键：路径存在就保活，不存在
+    就不保活。按 launchd.plist(5)，KeepAlive 字典里的多个条件是**或**的关系，
+    所以不能把 `SuccessfulExit` 与 `PathState` 写在一起，那会变成「退出码非零
+    **或** 配置存在就重启」，等于把缺配置那一档又放了回来。取舍是只留 PathState。
+
+    由此产生两处与 systemd 不同的行为，按文档推断、**未在真机上验证**：
+
+    * 配置存在时，作业**任何**退出都会被重启（含退出码 0），比 on-failure 宽。
+      对一个本就不该主动退出的常驻进程，这个差别可以接受。
+    * KeepAlive 的条件是持续求值的，管理员把 agent.toml 建出来之后 launchd
+      应当会自己把作业拉起来，不必手工 kickstart。systemd 的 Condition 只在启动
+      那一刻判一次，做不到这点。
+
+    `StartLimitBurst` 没有对应物：launchd 不限制重启次数，只有 `ThrottleInterval`
+    限制频率。配置写错（文件在、内容不对）时它会以 10 秒为周期一直重试，日志里
+    反复出现同一条错误，这是 launchd 的既有行为，不是本作业配错了。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.strixmaid.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/strixmaid-agent</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 见上：只写 PathState。路径与 config.rs 里 macOS 的 DEFAULT_CONFIG_PATH
+         同在 /etc/strixmaid 下。纯环境变量部署（STRIXMAID_AGENT_ 开头的那些）
+         要把这一段删掉，否则文件不存在就不会被保活。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>/etc/strixmaid/agent.toml</key>
+            <true/>
+        </dict>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <!-- agent 只读采集，本身不需要 root；但部分主机信息与进程信息在非 root 下会
+         缺项（cmdline 与 environ 只有同 uid 或 root 读得到，见 macos-platform.md
+         §3.3）。与 Linux 侧 unit 的取舍一致：默认用 root，需要收紧时把这里改成
+         专用账户，接受部分指标缺失，并把数据目录的属主一并改掉。 -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- 与主进程同一个目录、不同文件。目录由 install.sh 创建，launchd 只建文件。 -->
+    <key>StandardOutPath</key>
+    <string>/var/log/strixmaid/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/strixmaid/agent.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <!-- 主进程用 Interactive（要服务 UI 与 PTY），agent 没有交互路径，取 Standard。
+         按 launchd.plist(5)，Standard 等同于不设本项；写出来是为了挡住「顺手改成
+         Background」，因为 Background 会被降低 CPU 与 I/O 优先级，而固定节拍的
+         采样一旦被限流，采出来的曲线就不准了。 -->
+    <key>ProcessType</key>
+    <string>Standard</string>
+</dict>
+</plist>

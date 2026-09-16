@@ -4,9 +4,12 @@
   display: flex;
 }
 
-/* ---- 二级导航：资源行（08 §6.7，退为性能页内的左栏） ---- */
+/* ---- 二级导航：资源行（08 §6.7，退为性能页内的左栏） ----
+   宽度**不走设计语言的 size 轴**（`--rail` 是应用主侧栏那条）：这一栏的宽度
+   由它自己装的东西决定——缩略图宽度 + 一行摘要不被截断所需的字宽，
+   换一套设计语言不会改变这个需求。主侧栏是外壳，是语言该管的；它不是。 */
 .rrail {
-  width: 240px;
+  width: 300px;
   flex: none;
   border-right: var(--stroke) solid var(--line);
   background: var(--surface);
@@ -20,13 +23,36 @@
   align-items: center;
   gap: var(--sp-5);
   width: 100%;
-  padding: var(--sp-4) var(--sp-5) var(--sp-5);
+  padding: var(--sp-5);
   background: none;
   border: 0;
   font: inherit;
   color: var(--ink-2);
   text-align: left;
   cursor: pointer;
+}
+
+/* 行里的缩略图。尺寸写在 CSS 而不是组件属性上——Sparkline 是 viewBox 100×100 +
+   preserveAspectRatio: none 的 SVG，笔画又是 non-scaling，拉伸不会变形。
+   行加高加的就是这块：波形面积比第三版大一倍，多出来的是数据不是留白。 */
+/* 图表描边：与填充同色、深一档。填充是资源色的淡洗（格子 6%、缩略图 20%），
+   边框取足色即是「更深」那一档。对各自的底色，亮色 4.3–6.6:1、暗色 3.1–4.6:1，
+   两档都过 WCAG 1.4.11 非文本的 3:1；再往黑里混会冲到 8–13:1，那是文字的量级。 */
+.rrSpark {
+  flex: none;
+  display: block;
+  width: 100px;
+  height: 48px;
+  border: var(--stroke) solid var(--tone);
+  border-radius: var(--radius-sm);
+  /* 内容盒的圆角由浏览器算成「外半径 − 边宽」，SVG 自己没有圆角，靠这一句裁掉直角 */
+  overflow: hidden;
+}
+
+.rrSpark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .rrow:hover {
@@ -46,7 +72,7 @@
   top: 0;
   bottom: 0;
   width: var(--stroke-thicker);
-  background: var(--rr-tone);
+  background: var(--tone);
 }
 
 .rrText {
@@ -94,6 +120,25 @@
   height: 100%;
 }
 
+/*
+ * 窄视口退回第三版的栏宽与缩略图尺寸。
+ *
+ * 断点取 1160 而不是去挪 `.grids` 的 1100：栏宽多占 60px，1160 这里的内容区宽度
+ * （视口 − 主侧栏 216 − 本栏 − 内边距 32）正好等于第三版在 1100 处的宽度。
+ * 于是 1160 以下的几何与第三版逐像素相同，`.grids` 的 1100 断点不必跟着动，
+ * 窄窗口也不会因为这一栏变宽而被挤。
+ */
+@media (max-width: 1160px) {
+  .rrail {
+    width: 240px;
+  }
+
+  .rrSpark {
+    width: 72px;
+    height: 40px;
+  }
+}
+
 /* ---- 右侧 ---- */
 .main {
   flex: 1;
@@ -108,7 +153,36 @@
   /* 内容区永不横滚（spec §8）：宽内容各自收敛，不许把页面撑开 */
   overflow-x: hidden;
   scrollbar-gutter: stable;
-  padding: var(--sp-7);
+  /*
+   * 左右比上下宽得多，是**为了首图的宽高比**，不是排版偏好。
+   *
+   * 首图靠吃剩余高度长起来，宽度则是被动的，所以两个方向不对称：
+   * 上下每加 1px，图就少长 2px；左右每加 1px，图直接窄 2px。
+   * 1920×1080 上首图是 1344×494（比 2.72），左右各加 48 → 2.52，
+   * 而上下左右一起加 48 会变成 3.14 —— **上下加内边距会让它更扁**。
+   *
+   * 所以上下维持 --sp-7，左右取 --sp-10 的三倍（48px）。再宽下去代价就显了：
+   * 左右各 178px 才能到 1:1，那等于丢掉 26% 的宽度，而横轴是时间——
+   * 拿能看到的时间窗口换一个方形，不划算。
+   */
+  padding: var(--sp-7) calc(var(--sp-10) * 1.5);
+}
+
+/* 区块的竖向堆叠（任务管理器：首图占据主要高度，其余贴着往下排）。
+   高度用 min-height 而不是 height——内容比一屏矮时容器仍满一屏，
+   剩余空间归首图；内容比一屏高时容器随内容长，剩余空间为 0，
+   首图退回它的基准高度，下方内容既不被挤出视口也不被截断。 */
+.stack {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* 除首图外都不参与剩余空间的分配，也不被压缩。
+   把 .chartGrow 排除在外而不是靠后面的规则去覆盖——两条选择器的优先级一样高，
+   只差一个书写顺序，将来谁挪一下位置就会静默失效。 */
+.stack > *:not(.chartGrow) {
+  flex: none;
 }
 
 .crumb {
@@ -129,10 +203,46 @@
 
 .chartBlock {
   margin-bottom: var(--sp-7);
-  border: var(--stroke) solid var(--line);
+  /* --tone 由 .main 给；万一哪天有图表块落在它外面，退回中性描边而不是 currentColor */
+  border: var(--stroke) solid var(--tone, var(--line));
   border-radius: var(--radius-md);
   background: var(--surface);
   padding: var(--sp-4);
+}
+
+/* 首图：页面有剩余高度时全部归它，没有剩余时退回 248px 这个下限。
+   不许压缩（flex-shrink: 0）——一屏装不下时宁可整页滚动，
+   也不把图压到看不出波形。
+
+   flex-basis 取 0 而不是 auto，是「总体 ⇄ 逐设备切换前后区块高度不变」的落点：
+   basis 为 auto 时基准高度等于**内容**高度，而两种视图的内容不一样
+   （总体图有标题行与图例行，网格视图两行都不要），一屏装不下时就会差这两行，
+   下方内容跟着跳。取 0 之后基准高度只剩 min-height 这一个常数，两种视图必然相等，
+   有没有剩余空间都成立。248px 取的是第三版首块在下限处的实测外高。 */
+.chartGrow {
+  flex: 1 0 0;
+  min-height: 248px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 绘图区：flex-basis 同样取 0，高度只由外层分给它的剩余空间决定，
+   不被里面那张按像素定高的 uPlot 画布反向撑大（否则两者互相追着长）。 */
+.plotArea {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 逐核 / 逐设备网格自带格子，外面再套一层灰底方框就成了「盒子里装盒子」，
+   而任务管理器的小图直接坐在页面底色上，小图之间只有间距。
+   所以这一层视觉上整个不存在：边框与填充色都去掉。
+
+   去的是**颜色**不是盒模型——边框用 transparent 而不是 `border: 0`，
+   内边距原样保留，这样两种视图的区块高度逐像素相同，切换时下方内容不跳。 */
+.chartNoFrame {
+  border-color: transparent;
+  background: transparent;
 }
 
 .chartTitle {
@@ -290,21 +400,24 @@
   margin-left: var(--sp-3);
 }
 
-/* ---- 成员格（08 §6.4） ---- */
+/* ---- 成员格（08 §6.4） ----
+   它是「总体 ⇄ 逐设备」切换器的第二档，高度与总体图一样由外层给定，
+   列宽、行高、间距由 MemberGrid 按实测尺寸算出写在行内。
+   第三版这里有一条 max-height: 252px，那是它当年挂在页面下半截时的自限；
+   现在高度由容器定，那条限制反而会在高分屏上把格子压在顶上。 */
 .members {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  gap: var(--sp-2);
-  max-height: 252px;
+}
+
+/* 设备多到摊不下:退回样稿尺寸,在格子网格内部滚动,区块高度不受影响 */
+.membersScroll {
   overflow-y: auto;
   scrollbar-gutter: stable;
-  margin-bottom: var(--sp-7);
 }
 
 .cell {
   position: relative;
-  height: 82px;
-  border: var(--stroke) solid var(--line);
+  border: var(--stroke) solid var(--tone);
   border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
@@ -313,11 +426,11 @@
   font: inherit;
   color: inherit;
   /* button 默认 ButtonFace 底必须压掉；底板染 6% 资源色（08 §6.4） */
-  background: color-mix(in oklab, var(--cell-tone) 6%, var(--surface));
+  background: color-mix(in oklab, var(--tone) 6%, var(--surface));
 }
 
 .cell:hover {
-  border-color: var(--cell-tone);
+  background: color-mix(in oklab, var(--tone) 14%, var(--surface));
 }
 
 .cellPlot {
@@ -363,27 +476,55 @@
   color: var(--ink-3);
 }
 
-/* ---- 逐核小图（08 §6.6）:格子高度适应容器,不滚动,装不下转热力图 ---- */
+/* ---- 逐核 / 逐设备小图（08 §6.6）:格子摊满容器,装不下转热力图或区域内滚动 ---- */
 .coreArea {
   overflow: hidden;
 }
 
+/* 摊不下、又没有热力图这条退路时（逐设备网格）:区域内部滚动。
+   区块高度不变,也不截掉任何一格。 */
+.coreScroll {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 列宽、行高、间距全部由 SplitView 按容器实测尺寸算出来,写在行内 */
 .cores {
   display: grid;
-  gap: var(--sp-2);
 }
 
 .core {
   border: var(--stroke) solid var(--line);
   border-radius: var(--radius-md);
-  padding: var(--sp-1) var(--sp-2) 0;
+  /* 外层去掉灰底之后格子就压在 --ground 上了，必须自己把底色带上：
+     macOS 亮色那套的 line 与 ground 同为 #D1D1D6，只靠边框的话整格看不见。
+     取值仍是 --surface，格子内部的观感与去外层之前一模一样。 */
+  background: var(--surface);
+  /* 上内边距 2px 与 .coreLabel 的 15px 盒高合起来,就是格子里除小图外的那一截。
+     SplitView 按这个常数反算小图高度,所以两处都写死像素,不跟着字号 token 走 */
+  padding: 2px var(--sp-2) 0;
+  overflow: hidden;
 }
 
 .coreLabel {
   font: var(--fs-200) var(--mono);
+  height: 15px;
+  line-height: 15px;
   color: var(--ink-3);
   display: flex;
   justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+/* 设备名可能比格子宽（PhysicalDrive0、以太网 2 …）:名字省略号收尾,读数不许被挤掉 */
+.coreName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coreVal {
+  flex: none;
 }
 
 .heat {
@@ -406,12 +547,6 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-raised);
   padding: 4px 7px;
-}
-
-.sectionTitle {
-  font-size: var(--fs-500);
-  font-weight: 600;
-  margin: 0 0 var(--sp-3);
 }
 
 .legend {

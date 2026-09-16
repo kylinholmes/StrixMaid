@@ -11,14 +11,30 @@ import { type ResourceDef, visibleResources } from "./model";
 import s from "./Perf.module.css";
 import {
   CpuSection,
-  type CpuView,
   DiskSection,
   GpuSection,
   MemberDetail,
   MemSection,
   NetSection,
+  type PerfView,
   useSystemInfo,
 } from "./sections";
+
+/**
+ * 「总体 ⇄ 逐设备」切换器：成员从哪条指标的哪个标签里来、「逐设备」那一档的字样，
+ * 以及少于几个成员就不给切换（`min`）。资源不在这张表里 = 不给切换。
+ *
+ * 三类设备的 `min` 是 1：那一档放的是成员格，一格一设备，**点进去是该设备的详情页**，
+ * 只有一块盘时它也是进详情的唯一入口，不能因为「只有一个」就把路堵死。
+ * CPU 的 `min` 是 2：逐核网格点不进去，只有一个核时两档画的是同一条线。
+ */
+const VIEW_SPLIT: Record<string, { metric: string; labelKey: string; each: string; min: number }> =
+  {
+    cpu: { metric: "cpu.core.usage", labelKey: "core", each: "逻辑处理器", min: 2 },
+    disk: { metric: "disk.util", labelKey: "dev", each: "块设备", min: 1 },
+    net: { metric: "net.tx_bytes", labelKey: "iface", each: "接口", min: 1 },
+    gpu: { metric: "gpu.usage", labelKey: "gpu", each: "显卡", min: 1 },
+  };
 
 /** 二级导航行的 sparkline 数据：按指标名把各标签序列求和后取窗口。 */
 function railSpark(rings: ReadonlyMap<string, Ring>, metrics: readonly string[]): number[] {
@@ -101,13 +117,21 @@ const RAIL_SPARK_METRICS: Record<string, readonly string[]> = {
   gpu: ["gpu.usage"],
 };
 
-const RAIL_SPARK_MAX: Record<string, number | undefined> = {
-  cpu: 100,
-  gpu: 100,
-  mem: undefined,
-  disk: undefined,
-  net: undefined,
-};
+/**
+ * 走势图的纵轴上限。百分比类固定 0..100；内存固定 0..总量，否则几 GiB 的波动会被拉满
+ * 整个格子，看着像要爆了；吞吐类没有天然上限，只能自适应。
+ */
+function railSparkMax(id: string, rings: ReadonlyMap<string, Ring>): number | undefined {
+  switch (id) {
+    case "cpu":
+    case "gpu":
+      return 100;
+    case "mem":
+      return latestSum(rings, "mem.total") ?? undefined;
+    default:
+      return undefined;
+  }
+}
 
 /** 页头副标题：这台机器上该资源的一句话概述。 */
 function subtitleOf(
@@ -156,7 +180,8 @@ export function PerfPage() {
   const rings = useLive((st) => st.rings);
   const [range, setRange] = useState<RangeKey>("60s");
   const [layer, setLayer] = useState<string | null>(null);
-  const [cpuView, setCpuView] = useState<CpuView>("all");
+  // 视图选择按资源各记各的：从 CPU 的逐核切回总体，再去磁盘页，不该带着别人的选择
+  const [views, setViews] = useState<Record<string, PerfView>>({});
 
   const visible = visibleResources(discovery.data);
   const info = useSystemInfo();
@@ -192,6 +217,20 @@ export function PerfPage() {
 
   const rangeDef = RANGES.find((r) => r.key === range);
 
+  const splitDef = member ? undefined : VIEW_SPLIT[current.id];
+  const splitMembers =
+    splitDef && discovery.data
+      ? liveMembers(
+          rings,
+          splitDef.metric,
+          splitDef.labelKey,
+          discovery.data.members(splitDef.metric, splitDef.labelKey),
+        )
+      : [];
+  const canSplit = splitDef !== undefined && splitMembers.length >= splitDef.min;
+  // 够不着门槛时强制回总体,切换器也不出现
+  const view: PerfView = canSplit ? (views[current.id] ?? "all") : "all";
+
   return (
     <>
       <header className={chrome.head}>
@@ -205,18 +244,15 @@ export function PerfPage() {
           </span>
         </span>
         <span className={chrome.spacer} />
-        {/* CPU 专有:总体⇄逻辑处理器只切图表区,切换器贴着时间档(08 §6.6) */}
-        {current.id === "cpu" && !member && (
+        {/* 总体⇄逐设备只切图表区,切换器贴着时间档(08 §6.6) */}
+        {splitDef && canSplit && (
           <Segmented
             label="视图"
-            value={cpuView}
-            onChange={setCpuView}
+            value={view}
+            onChange={(v) => setViews((prev) => ({ ...prev, [current.id]: v }))}
             options={[
               { value: "all", label: "总体" },
-              {
-                value: "cores",
-                label: `逻辑处理器 ${discovery.data?.members("cpu.core.usage", "core").length ?? 0}`,
-              },
+              { value: "each", label: `${splitDef.each} ${splitMembers.length}` },
             ]}
           />
         )}
@@ -250,17 +286,20 @@ export function PerfPage() {
                 key={r.id}
                 type="button"
                 className={cx(s.rrow, r.id === current.id && s.rrowOn)}
-                style={{ "--rr-tone": `var(${r.tone})` } as React.CSSProperties}
+                style={{ "--tone": `var(${r.tone})` } as React.CSSProperties}
                 onClick={() => navigate(`/performance/${r.id}`)}
               >
-                <Sparkline
-                  data={railSpark(rings, RAIL_SPARK_METRICS[r.id] ?? [])}
-                  tone={r.tone}
-                  max={RAIL_SPARK_MAX[r.id]}
-                  width={72}
-                  height={34}
-                  label={`${r.label} 走势`}
-                />
+                {/* 尺寸由 .rrSpark 给（窄视口要换一档），组件属性只留作没有数据时的兜底 */}
+                <span className={s.rrSpark}>
+                  <Sparkline
+                    data={railSpark(rings, RAIL_SPARK_METRICS[r.id] ?? [])}
+                    tone={r.tone}
+                    max={railSparkMax(r.id, rings)}
+                    width={100}
+                    height={48}
+                    label={`${r.label} 走势`}
+                  />
+                </span>
                 <span className={s.rrText}>
                   <span className={s.rrName}>
                     {r.label}
@@ -283,26 +322,35 @@ export function PerfPage() {
           })}
         </nav>
 
-        <div className={s.main}>
+        <div className={s.main} style={{ "--tone": `var(${current.tone})` } as React.CSSProperties}>
           <div className={s.body}>
-            {member && current.memberLabel ? (
-              <MemberDetail resource={current} member={member} range={range} onLayer={setLayer} />
-            ) : (
-              <>
-                {current.id === "cpu" && (
-                  <CpuSection
-                    range={range}
-                    rangeSecs={rangeDef?.secs ?? 60}
-                    view={cpuView}
-                    onLayer={setLayer}
-                  />
-                )}
-                {current.id === "mem" && <MemSection range={range} onLayer={setLayer} />}
-                {current.id === "disk" && <DiskSection range={range} onLayer={setLayer} />}
-                {current.id === "net" && <NetSection range={range} onLayer={setLayer} />}
-                {current.id === "gpu" && <GpuSection range={range} onLayer={setLayer} />}
-              </>
-            )}
+            {/* 区块竖向堆叠:首图是唯一会长的弹性项,吃掉一屏里其余区块用剩的高度 */}
+            <div className={s.stack}>
+              {member && current.memberLabel ? (
+                <MemberDetail resource={current} member={member} range={range} onLayer={setLayer} />
+              ) : (
+                <>
+                  {current.id === "cpu" && (
+                    <CpuSection
+                      range={range}
+                      rangeSecs={rangeDef?.secs ?? 60}
+                      view={view}
+                      onLayer={setLayer}
+                    />
+                  )}
+                  {current.id === "mem" && <MemSection range={range} onLayer={setLayer} />}
+                  {current.id === "disk" && (
+                    <DiskSection range={range} view={view} onLayer={setLayer} />
+                  )}
+                  {current.id === "net" && (
+                    <NetSection range={range} view={view} onLayer={setLayer} />
+                  )}
+                  {current.id === "gpu" && (
+                    <GpuSection range={range} view={view} onLayer={setLayer} />
+                  )}
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>

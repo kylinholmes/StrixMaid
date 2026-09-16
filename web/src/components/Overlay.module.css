@@ -72,12 +72,17 @@
   cursor: pointer;
 }
 /* 首尾两条跟着菜单外框收角，用的是**内弧**（外弧 − 框线宽，见 tokens.css）。
-   不用 overflow: hidden：那会裁掉往外推 2px 的焦点环。圆角为 0 的语言下这几条是空操作。 */
-.item:first-child {
+   不用 overflow: hidden：那会裁掉往外推 2px 的焦点环。圆角为 0 的语言下这几条是空操作。
+
+   条件挂在 li 上而不是 .item 上：每个 .item 都是它那个 <li> 的唯一子元素，
+   写成 .item:first-child 的话**每一项都满足**，于是所有分隔线都被下面那句
+   border-bottom: 0 抹掉，每一项还四个角全收圆。要认的是「菜单里的第一/最后一项」，
+   那是 li 之间的次序，不是 button 在 li 里的次序。 */
+.menu > li:first-child .item {
   border-start-start-radius: var(--radius-md-inset);
   border-start-end-radius: var(--radius-md-inset);
 }
-.item:last-child {
+.menu > li:last-child .item {
   border-bottom: 0;
   border-end-start-radius: var(--radius-md-inset);
   border-end-end-radius: var(--radius-md-inset);

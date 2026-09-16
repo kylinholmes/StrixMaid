@@ -46,8 +46,20 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/strixmaid/agent.toml";
 pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\StrixMaid\agent.toml";
 
 /// 缺省数据目录（本地 SQLite 落在这里）。
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/strixmaid-agent";
+/// 见上。
+///
+/// macOS 上**没有 `/var/lib`**，对应物是 `/var/db`。理由与
+/// [`strixmaid_core::config::DEFAULT_DATA_DIR`] 那条完全相同（hier(7)：
+/// `/var/db` 是「misc. automatically generated system-specific database files」），
+/// 这里只是把同一个决定套在 agent 自己的目录名上。
+///
+/// 目录不必由安装脚本预先建好：[`strixmaid_core::store::Store::open`] 会
+/// `create_dir_all` 出它的父目录。Linux 上 systemd 的 `StateDirectory=` 也会建，
+/// 而 launchd 没有对应物，所以在 macOS 上这条自建路径是唯一的保障。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_DATA_DIR: &str = "/var/db/strixmaid-agent";
 /// 见上。
 #[cfg(windows)]
 pub const DEFAULT_DATA_DIR: &str = r"C:\ProgramData\StrixMaid\agent-data";

@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    StrixMaid 主进程的 launchd 作业。对应 Linux 侧的 packaging/strixmaid.service。
+
+    注意本文件里的注释一律不出现两个连写的短横：XML 规范不允许注释内容里含有
+    那个序列，写了会让整份 plist 解析失败（plutil 与 launchd 都会拒绝）。
+    因此下面提到 systemd 的长选项时只写选项名，不带前缀。
+
+    ## 为什么是 LaunchDaemon 而不是 LaunchAgent
+
+    装到 /Library/LaunchDaemons/，属于系统域（system domain）。理由是主进程要管
+    整台机器，而 Agent 那一档做不到：
+
+    * LaunchAgent 只在**某个用户登录之后**才存在，注销即消失，且以该用户的身份
+      运行。一台没人登录的服务器上，Agent 什么都不做；而这正是本软件要工作的场景
+      （design.md §2.2：全局指标采集必须在无人登录时持续运行）。
+    * 主进程需要 root：spawn helper 去做 PAM 认证与 setuid、读全量进程信息、
+      改主机名与时区。Agent 拿到的是登录用户的权限，做不了这些。
+    * Apple 的 Daemons and Services 指南把这条线划在「是不是特定于某个已登录用户」：
+      是，就用 Agent；不是，就用 Daemon。本进程显然是后者。
+
+    代价是 Daemon 没有用户 GUI 会话，不能弹窗、不能访问用户钥匙串。本项目都不需要。
+
+    ## 与 strixmaid.service 的逐条对应
+
+    * `ExecStart` 对应 `ProgramArguments`
+    * `Restart=on-failure` 对应 `KeepAlive` 字典里的 `SuccessfulExit` 为假
+    * `RestartSec=2` 对应 `ThrottleInterval`（取值不同，理由见下）
+    * `TimeoutStopSec=20` 对应 `ExitTimeOut`
+    * `Environment=RUST_LOG=info` 对应 `EnvironmentVariables`
+    * `WantedBy=multi-user.target`：放进 /Library/LaunchDaemons 即等价
+    * `StateDirectory` / `RuntimeDirectory`：**没有对应物**，目录由 install.sh 建
+    * `ExecStartPre` 的配置校验：**没有对应物**，见下
+    * `KillMode=control-group`：**没有对应物**，见下
+
+    `ExecStartPre` 没有对应物。塞进 `sh -c "先校验 && exec 真正的程序"` 是可以的，
+    但那样 launchd 监督的就成了 sh，退出码与信号都隔了一层，KeepAlive 的判断随之
+    失真。改为在 install.sh 里装完就跑一次配置校验，改过配置之后也该手工再跑一次
+    （packaging/macos/README.md 里写了命令）。
+
+    `KillMode=control-group` 没有对应物：launchd 不做 cgroup。worker 与 helper 是
+    主进程的子进程，主进程收到 SIGTERM 后按序拆会话（先 Shutdown worker，
+    再 CloseSession helper）；这条路径与 Linux 上完全一样，区别只是少了
+    control group 那层兜底清场，残留进程要靠主进程自己收干净。
+-->
+<plist version="1.0">
+<dict>
+    <!-- 反向域名式，且必须与文件名一致。launchd.plist(5) 的原话是
+         「it is the expected convention for launchd property list files to be
+         named <Label>.plist」。launchctl 的域目标就是 system/io.strixmaid.server。 -->
+    <key>Label</key>
+    <string>io.strixmaid.server</string>
+
+    <!-- 绝对路径。launchd 不给作业继承任何交互式 shell 的 PATH，写裸名会按
+         _PATH_STDPATH 去找，二进制装在 /usr/local/bin 时未必找得到。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/strixmaid</string>
+        <string>serve</string>
+    </array>
+
+    <!-- 开机即起，不等任何请求。这是常驻服务，不是按需拉起的作业。 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart=on-failure 的对应物。launchd.plist(5)：SuccessfulExit 为 false 时
+         「job 在退出状态非零之后重启」，正常退出（0）则不重启，恰好是 on-failure
+         的语义。把 KeepAlive 写成布尔 true 会连正常退出也一并拉起来。 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- systemd 那边是 RestartSec=2，这里**故意**不取 2，而是写成 launchd 的
+         默认值 10。理由：systemd 还有 StartLimitIntervalSec 与 StartLimitBurst
+         兜底，崩够次数就停下等人修；launchd **没有**这一档，配置写错会以
+         ThrottleInterval 为周期永远重试。10 秒把刷日志的速度压到五分之一，
+         代价只是故障恢复慢 8 秒。 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- TimeoutStopSec=20：发出 SIGTERM 之后等这么久再 SIGKILL。
+         主进程要用这段时间按序拆掉每个会话的 worker 与 helper。 -->
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <!-- 系统域里的作业默认就是 root。写出来一是省得读的人去查默认值，二是标明
+         这不是疏忽：主进程需要 root（spawn helper、读全量进程、改主机名）。
+         不要在这里换成普通用户，认证链会整条断掉。 -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- 日志。Linux 上写 stderr 交给 journald；macOS 的 launchd 不会把作业的
+         stdout / stderr 送进统一日志，不设这两项就直接丢进 /dev/null，
+         所以必须自己指定文件。目录取 /var/log/strixmaid：hier(7) 对 /var/log 的
+         定义是「misc. system log files」，与 config.rs 里 macOS 那组路径同在
+         /var 下，不另起一套命名。
+
+         两点要知道：
+
+         * launchd 只在文件不存在时**创建文件**，不会创建目录。
+           /var/log/strixmaid 由 install.sh 建好。
+         * launchd 在作业启动时打开该文件并一直持有 fd。用 newsyslog 那种
+           「改名 + 新建」的方式轮转，进程会继续往改了名的旧 inode 里写。
+           因此本包**不附 /etc/newsyslog.d 配置**：要轮转就在轮转之后执行
+           `launchctl kickstart -k system/io.strixmaid.server` 重启作业。 -->
+    <key>StandardOutPath</key>
+    <string>/var/log/strixmaid/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/strixmaid/server.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <!-- launchd.plist(5)：Interactive 作业「run with the same resource limitations
+         as apps, that is to say, none」。选它而不是 Background，是因为 Background
+         会被降低 CPU 与 I/O 优先级，而本进程要服务浏览器 UI 与 PTY 交互，还要按
+         固定节拍（默认 2 秒）采集指标，被限流会直接表现为界面卡顿与采样漂移。 -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- macOS 给 launchd 作业的默认打开文件数软上限很低（`launchctl limit maxfiles`
+         报的第一个数，通常是 256）。一个 WS 连接加一个 PTY 再加 SQLite 的若干 fd，
+         几十个会话就能撞上。硬上限保持系统默认不动，只把软上限提到 4096。 -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>
