@@ -36,7 +36,7 @@ import {
   ToolbarSpacer,
 } from "@/components";
 import { DISTROS, UNKNOWN_DISTRO } from "@/theme/distro";
-import { RAMP } from "@/theme/tokens";
+import type { NeutralToken } from "@/theme/tokens";
 import { useTheme } from "@/theme/useTheme";
 import { SERVICES, type Service, series } from "./data";
 import s from "./Gallery.module.css";
@@ -87,8 +87,27 @@ function Section({
   );
 }
 
+/**
+ * 色卡的排列顺序，也是「页底 → 面板 → 分隔 → 正文」的深浅顺序。
+ * `sel` 不进色卡（在表格那一节看得更清楚），`accent` 单独一排。
+ */
+const RAMP_SWATCHES: readonly NeutralToken[] = [
+  "ground",
+  "surface",
+  "surface-2",
+  "surface-3",
+  "line",
+  "line-strong",
+  "ink-3",
+  "ink-2",
+  "ink",
+];
+
+/** 前 6 档是底色，后 3 档是正文色，两组的深浅在亮暗主题里正好相反。 */
+const INK_SWATCHES = new Set<NeutralToken>(["ink-3", "ink-2", "ink"]);
+
 export function Gallery() {
-  const { mode, distro, setMode, setDistroById } = useTheme();
+  const { mode, theme, distro, setMode, setPlatform } = useTheme();
   const [selected, setSelected] = useState<string | null>("containerd.service");
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState(false);
@@ -101,10 +120,8 @@ export function Gallery() {
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
-    if (distro.id === UNKNOWN_DISTRO.id) setDistroById("ubuntu");
-  }, [distro.id, setDistroById]);
-
-  const ramp = RAMP[mode];
+    if (distro.id === UNKNOWN_DISTRO.id) setPlatform({ osId: "ubuntu" });
+  }, [distro.id, setPlatform]);
 
   return (
     <div className={s.page}>
@@ -114,9 +131,11 @@ export function Gallery() {
           <Segmented
             label="发行版"
             value={distro.id}
-            onChange={(id) => setDistroById(id === "unknown" ? null : id)}
+            onChange={(id) => setPlatform({ osId: id === "unknown" ? null : id })}
             options={[
               ...DISTROS.slice(0, 6).map((d) => ({ value: d.id, label: d.name })),
+              // Windows 是唯一有专属设计语言的平台，这一页是唯一能肉眼比对它的地方
+              { value: "windows", label: "Windows" },
               { value: UNKNOWN_DISTRO.id, label: "认不出" },
             ]}
           />
@@ -151,8 +170,9 @@ export function Gallery() {
         <p className={s.lede}>
           全部组件按{" "}
           <code>docs/superpowers/specs/2026-08-29-frontend-design-language-design.md</code>{" "}
-          实现。中性色由发行版主色派生——
-          <b>切上面的发行版，整页的灰会跟着换色温，但数据色一动不动</b>。 切到「认不出」会回落纯灰。
+          实现。中性色按平台整套切换，当前这套是 <b>{theme.name}</b>——
+          <b>切到 Windows 会换成 Fluent 的中性色，切回 Linux 是通用那套，数据色一动不动</b>。
+          发行版只决定 <code>--accent</code>，切到「认不出」会回落成错开明度的灰。
         </p>
 
         <Section
@@ -160,22 +180,24 @@ export function Gallery() {
           title="色彩"
           note={
             <>
-              上排是中性色阶（<b>纯灰</b>）；中间是当前发行版的主题色 <code>--accent</code>
-              （亮暗各校过
-              ≥4.5:1，认不出时是错开明度的灰）；下排是数据色（静态，穷举验证过色盲安全）。
+              上排是当前这套设计语言的中性色阶（<b>纯灰</b>）；中间是当前发行版的主题色{" "}
+              <code>--accent</code>（对自己的面板校过 ≥3:1，认不出时是错开明度的灰）；
+              下排是数据色（静态，穷举验证过色盲安全）。
               <b>一个像素只能属于一层</b>。
             </>
           }
         >
           <div className={`${s.panel} ${s.pad}`}>
             <div className={s.ramp}>
-              {Object.entries(ramp)
-                .filter(([k]) => k !== "sel")
-                .map(([k, l]) => (
-                  <div key={k} style={{ background: `var(--${k})` }}>
-                    <span style={{ color: l > 55 ? "#111" : "#eee" }}>{k}</span>
-                  </div>
-                ))}
+              {RAMP_SWATCHES.map((k) => (
+                <div key={k} style={{ background: `var(--${k})` }}>
+                  <span
+                    style={{ color: INK_SWATCHES.has(k) === (mode === "dark") ? "#111" : "#eee" }}
+                  >
+                    {k}
+                  </span>
+                </div>
+              ))}
             </div>
             <div className={s.swatches} style={{ marginBottom: 4 }}>
               <span className={s.sw}>

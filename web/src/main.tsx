@@ -6,8 +6,8 @@ import "./styles/base.css";
 import { applyTheme, useTheme } from "./theme/useTheme";
 
 // 首帧之前先把 token 写进 :root，否则会闪一下没有变量的裸页面。
-const { mode, distro } = useTheme.getState();
-applyTheme(mode, distro);
+const { mode, theme, distro } = useTheme.getState();
+applyTheme(mode, theme, distro);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
