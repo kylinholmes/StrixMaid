@@ -18,9 +18,18 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # web/dist 不在 git 里，而 rust-embed 的 `folder` 在 **debug 下同样**
+      # 于编译期求值——目录不存在就直接报 "folder does not exist"。
+      # 所以凡是要编 strixmaid-server 的 job 都得先构建前端，不只是出包那几个。
+      - uses: oven-sh/setup-bun@v2
+      - name: 构建前端（rust-embed 的 folder 必须存在）
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
       - name: clippy（零警告是质量门槛）
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: clippy（无 UI 变体也必须干净）
@@ -30,21 +39,145 @@ jobs:
           cargo build -p strixmaid-server -p strixmaid-helper
           cargo test --workspace
 
+  # Windows 是正式支持的运行平台而不是「顺带能编」，所以质量门槛与 Linux 完全
+  # 相同：零 clippy 警告、全部测试通过（docs/windows-platform.md）。
+  #
+  # 为什么不把它并进上面的 check：那个 job 还要跑 musl / zigbuild 相关的断言，
+  # 而 Windows 侧的产物形态完全不同（无 PAM、服务走 SCM、资源要 rc.exe）。
+  # 两条路各自独立，一边挂了另一边的结果仍然有用。
+  #
+  # 需要真实系统能力的测试（ConPTY、事件日志、以管理员身份改系统设置）一律
+  # 写成运行时探测 + eprintln 跳过，不用 #[ignore]，所以在 runner 上照跑不误。
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 同 check job：web/dist 不在 git 里，rust-embed 的 folder 在 debug 下
+      # 也要求目录存在，所以这里同样得先构建前端。
+      - uses: oven-sh/setup-bun@v2
+      - name: 构建前端（rust-embed 的 folder 必须存在）
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+      # 先 build 再 test：有用例会 spawn 真实的 helper 与 worker 可执行文件，
+      # 它们得先存在于 target 目录里（与上面 check job 里同一个理由）。
+      - name: build
+        run: cargo build --workspace
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      # 安装脚本必须在 Windows **自带**的 PowerShell 5.1 下可解析。
+      # `shell: powershell` 就是 5.1（`pwsh` 才是 7），所以这一步同时钉住两件事：
+      # 一是不用 7 才有的语法，二是文件编码——5.1 读没有 BOM 的 .ps1 时按系统
+      # ANSI 代码页解码，中文注释会变成乱码并吞掉引号，直接报语法错误。
+      - name: PowerShell 脚本语法检查（5.1）
+        shell: powershell
+        run: |
+          $files = @(
+            'packaging\windows\install.ps1',
+            'packaging\windows\uninstall.ps1',
+            'scripts\package-windows.ps1'
+          )
+          $bad = 0
+          foreach ($f in $files) {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f).Path, [ref]$null, [ref]$errs)
+            if ($errs -and $errs.Count) {
+              $bad = 1
+              Write-Host "FAIL $f"
+              $errs | ForEach-Object { Write-Host "  行 $($_.Extent.StartLineNumber): $($_.Message)" }
+            }
+            else {
+              Write-Host "OK   $f"
+            }
+          }
+          if ($bad) { exit 1 }
+
+  # Windows 发布 zip（scripts/package-windows.ps1）。与 Linux 侧的 package job
+  # 同构，区别在于二进制就在本 job 里构建——Windows 的资源编译要 rc.exe
+  # （Windows SDK），交叉编译拿不到，见 crates/*/build.rs 的说明。
+  package-windows:
+    needs: [windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 打包脚本自己会构建前端（web/dist 不在 git 里），这里只需把 bun 准备好。
+      # 不在这里重复一次 bun run build：让本地跑脚本与 CI 跑脚本走完全同一条路，
+      # 否则「CI 能出包、本地出的包是旧前端」这类差异会再次出现。
+      - uses: oven-sh/setup-bun@v2
+      - name: 组装 zip（脚本内含前端构建）
+        run: ./scripts/package-windows.ps1
+      - name: 包内容自检（缺一个文件 install.ps1 就会半路失败）
+        run: |
+          $zip = Get-Item strixmaid-*-x86_64-windows.zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          try {
+            # Compress-Archive 在不同版本里写过反斜杠分隔符，统一成 / 再比。
+            $entries = $archive.Entries.FullName | ForEach-Object { $_ -replace '\\', '/' }
+          }
+          finally {
+            $archive.Dispose()
+          }
+          $entries
+          $need = @(
+            'strixmaid.exe', 'strixmaid-helper.exe', 'config.example.toml',
+            'README.md', 'LICENSE',
+            'packaging/install.ps1', 'packaging/uninstall.ps1'
+          )
+          foreach ($f in $need) {
+            if (-not ($entries | Where-Object { $_ -like "*/$f" })) {
+              Write-Host "发布物缺 $f"
+              exit 1
+            }
+          }
+      - name: 示例配置不带 BOM（TOML 不允许，带了就解析不了）
+        run: |
+          $zip = Get-Item strixmaid-*-x86_64-windows.zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          try {
+            $entry = $archive.Entries | Where-Object { $_.Name -eq 'config.example.toml' }
+            $stream = $entry.Open()
+            $buf = New-Object byte[] 3
+            $null = $stream.Read($buf, 0, 3)
+            $stream.Dispose()
+          }
+          finally {
+            $archive.Dispose()
+          }
+          if ($buf[0] -eq 0xEF -and $buf[1] -eq 0xBB -and $buf[2] -eq 0xBF) {
+            Write-Host 'config.example.toml 带了 UTF-8 BOM，TOML 解析器会直接拒绝'
+            exit 1
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: strixmaid-windows-x86_64
+          path: strixmaid-*-x86_64-windows.zip
+
   build-musl:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - name: musl 工具链
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      # web/dist 虽然提交在仓库里(本地无 bun 也能 cargo build),但那只是快照,
-      # 会落后于 web/src——曾经发生过:deb 装出来的 UI 停在几十个提交之前。
-      # 发布物的前端必须在这里现场构建,覆盖掉快照再嵌入。
+      # web/dist 不在 git 里(它是 web/src 的派生物,跟踪必然漂移——曾经发生过:
+      # deb 装出来的 UI 停在几十个提交之前)。本 job 直接调 cargo 而不走
+      # scripts/package.sh,所以要在这里自己把前端构建出来,
+      # 否则 release 下 rust-embed 嵌不到东西、构建会失败。
       - uses: oven-sh/setup-bun@v2
-      - name: 构建前端(嵌入用,覆盖仓库里的 dist 快照)
+      - name: 构建前端(release 下由 rust-embed 嵌入)
         run: |
           cd web
           bun install --frozen-lockfile
@@ -66,7 +199,7 @@ jobs:
               *) echo "$f 的链接方式无法判定，file 说：$desc"; exit 1 ;;
             esac
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: strixmaid-musl-x86_64
           path: |
@@ -76,7 +209,7 @@ jobs:
   build-helper:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # build.rs 有意用 `-l:libpam.so.0`（不必装 dev 包提供 .so 符号链接，见其头注释），
@@ -113,7 +246,7 @@ jobs:
           [ -z "$bad" ] || { echo "多余的直接依赖：$bad"; exit 1; }
           printf '%s\n' "$needed" | grep -qx 'libpam\.so\.0' \
             || { echo "DT_NEEDED 里没有 SONAME libpam.so.0（按绝对路径链时 SONAME 没被采用？）"; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: strixmaid-helper-gnu228
           path: target/x86_64-unknown-linux-gnu/release/strixmaid-helper
@@ -126,8 +259,8 @@ jobs:
     needs: [build-musl, build-helper]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: 组装发布目录
@@ -154,7 +287,7 @@ jobs:
             [ -e "$out/$f" ] || { echo "发布物缺 $f"; exit 1; }
           done
           [ -x "$out/strixmaid" ] && [ -x "$out/packaging/install.sh" ] || { echo "可执行位丢了"; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: strixmaid-dist-x86_64
           path: strixmaid-*-x86_64.tar.gz
@@ -166,8 +299,8 @@ jobs:
     needs: [build-musl, build-helper]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: 组装 deb
@@ -192,7 +325,7 @@ jobs:
                    ./lib/systemd/system/strixmaid.service ./etc/pam.d/strixmaid; do
             echo "$c" | grep -q " $f\$" || { echo "deb 缺 $f"; exit 1; }
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: strixmaid-deb-amd64
           path: dist-deb/*.deb
@@ -204,7 +337,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: strixmaid-deb-amd64
       - name: apt 安装(走依赖解析,顺带验 Depends 声明)
@@ -262,8 +395,8 @@ jobs:
       matrix:
         distro: [ubuntu, rocky]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: strixmaid-dist-x86_64
       - name: 解包
@@ -277,7 +410,7 @@ jobs:
     needs: [build-musl, build-helper]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
       - name: 体积上限（design.md Q3 / roadmap/06 §5.2）
         run: |
           check() { s=$(stat -c%s "$1"); echo "$1: $s bytes"; [ "$s" -le "$2" ] || { echo "超出上限 $2"; exit 1; }; }

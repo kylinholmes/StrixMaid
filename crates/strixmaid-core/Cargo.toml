@@ -12,9 +12,6 @@ async-trait = "0.1.92"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 futures = "0.3.34"
 hex = "0.4.3"
-libc = "0.2.189"
-nix = { version = "0.31.3", features = ["socket", "uio", "process", "user", "fs", "sched", "signal", "poll", "net"] }
-portable-pty = "0.9.0"
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -27,6 +24,15 @@ toml = "1.1.4"
 tracing = "0.1.44"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 
+# Unix 专属
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+nix = { version = "0.31.3", features = ["socket", "uio", "process", "user", "fs", "sched", "signal", "poll", "net"] }
+# PTY：Unix 走 portable-pty。Windows 不用它——ConPTY 要配合
+# `CreateProcessAsUserW` 才能把 shell 跑在登录用户名下，而 portable-pty 的
+# `CommandBuilder` 只能 `CreateProcessW`（见 worker/terminal/windows.rs 的模块文档）。
+portable-pty = "0.9.0"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = { version = "0.18.0", default-features = false }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
@@ -34,3 +40,50 @@ zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.6.0"
 plist = "1.7.4"
+
+# 与 tokio / mio 已经拉进来的是同一个版本，不额外增加构建量。
+# 用原始 FFI（windows-sys）而不是高层封装（windows crate）：与 helper 的自写
+# PAM、`platform/iokit.rs` 同一取向——只声明用得到的那部分表面。
+[target.'cfg(windows)'.dependencies]
+# 进程图标的 PNG 编码。Windows 的图标是 GDI 的 `HICON`（内部是两张位图），
+# 而浏览器只认图片格式，中间必然要有一次编码。
+#
+# 不自己写编码器：PNG 的 CRC、zlib 流与逐扫描线过滤器都是正确性负债，写错的
+# 表现又极其隐蔽——一部分解码器容忍、另一部分不容忍，问题会以「某些浏览器上
+# 图标不显示」的形式出现。也不走 WIC：`windows-sys` 是裸 FFI，没有 COM 辅助，
+# 用它调 WIC 要手写 vtable 与引用计数，代价远超一个只做编码的纯 Rust 库。
+png = "0.18"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    # 图标 → 像素：`GetDIBits` / `CreateCompatibleDC` / `GetObjectW`。
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Environment",
+    "Win32_System_EventLog",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_Shutdown",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    # 图标本体：`PrivateExtractIconsW` / `GetIconInfo` / `DestroyIcon`。
+    "Win32_UI_WindowsAndMessaging",
+] }

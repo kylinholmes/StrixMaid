@@ -1,26 +1,223 @@
 //! `SessionManager` 的状态机测试：用**假 helper**（std 线程，走同样的帧协议）替代
 //! 真 helper，worker 则直接跑进程内的 [`crate::worker::serve`]——协议的每一帧、
-//! `SCM_RIGHTS` 传 fd、`Hello` 握手全部是真的，只有 PAM 与 setuid 被替掉。
+//! 附件（fd / `HANDLE`）传递、`Hello` 握手全部是真的，只有认证与身份切换被替掉。
+//!
+//! # 假 helper 为什么仍然是一条 std 线程
+//!
+//! 真 helper 是**单线程同步**程序（见 `strixmaid-helper/src/ipc`），它手里那一端
+//! 是一条阻塞的字节流。假 helper 保持同一形状：通道两端的模式、帧的先后、
+//! 附件的交接时机都与生产路径一致，测到的才是真实路径。换成 tokio 任务会让
+//! 「主进程这一侧」之外的每一个环节都偏离现实。
+//!
+//! # 两个平台的差异只落在两处
+//!
+//! | | Unix | Windows |
+//! |---|---|---|
+//! | 通道 | `socketpair`；假 helper 那端是阻塞的 `UnixStream` | 命名管道；假 helper 那端**不带**重叠标志，当普通文件阻塞读写 |
+//! | 交出 worker 通道 | `WorkerSpawned` 之后再发一帧 `SCM_RIGHTS` | 句柄值写在 `WorkerSpawned.worker_handle` 里，主进程自己来取 |
+//!
+//! 第二行的不对称性是设计使然，论证见 [`super::channel`] 的模块文档。
+//! 假 helper 与主进程在同一个进程里，因此 Windows 上「读端去对端进程拉句柄」
+//! 的对端就是自己——`DuplicateHandle` 的源进程是本进程，搬运照样成立。
 
+#[cfg(unix)]
 use std::io::IoSlice;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+#[cfg(unix)]
 use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 use strixmaid_types::auth::{AuthUser, Prompt, PromptStyle};
 use strixmaid_types::ipc::{self, FromHelper, IpcPromptResponse, ToHelper};
 use zeroize::Zeroizing;
 
 use super::*;
+use super::channel::IpcChannel;
 use super::{AUDIT_ACTOR_SYSTEM, AUDIT_DROP_ELEVATION, AUDIT_SESSION_EXPIRE};
-use crate::worker::Dispatcher;
+use crate::worker::{Dispatcher, whoami};
 
 const PASSWORD: &str = "correct horse battery staple";
 const OTP: &str = "123456";
+
+/// 假 helper 放进测试用户组列表里的那个「有提权资格」的组。
+///
+/// 默认放行组是按平台定的（Unix 上是 `sudo` / `wheel` / `admin`，Windows 上
+/// 只有内建的 `Administrators`，见 [`strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS`]），
+/// 所以这个名字也必须跟着平台走——写死 `wheel` 的话，Windows 上每一条
+/// 提权用例都会在「没有提权资格」这一步就被挡下，测不到后面的东西。
+#[cfg(unix)]
+const ELEVATE_GROUP: &str = "wheel";
+/// 见上。
+#[cfg(windows)]
+const ELEVATE_GROUP: &str = "Administrators";
+
+// ===========================================================================
+// 通道：假 helper 那一端的形态，两个平台各造各的
+// ===========================================================================
+
+/// 假 helper 手里那一端。两个平台都是**阻塞**的字节流——
+/// `strixmaid_types::ipc` 的同步读写正泛型于 `Read` / `Write`。
+#[cfg(unix)]
+type MockHelperEnd = StdUnixStream;
+/// 见上。命名管道在 Win32 里本来就是文件对象，用 `File` 承载不是取巧，
+/// 真 helper（`strixmaid-helper/src/ipc/windows.rs`）也是这么做的。
+#[cfg(windows)]
+type MockHelperEnd = std::fs::File;
+
+/// 造一条命名管道，两端都是**未注册**的裸句柄。
+///
+/// # 为什么不用 [`IpcChannel::pair`]
+///
+/// `pair()` 的两端都注册在调用者的运行时上，而这里两端都不能这样：
+/// 一端要交给一条 std 线程做阻塞读写；另一端要么由别的运行时接管，
+/// 要么经 `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` 搬给主进程——
+/// 把一个已注册的句柄这样搬走，等于在 tokio 背后关掉它正在用的句柄。
+/// 真 helper 走的也是这条路：管道由它建，两端都交出去，自己一端不注册。
+///
+/// `overlapped_client` 决定客户端那一端要不要 `FILE_FLAG_OVERLAPPED`：
+/// 要跑 tokio 的（进程内 worker）要，自己阻塞读写的（假 helper）不要。
+/// 重叠与否是**打开句柄时**的属性，不是管道本身的，两端互不影响。
+#[cfg(windows)]
+fn raw_pipe_pair(
+    kind: &str,
+    overlapped_client: bool,
+) -> std::io::Result<(
+    std::os::windows::io::OwnedHandle,
+    std::os::windows::io::OwnedHandle,
+)> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_GENERIC_WRITE,
+        FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS};
+
+    use crate::platform::windows::handle::Owned;
+    use crate::platform::windows::wide::to_wide;
+
+    let name = channel::random_pipe_name(kind);
+    let wide = to_wide(&name);
+    // SAFETY: wide 以 NUL 结尾，其余参数为常量；失败返回 INVALID_HANDLE_VALUE，
+    // 由 Owned::new 挡下。名字带 128 位随机量，加上 FIRST_PIPE_INSTANCE，
+    // 别的进程抢不到这个名字。字节流 + 阻塞模式是这几个标志位全为 0 的默认值。
+    let raw_server = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            std::ptr::null(),
+        )
+    };
+    // SAFETY: raw_server 刚由 CreateNamedPipeW 返回，本进程独占。
+    let server = unsafe { Owned::new(raw_server) }?;
+
+    let client_flags = if overlapped_client {
+        FILE_FLAG_OVERLAPPED
+    } else {
+        0
+    };
+    // SAFETY: 同上；管道刚建好且处于监听态，这次 CreateFileW 立刻把它连上。
+    let raw_client = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            client_flags,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: raw_client 刚由 CreateFileW 返回，本进程独占。
+    let client = unsafe { Owned::new(raw_client) }?;
+
+    // 客户端已经连上，管道实例此刻就在「已连接」态；`ConnectNamedPipe` 只会
+    // 立刻以 ERROR_PIPE_CONNECTED 返回，没有可等的东西，因此这里不调它。
+    Ok((server.into_std(), client.into_std()))
+}
+
+/// 主进程 ↔ 假 helper 的一条通道：返回（主进程侧，假 helper 侧）。
+#[cfg(unix)]
+fn mock_helper_pair() -> (IpcChannel, MockHelperEnd) {
+    let (ours, theirs) = StdUnixStream::pair().unwrap();
+    ours.set_nonblocking(true).unwrap();
+    let stream = tokio::net::UnixStream::from_std(ours).unwrap();
+    (IpcChannel::from_unix(stream), theirs)
+}
+
+/// 见 Unix 版。
+#[cfg(windows)]
+fn mock_helper_pair() -> (IpcChannel, MockHelperEnd) {
+    let (server, client) = raw_pipe_pair("mockhelper", false).expect("建假 helper 的管道");
+    // SAFETY: server 刚由 CreateNamedPipeW 建出，带 FILE_FLAG_OVERLAPPED，
+    // 客户端已连上，且尚未注册到任何 I/O 完成端口。
+    //
+    // 对端设成**本进程**：假 helper 就跑在这里，主进程稍后要靠这个进程句柄
+    // 把 worker 通道 `DuplicateHandle` 过来（见模块文档）。
+    let ours = unsafe {
+        IpcChannel::from_server_handle(server, channel::PeerProcess::open(std::process::id()))
+    }
+    .expect("helper 通道注册到 tokio 失败");
+    (ours, std::fs::File::from(client))
+}
+
+/// 起一个进程内 worker，返回「要交给主进程的那半条通道」。
+///
+/// 真 helper 在这一步 `fork` + 切身份 + `exec`；这里只起一条线程跑真的
+/// [`crate::worker::serve`]，帧协议与附件交接一个字都没少。
+///
+/// worker 跑在自己的运行时里（与真 worker 是独立进程对应），所以它那一端
+/// 必须在**那条线程里**才注册进 tokio。
+#[cfg(unix)]
+fn spawn_mock_worker() -> channel::Attachment {
+    let (main_side, worker_side) = StdUnixStream::pair().unwrap();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let stream = IpcChannel::from_owned_fd(channel::Attachment::from(worker_side))
+                .expect("worker 通道注册到 tokio 失败");
+            let _ = crate::worker::serve(stream, Arc::new(Dispatcher::new())).await;
+        });
+    });
+    channel::Attachment::from(main_side)
+}
+
+/// 见 Unix 版。交给主进程的是**服务端**一端：主进程用
+/// `IpcChannel::from_server_handle` 接管它，与真 helper 的交接形状一致。
+#[cfg(windows)]
+fn spawn_mock_worker() -> channel::Attachment {
+    // worker 那端要跑 tokio，必须带 FILE_FLAG_OVERLAPPED。
+    let (server, client) = raw_pipe_pair("mockworker", true).expect("建 worker 管道");
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            // SAFETY: client 刚由 CreateFileW 以 FILE_FLAG_OVERLAPPED 打开，
+            // 本线程独占，尚未注册到任何 I/O 完成端口。
+            let stream = unsafe { IpcChannel::from_client_handle(client) }
+                .expect("worker 通道注册到 tokio 失败");
+            let _ = crate::worker::serve(stream, Arc::new(Dispatcher::new())).await;
+        });
+    });
+    server
+}
+
+// ===========================================================================
 
 /// 假 helper 的行为参数与计数器。
 #[derive(Clone)]
@@ -53,19 +250,17 @@ impl HelperLauncher for MockLauncher {
     fn launch(&self) -> BoxFuture<'_, Result<HelperConn>> {
         Box::pin(async move {
             self.launched.fetch_add(1, Ordering::SeqCst);
-            let (ours, theirs) = StdUnixStream::pair().unwrap();
+            let (ours, theirs) = mock_helper_pair();
             let me = self.clone();
             std::thread::spawn(move || me.run(theirs));
-            ours.set_nonblocking(true).unwrap();
-            let stream = tokio::net::UnixStream::from_std(ours).unwrap();
-            Ok(HelperConn::new(stream, None))
+            Ok(HelperConn::new(ours, None))
         })
     }
 }
 
 impl MockLauncher {
     /// 假 helper 主体：与真 helper 的 `main.rs` 同构。
-    fn run(self, mut s: StdUnixStream) {
+    fn run(self, mut s: MockHelperEnd) {
         let username = match ipc::read_msg::<_, ToHelper>(&mut s) {
             Ok(Some(ToHelper::AuthStart { username, .. })) => username,
             _ => return,
@@ -107,17 +302,21 @@ impl MockLauncher {
                 return;
             }
         }
+        // 假 helper 与主进程同进程，因此「认证通过的那个用户」就是当前进程的身份。
+        // `whoami()` 两个平台都有：Unix 上即 `getuid(2)` / `getgid(2)`，
+        // Windows 上是访问令牌里用户 SID / 主组 SID 映射出来的 uid / gid。
+        let me = whoami();
         ipc::write_msg(
             &mut s,
             &FromHelper::AuthOk {
                 user: AuthUser {
-                    uid: nix::unistd::getuid().as_raw(),
-                    gid: nix::unistd::getgid().as_raw(),
+                    uid: me.uid,
+                    gid: me.gid,
                     username: username.clone(),
-                    // 主组 + wheel。给 wheel 是为了让默认的 elevate_groups 放行它——
+                    // 主组 + 本平台的提权组。给它是为了让默认的 elevate_groups 放行——
                     // 提权路径的用例要走通，就得是个「有资格提权」的用户。
                     // 「无资格被拒」由 `不在_elevate_groups_的用户提权被提前拒绝` 单独覆盖。
-                    groups: vec![username, "wheel".to_owned()],
+                    groups: vec![username, ELEVATE_GROUP.to_owned()],
                 },
             },
         )
@@ -136,36 +335,42 @@ impl MockLauncher {
                         .unwrap();
                         continue;
                     }
-                    let (main_side, worker_side) = StdUnixStream::pair().unwrap();
-                    // 进程内的「worker」：真的 serve()，只是没 exec、没 setuid。
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .unwrap();
-                        rt.block_on(async move {
-                            worker_side.set_nonblocking(true).unwrap();
-                            let stream = tokio::net::UnixStream::from_std(worker_side).unwrap();
-                            let _ = crate::worker::serve(stream, Arc::new(Dispatcher::new())).await;
-                        });
-                    });
+                    // 进程内的「worker」：真的 serve()，只是没 exec、没切身份。
+                    let att = spawn_mock_worker();
                     self.workers.fetch_add(1, Ordering::SeqCst);
+
+                    // Unix：通道不上线，`worker_handle` 恒为 None（真 helper 也是），
+                    // 由紧跟的那帧 SCM_RIGHTS 把 fd 推过去。
+                    // Windows：句柄值就写在这一帧里，主进程拿它去 DuplicateHandle。
+                    #[cfg(unix)]
+                    let worker_handle = None;
+                    #[cfg(windows)]
+                    let worker_handle = Some(channel::raw_of(&att));
+
                     ipc::write_msg(
                         &mut s,
                         &FromHelper::WorkerSpawned {
                             // 进程内 worker 没有独立 pid；<= 1 表示未知，主进程不会对它发信号。
                             pid: -1,
-                            uid: nix::unistd::getuid().as_raw(),
+                            uid: whoami().uid,
                             session_opened: false,
                             session_error: Some("mock: 没有 PAM 会话".into()),
+                            worker_handle,
                         },
                     )
                     .unwrap();
-                    let fds = [main_side.as_raw_fd()];
-                    let iov = [IoSlice::new(b"F")];
-                    let cmsg = [ControlMessage::ScmRights(&fds)];
-                    sendmsg::<()>(s.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None).unwrap();
-                    drop(main_side);
+
+                    #[cfg(unix)]
+                    {
+                        let fds = [att.as_raw_fd()];
+                        let iov = [IoSlice::new(b"F")];
+                        let cmsg = [ControlMessage::ScmRights(&fds)];
+                        sendmsg::<()>(s.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None).unwrap();
+                    }
+                    // 本进程手里这一份的处置两个平台是相反的，见 `channel::release_sent`：
+                    // Unix 必须 drop（否则对端等不到 EOF），Windows 必须 forget
+                    // （句柄已被读端连所有权一起搬走）。
+                    channel::release_sent(vec![att]);
                 }
                 Ok(Some(ToHelper::CloseSession)) => {
                     let _ = ipc::write_msg(&mut s, &FromHelper::SessionClosed);
@@ -200,7 +405,7 @@ fn cfg(idle: Duration, elevated: Duration, pending: Duration) -> SessionManagerC
         elevated_idle_timeout: elevated,
         pending_timeout: pending,
         node_id: LOCAL_NODE_ID.into(),
-        // mock helper 让测试用户属于 wheel，默认组列表因此放行它
+        // mock helper 让测试用户属于本平台的提权组，默认组列表因此放行它
         elevate_groups: strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS
             .iter()
             .map(|s| (*s).to_owned())
@@ -234,6 +439,17 @@ async fn wait_for(counter: &AtomicUsize, target: usize) {
 }
 
 // ===========================================================================
+
+/// [`ELEVATE_GROUP`] 必须真的在默认放行列表里，否则下面几条走默认配置的
+/// 提权用例测到的就不是「默认配置放行有资格的用户」这件事。
+#[test]
+fn 测试用的提权组在默认列表里() {
+    assert!(
+        strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS.contains(&ELEVATE_GROUP),
+        "{ELEVATE_GROUP} 不在默认放行组 {:?} 里",
+        strixmaid_types::auth::DEFAULT_ELEVATE_GROUPS
+    );
+}
 
 #[test]
 fn token_哈希不可逆且稳定() {
@@ -347,7 +563,8 @@ async fn 完整状态机_登录_提权_超时回收_登出() {
     let worker = m.user_worker(&session.token_hash).await.unwrap();
     worker.ping().await.unwrap();
     let who = worker.whoami().await.unwrap();
-    assert_eq!(who.uid, nix::unistd::getuid().as_raw());
+    // 进程内 worker 与本测试同进程，它报的身份必须与本进程一致。
+    assert_eq!(who.uid, whoami().uid);
     assert!(m.admin_worker(&session.token_hash).await.is_none());
 
     // ---- 提权 ----
@@ -566,9 +783,16 @@ async fn 启动时清理残留会话行() {
 
 // ===========================================================================
 // 真 helper + 真 PAM（手动运行：cargo test -p strixmaid-core -- --ignored 真实）
+//
+// 这一段是 **Unix 专属**的，不是「还没移植」：它测的是 PAM 的
+// challenge-response 往返，而 PAM 在 Windows 上没有对应物——那边的认证走
+// `LogonUserW`，一次调用出结果，没有可以跨 IPC 往返的对话轮次。
+// 等价的 Windows 用例要等 helper 的 Windows 认证后端落地后，
+// 连同「登录失败 → STATUS_LOGON_FAILURE」一起在 helper 那一侧写。
 // ===========================================================================
 
 /// 在 target 目录里找已构建的 `strixmaid-helper`。
+#[cfg(unix)]
 fn find_real_helper() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent()?;
@@ -585,6 +809,7 @@ fn find_real_helper() -> Option<std::path::PathBuf> {
 /// 走 `ProcessHelperLauncher`（socketpair + dup2 到 fd 3 + spawn）→ 真 PAM（`sudo` 服务）
 /// → 错误密码 → `PAM_AUTH_ERR`。不知道当前用户的密码，所以只能测失败路径，
 /// 但 challenge-response 的每一步（prompt 经 IPC 往返、conversation 回调）都真实发生了。
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "需要真实 PAM 与已构建的 target/debug/strixmaid-helper"]
 async fn 真实_helper_错误密码路径() {
@@ -635,7 +860,7 @@ async fn 真实_helper_错误密码路径() {
 #[tokio::test]
 async fn 不在_elevate_groups_的用户提权被提前拒绝() {
     let mock = MockLauncher::new(true, 1);
-    // 只允许 wheel；mock helper 给用户的组是 [用户名, "wheel"]，
+    // mock helper 给用户的组是 [用户名, ELEVATE_GROUP]，
     // 这里把允许列表改成一个它肯定不属于的组。
     let mut c = cfg(
         Duration::from_secs(60),
@@ -662,7 +887,10 @@ async fn 不在_elevate_groups_的用户提权被提前拒绝() {
     assert_eq!(api.code, ErrorCode::PermissionDenied);
     let detail = api.detail.unwrap_or_default();
     assert!(detail.contains("no-such-group"), "要说清需要哪个组：{detail}");
-    assert!(detail.contains("wheel"), "也要说清用户实际所属：{detail}");
+    assert!(
+        detail.contains(ELEVATE_GROUP),
+        "也要说清用户实际所属：{detail}"
+    );
     assert!(
         !api.can_retry_elevated,
         "再提一次权也不会变，这个标志必须是 false"
@@ -686,7 +914,7 @@ async fn 在_elevate_groups_的用户提权正常() {
         Duration::from_secs(60),
         Duration::from_secs(60),
     );
-    c.elevate_groups = vec!["wheel".to_owned()];
+    c.elevate_groups = vec![ELEVATE_GROUP.to_owned()];
     let m = manager(Arc::new(mock.clone()), c).await;
 
     let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
@@ -699,7 +927,7 @@ async fn 在_elevate_groups_的用户提权正常() {
     let (pending, _) = m
         .elevate_start(&hash_token(&token), None)
         .await
-        .expect("wheel 用户应能进入提权对话");
+        .expect("属于提权组的用户应能进入提权对话");
     assert!(
         mock.launched.load(Ordering::SeqCst) > launched_before,
         "进入提权对话意味着起了第二个 helper"

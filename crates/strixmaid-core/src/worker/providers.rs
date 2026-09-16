@@ -473,10 +473,20 @@ mod tests {
         assert!(listing["entries"].as_array().is_some_and(|a| !a.is_empty()));
 
         // roots 之外 → 403（roadmap/04 §A.4）。
+        //
+        // 路径字面量必须按平台给：`/etc` 在 Windows 上连合法的绝对路径都不是
+        // （没有盘符前缀），会先在规范化那一步报 `InvalidRequest`，
+        // 于是根本走不到 roots 校验。两边取的都是「一对互不包含的绝对路径」，
+        // 要断言的那件事完全一样。
+        #[cfg(unix)]
+        let (outside, roots) = ("/etc", serde_json::json!(["/home"]));
+        #[cfg(windows)]
+        let (outside, roots) = (r"C:\Windows", serde_json::json!([r"C:\Users"]));
+
         let err = d
             .dispatch(
                 rpc::FS_LIST,
-                serde_json::json!({ "path": "/etc", "allowed_roots": ["/home"] }),
+                serde_json::json!({ "path": outside, "allowed_roots": roots }),
             )
             .await
             .unwrap_err();
@@ -523,8 +533,14 @@ mod tests {
         assert!(list.as_array().is_some_and(|a| !a.is_empty()));
 
         let probe = d.dispatch(rpc::CAPS_PROBE_USER, Value::Null).await.unwrap();
-        // SAFETY: getuid 无副作用。
-        assert_eq!(probe["uid"].as_u64(), Some(u64::from(unsafe { libc::getuid() })));
+        // 探测结果里的 uid 必须是**本进程**的 uid：probe 在 worker 内跑，
+        // 试出来的可见范围只有绑在当前身份上才有意义。
+        // `whoami()` 两个平台都有：Unix 上就是 `getuid(2)`，
+        // Windows 上是访问令牌里用户 SID 映射出来的 uid。
+        assert_eq!(
+            probe["uid"].as_u64(),
+            Some(u64::from(crate::worker::whoami().uid))
+        );
     }
 
     #[tokio::test]

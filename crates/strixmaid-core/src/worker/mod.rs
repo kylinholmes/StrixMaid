@@ -47,7 +47,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -55,14 +54,18 @@ use futures::stream::{BoxStream, Stream, StreamExt};
 use serde_json::Value;
 use strixmaid_types::ApiError;
 use strixmaid_types::ipc::{FromWorker, METHOD_PING, METHOD_WHOAMI, ToWorker, WhoAmI};
-use tokio::net::UnixStream;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::session::channel::{Attachment, IpcChannel, RawAttachment, raw_of, release_sent};
 use crate::session::framing::{self, FdFrameReader};
 
 pub mod probe;
 pub mod providers;
+/// Unix 专属：`fork` + 切身份 + `exec`。Windows 上对应的能力在
+/// [`terminal::windows`] 里由 `CreateProcessAsUserW` + ConPTY 一并完成，
+/// 没有可以单独抽出来的「切身份后 exec」步骤。
+#[cfg(unix)]
 pub mod spawn_as;
 pub mod terminal;
 
@@ -70,14 +73,14 @@ pub mod terminal;
 pub type Handler =
     Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value, ApiError>> + Send + Sync + 'static>;
 
-/// 一个会交出 fd 的 RPC 处理器。
+/// 一个会交出附件（fd / `HANDLE`）的 RPC 处理器。
 ///
 /// 与 [`Handler`] 分开是因为「顺带交出内核资源」是**质**的不同：普通处理器只
-/// 产生 JSON，而这类处理器产生的 fd 必须原子地随同一帧发出（见
+/// 产生 JSON，而这类处理器产生的附件必须原子地随同一帧发出（见
 /// [`crate::session::framing::FdFrameReader`]），漏掉一个就是一个泄漏的 PTY。
 /// 让它在类型上就显形，比在文档里叮嘱可靠。
 pub type FdHandler = Arc<
-    dyn Fn(Value) -> BoxFuture<'static, Result<(Value, Vec<OwnedFd>), ApiError>>
+    dyn Fn(Value) -> BoxFuture<'static, Result<(Value, Vec<Attachment>), ApiError>>
         + Send
         + Sync
         + 'static,
@@ -177,14 +180,14 @@ impl Dispatcher {
         Ok(value)
     }
 
-    /// 分发一次调用，连同处理器交出的 fd。
+    /// 分发一次调用，连同处理器交出的附件。
     ///
-    /// 两张表都查：先普通处理器，再 fd 处理器。同名不会出现——注册时就该二选一。
+    /// 两张表都查：先普通处理器，再附件处理器。同名不会出现——注册时就该二选一。
     pub async fn dispatch_with_fds(
         &self,
         method: &str,
         params: Value,
-    ) -> Result<(Value, Vec<OwnedFd>), ApiError> {
+    ) -> Result<(Value, Vec<Attachment>), ApiError> {
         if let Some(h) = self.handlers.get(method) {
             return h(params).await.map(|v| (v, Vec::new()));
         }
@@ -257,7 +260,7 @@ impl Dispatcher {
 ///
 /// 调用两次：第一次问个数，第二次取内容。个数在两次之间变大时返回空表而不是
 /// 截断的结果，避免报出一个「看起来完整、其实少了几项」的组列表。
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, target_os = "macos"))]
 fn current_groups() -> Vec<u32> {
     // SAFETY: gidsetsize 为 0 时 getgroups 不写 grouplist，只返回组数。
     let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
@@ -275,7 +278,7 @@ fn current_groups() -> Vec<u32> {
 }
 
 /// 当前进程的补充组列表。
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn current_groups() -> Vec<u32> {
     nix::unistd::getgroups()
         .map(|gs| gs.into_iter().map(|g| g.as_raw()).collect())
@@ -283,6 +286,7 @@ fn current_groups() -> Vec<u32> {
 }
 
 /// 当前进程的身份快照，直接问内核。
+#[cfg(unix)]
 pub fn whoami() -> WhoAmI {
     let groups = current_groups();
     WhoAmI {
@@ -300,12 +304,61 @@ pub fn whoami() -> WhoAmI {
     }
 }
 
+/// 当前进程的身份快照，直接问访问令牌。
+///
+/// # 几个字段在 Windows 上的读法
+///
+/// | `WhoAmI` 字段 | Windows 的对应物 |
+/// |---|---|
+/// | `uid` / `euid` | 用户 SID 的 RID（`S-1-5-18` → 0，见 [`crate::platform::windows::token`]） |
+/// | `gid` / `egid` | 主组 SID 的 RID |
+/// | `groups` | 令牌里所有组 SID 的 RID |
+/// | `user` | `DOMAIN\用户名` |
+/// | `home` | `%USERPROFILE%` |
+///
+/// # 为什么 `uid == euid`
+///
+/// Windows 没有「有效用户」这一层：一个进程的令牌就是它的全部身份，
+/// 不存在 setuid 那种「实际身份与有效身份分开」的状态。提权在这里是
+/// **另一个令牌**（UAC 的 linked token），进而是另一个进程，而不是同一个
+/// 进程的两套 id。所以两者恒等，`gid` / `egid` 同理。
+///
+/// 取不到令牌时回落到全 0 而不是 panic：`whoami` 是展示与诊断用的，
+/// 让 worker 因为它起不来是本末倒置。
+#[cfg(windows)]
+pub fn whoami() -> WhoAmI {
+    use crate::platform::windows::token;
+
+    let id = token::current_identity().ok();
+    let (uid, gid, user, groups) = match id {
+        Some(id) => {
+            let name = id.account.as_ref().map(token::AccountName::qualified);
+            let groups = id.group_rids.clone();
+            (id.uid, id.gid, name, groups)
+        }
+        None => (0, 0, None, Vec::new()),
+    };
+    WhoAmI {
+        pid: std::process::id() as i32,
+        uid,
+        euid: uid,
+        gid,
+        egid: gid,
+        groups,
+        cwd: std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        user,
+        home: std::env::var("USERPROFILE").ok(),
+    }
+}
+
 /// 在 `stream` 上服务直到主进程发 `Shutdown` 或关闭连接。
 ///
 /// 第一帧是 [`FromWorker::Hello`]，让主进程确认身份切换已生效。
-pub async fn serve(stream: UnixStream, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
-    // 读写共享同一个 `Arc<UnixStream>`：应答可能要附着 PTY 的 fd，而
-    // `sendmsg` 需要裸 fd，`OwnedWriteHalf` 给不了。写侧用 `Mutex<()>` 串行化，
+pub async fn serve(stream: IpcChannel, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
+    // 读写共享同一个 `Arc<IpcChannel>`：应答可能要附着 PTY 那条通道，而带附件的
+    // 收发都需要拿着整条连接（拆成读写两半就做不到）。写侧用 `Mutex<()>` 串行化，
     // 保证一帧原子写完。
     let stream = Arc::new(stream);
     let mut reader = FdFrameReader::new(stream.clone());
@@ -327,11 +380,7 @@ pub async fn serve(stream: UnixStream, dispatcher: Arc<Dispatcher>) -> anyhow::R
             )
             .await?;
     }
-    tracing::info!(
-        pid = std::process::id(),
-        uid = nix::unistd::getuid().as_raw(),
-        "worker 就绪"
-    );
+    tracing::info!(pid = std::process::id(), uid = whoami().uid, "worker 就绪");
 
     let mut inflight = tokio::task::JoinSet::new();
     // 订阅是长命的，不能和一次性调用共用 JoinSet：退出时要「取消」而不是「等它跑完」。
@@ -340,9 +389,9 @@ pub async fn serve(stream: UnixStream, dispatcher: Arc<Dispatcher>) -> anyhow::R
         let msg: Option<ToWorker> = match reader.read().await? {
             Some((payload, fds)) => {
                 if !fds.is_empty() {
-                    // 主进程从不向 worker 发 fd。真收到说明协议用错了，
+                    // 主进程从不向 worker 发附件。真收到说明协议用错了，
                     // 记一笔并关掉，别让它悄悄留在进程里。
-                    tracing::warn!(count = fds.len(), "主进程发来了 fd，已关闭");
+                    tracing::warn!(count = fds.len(), "主进程发来了附件，已关闭");
                 }
                 Some(strixmaid_types::ipc::decode(&payload)?)
             }
@@ -365,11 +414,13 @@ pub async fn serve(stream: UnixStream, dispatcher: Arc<Dispatcher>) -> anyhow::R
                         Ok((value, fds)) => (FromWorker::Result { id, value }, fds),
                         Err(error) => (FromWorker::Error { id, error }, Vec::new()),
                     };
-                    let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+                    let raw: Vec<RawAttachment> = fds.iter().map(raw_of).collect();
                     if let Err(e) = writer.send(&reply, &raw).await {
                         tracing::warn!(error = %e, "写回 RPC 响应失败");
                     }
-                    // fds 在这里 drop：主进程已经拿到了自己的副本。
+                    // 主进程已经（或即将）拿到它自己那一份，本进程的这份该退场了。
+                    // 两个平台在这里的正确做法是相反的，见 `release_sent`。
+                    release_sent(fds);
                 });
             }
             Some(ToWorker::Subscribe {
@@ -483,45 +534,82 @@ async fn run_subscription(
     }
 }
 
-/// `strixmaid worker --ipc-fd N` 的入口：接管 fd，跑 [`serve`]。
-pub async fn run_from_fd(fd: RawFd, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
+/// `strixmaid worker --ipc-fd N`（Unix）的入口：接管 fd，跑 [`serve`]。
+#[cfg(unix)]
+pub async fn run_from_ipc(raw: RawAttachment, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
+    use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
+
+    let fd = RawFd::try_from(raw).map_err(|_| anyhow::anyhow!("fd {raw} 超出范围"))?;
     // SAFETY: fd 由 helper dup2 到位、本进程独占；exec 之后没有其它持有者。
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let std_stream = std::os::unix::net::UnixStream::from(owned);
-    std_stream
-        .set_nonblocking(true)
-        .map_err(|e| anyhow::anyhow!("fd {fd} 设置非阻塞失败: {e}"))?;
-    let stream = UnixStream::from_std(std_stream)
+    let stream = IpcChannel::from_owned_fd(owned)
         .map_err(|e| anyhow::anyhow!("fd {fd} 不是可用的 Unix socket: {e}"))?;
     serve(stream, dispatcher).await
 }
 
-/// worker 侧的写端：串行化的、能附着 fd 的帧写入器。
+/// `strixmaid worker --ipc-handle N`（Windows）的入口：接管句柄，跑 [`serve`]。
 ///
-/// 多个在途调用与多条订阅共用一条 socket，写必须串行——一帧写到一半被另一帧
+/// 句柄是 helper 建管道时标成可继承、并经命令行把值告知本进程的
+/// （对应 Unix 上「`dup2` 到 fd 3 + 约定 fd 号」那一步）。本进程是管道的
+/// **客户端**一侧。
+#[cfg(windows)]
+pub async fn run_from_ipc(raw: RawAttachment, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+
+    // SAFETY: 句柄由 helper 通过继承交给本进程并独占；值经命令行传入。
+    let owned = unsafe { OwnedHandle::from_raw_handle(raw as usize as *mut std::ffi::c_void) };
+    // SAFETY: helper 建这条管道时带了 FILE_FLAG_OVERLAPPED，且尚未注册到完成端口。
+    let stream = unsafe { IpcChannel::from_client_handle(owned) }
+        .map_err(|e| anyhow::anyhow!("句柄 {raw:#x} 不是可用的命名管道客户端: {e}"))?;
+    serve(stream, dispatcher).await
+}
+
+/// `strixmaid worker --ipc-pipe <名字>`（Windows）的入口：**按名字**连通道。
+///
+/// # 什么时候走这条路而不是 `--ipc-handle`
+///
+/// helper 拉起 worker 有三级阶梯，其中 `CreateProcessWithTokenW` 那一级
+/// **交不出句柄**：进程实际上是 seclogon 服务代建的，函数签名里连
+/// `bInheritHandles` 都没有，helper 句柄表里的东西到不了这里。
+/// 那一级只能把管道的**名字**告诉 worker，由 worker 自己连一次。
+///
+/// 这条路上的访问检查是真的会发生的（`--ipc-handle` 那条不会——句柄在 helper
+/// 里开好时就查过了），所以 helper 建管道时必须在 SDDL 里写上目标用户的 SID。
+/// 详见 `strixmaid-helper` 的 `spawn::windows` 模块文档。
+///
+/// 名字是 128 位随机的，且管道 `nMaxInstances = 1`、实例在 `CreateProcess`
+/// 之前就被 helper 占满，所以「按名字连」并没有额外放开什么。
+#[cfg(windows)]
+pub async fn run_from_pipe(name: &str, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
+    let stream = IpcChannel::connect(name)
+        .map_err(|e| anyhow::anyhow!("连接 IPC 管道 {name} 失败: {e}"))?;
+    serve(stream, dispatcher).await
+}
+
+/// worker 侧的写端：串行化的、能附着附件的帧写入器。
+///
+/// 多个在途调用与多条订阅共用一条连接，写必须串行——一帧写到一半被另一帧
 /// 插进来，读端看到的就是乱码。`Mutex<()>` 只守写这一个动作，不影响读。
 pub struct FrameWriter {
-    stream: Arc<UnixStream>,
+    stream: Arc<IpcChannel>,
     lock: Mutex<()>,
 }
 
 impl FrameWriter {
-    /// 写一帧，可附带 fd。
+    /// 写一帧，可附带附件。
     pub async fn send<T: serde::Serialize + ?Sized>(
         &self,
         msg: &T,
-        fds: &[RawFd],
+        fds: &[RawAttachment],
     ) -> strixmaid_types::ipc::IpcResult<()> {
         let _guard = self.lock.lock().await;
         framing::write_msg_with_fds(&self.stream, msg, fds).await
     }
 
-    /// 半关写方向，让主进程的读端看到 EOF。
+    /// 半关写方向，让主进程的读端看到 EOF（Windows 上是无操作，见
+    /// [`IpcChannel::shutdown_write`]）。
     pub fn shutdown_write(&self) {
-        let _ = nix::sys::socket::shutdown(
-            self.stream.as_raw_fd(),
-            nix::sys::socket::Shutdown::Write,
-        );
+        self.stream.shutdown_write();
     }
 }
 
@@ -557,20 +645,20 @@ mod tests {
         })
     }
 
-    /// 起一个进程内 worker，返回主进程侧的读写两半。
-    fn spawn_worker(
-        d: Dispatcher,
-    ) -> (
-        tokio::net::unix::OwnedReadHalf,
-        tokio::net::unix::OwnedWriteHalf,
-    ) {
-        let (main_side, worker_side) = UnixStream::pair().unwrap();
+    /// 起一个进程内 worker，返回主进程侧的那一端。
+    ///
+    /// 这里不再把连接拆成读写两半：[`IpcChannel`] 没有 `split`——Windows 上
+    /// 命名管道的两端是一条通道的两个方向，tokio 不提供半条的所有权类型，
+    /// 而 Unix 侧的 `OwnedReadHalf` 又收不了附件（见 `framing::unix::FdFrameReader`
+    /// 的文档）。下面的用例读写本来就是交替进行的，一个 `&mut` 足够。
+    fn spawn_worker(d: Dispatcher) -> IpcChannel {
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
         tokio::spawn(serve(worker_side, Arc::new(d)));
-        main_side.into_split()
+        main_side
     }
 
     /// 读一帧，超时即失败。
-    async fn next_frame(r: &mut tokio::net::unix::OwnedReadHalf) -> FromWorker {
+    async fn next_frame(r: &mut IpcChannel) -> FromWorker {
         tokio::time::timeout(Duration::from_secs(3), framing::read_msg::<_, FromWorker>(r))
             .await
             .expect("3 秒内应收到一帧")
@@ -591,7 +679,18 @@ mod tests {
         );
         let who: WhoAmI =
             serde_json::from_value(d.dispatch(METHOD_WHOAMI, Value::Null).await.unwrap()).unwrap();
+        // `whoami` 报的必须是**本进程**的身份。
+        // Unix 上有独立的第二来源（`getuid(2)`）可以对账；Windows 上 uid 是
+        // 「令牌里用户 SID 的 RID」，除了访问令牌没有别的来源，因此改用 pid
+        // 这个可独立验证的字段，再确认 uid 与 `whoami()` 一致。
+        #[cfg(unix)]
         assert_eq!(who.uid, nix::unistd::getuid().as_raw());
+        #[cfg(windows)]
+        {
+            assert_eq!(who.pid, std::process::id() as i32);
+            assert_eq!(who.uid, whoami().uid);
+            assert_eq!(who.euid, who.uid, "Windows 没有「有效用户」这一层");
+        }
         let err = d.dispatch("nope", Value::Null).await.unwrap_err();
         assert_eq!(err.code, strixmaid_types::ErrorCode::NotFound);
     }
@@ -609,15 +708,15 @@ mod tests {
 
     #[tokio::test]
     async fn serve_先发_hello_再应答调用并响应_shutdown() {
-        let (main_side, worker_side) = UnixStream::pair().unwrap();
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
         let server = tokio::spawn(serve(worker_side, Arc::new(Dispatcher::new())));
 
-        let (mut r, mut w) = main_side.into_split();
-        let hello: FromWorker = framing::read_msg(&mut r).await.unwrap().unwrap();
+        let mut main = main_side;
+        let hello: FromWorker = framing::read_msg(&mut main).await.unwrap().unwrap();
         assert!(matches!(hello, FromWorker::Hello { .. }));
 
         framing::write_msg(
-            &mut w,
+            &mut main,
             &ToWorker::Call {
                 id: 9,
                 method: METHOD_PING.into(),
@@ -626,7 +725,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let reply: FromWorker = framing::read_msg(&mut r).await.unwrap().unwrap();
+        let reply: FromWorker = framing::read_msg(&mut main).await.unwrap().unwrap();
         assert_eq!(
             reply,
             FromWorker::Result {
@@ -635,13 +734,13 @@ mod tests {
             }
         );
 
-        framing::write_msg(&mut w, &ToWorker::Shutdown)
+        framing::write_msg(&mut main, &ToWorker::Shutdown)
             .await
             .unwrap();
         server.await.unwrap().unwrap();
         // 对端关闭
         assert!(
-            framing::read_msg::<_, FromWorker>(&mut r)
+            framing::read_msg::<_, FromWorker>(&mut main)
                 .await
                 .unwrap()
                 .is_none()
@@ -659,11 +758,11 @@ mod tests {
         });
         assert_eq!(d.stream_channels(), vec!["tick".to_string()]);
 
-        let (mut r, mut w) = spawn_worker(d);
-        assert!(matches!(next_frame(&mut r).await, FromWorker::Hello { .. }));
+        let mut main = spawn_worker(d);
+        assert!(matches!(next_frame(&mut main).await, FromWorker::Hello { .. }));
 
         framing::write_msg(
-            &mut w,
+            &mut main,
             &ToWorker::Subscribe {
                 id: 1,
                 channel: "tick".into(),
@@ -674,7 +773,7 @@ mod tests {
         .unwrap();
 
         for expected in 0..3u64 {
-            match next_frame(&mut r).await {
+            match next_frame(&mut main).await {
                 FromWorker::Event { id, data } => {
                     assert_eq!(id, 1);
                     assert_eq!(data, json!(expected));
@@ -683,14 +782,14 @@ mod tests {
             }
         }
 
-        framing::write_msg(&mut w, &ToWorker::Unsubscribe { id: 1 })
+        framing::write_msg(&mut main, &ToWorker::Unsubscribe { id: 1 })
             .await
             .unwrap();
 
         // 退订后立刻发一次普通 RPC：它必须照常应答，证明订阅任务与调用互不牵连。
         // 同时它也是个同步点——收到它时，之前在途的帧都已经读完了。
         framing::write_msg(
-            &mut w,
+            &mut main,
             &ToWorker::Call {
                 id: 2,
                 method: METHOD_PING.into(),
@@ -702,7 +801,7 @@ mod tests {
 
         // 退订与在途的 Event 可能擦肩而过，允许再收到若干帧，但必须等到 ping 的应答。
         loop {
-            match next_frame(&mut r).await {
+            match next_frame(&mut main).await {
                 FromWorker::Result { id: 2, value } => {
                     assert_eq!(value, Value::String("pong".into()));
                     break;
@@ -715,7 +814,7 @@ mod tests {
         // 此后彻底安静：不再有 Event，也不该有 End（退订不发 End）。
         let quiet = tokio::time::timeout(
             Duration::from_millis(200),
-            framing::read_msg::<_, FromWorker>(&mut r),
+            framing::read_msg::<_, FromWorker>(&mut main),
         )
         .await;
         assert!(quiet.is_err(), "退订后仍在推送: {quiet:?}");
@@ -735,11 +834,11 @@ mod tests {
             Err::<stream::Empty<Value>, _>(ApiError::capability_unavailable("journal", "没有日志后端"))
         });
 
-        let (mut r, mut w) = spawn_worker(d);
-        assert!(matches!(next_frame(&mut r).await, FromWorker::Hello { .. }));
+        let mut main = spawn_worker(d);
+        assert!(matches!(next_frame(&mut main).await, FromWorker::Hello { .. }));
 
         framing::write_msg(
-            &mut w,
+            &mut main,
             &ToWorker::Subscribe {
                 id: 5,
                 channel: "two".into(),
@@ -748,16 +847,16 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(next_frame(&mut r).await, FromWorker::Event { id: 5, .. }));
-        assert!(matches!(next_frame(&mut r).await, FromWorker::Event { id: 5, .. }));
+        assert!(matches!(next_frame(&mut main).await, FromWorker::Event { id: 5, .. }));
+        assert!(matches!(next_frame(&mut main).await, FromWorker::Event { id: 5, .. }));
         assert_eq!(
-            next_frame(&mut r).await,
+            next_frame(&mut main).await,
             FromWorker::End { id: 5, error: None }
         );
 
         for (id, channel) in [(6u64, "boom"), (7, "没这个频道")] {
             framing::write_msg(
-                &mut w,
+                &mut main,
                 &ToWorker::Subscribe {
                     id,
                     channel: channel.into(),
@@ -766,7 +865,7 @@ mod tests {
             )
             .await
             .unwrap();
-            match next_frame(&mut r).await {
+            match next_frame(&mut main).await {
                 FromWorker::End {
                     id: got,
                     error: Some(e),
@@ -800,16 +899,10 @@ mod tests {
             async move { Ok(ticker(flag)) }
         });
 
-        let (main_side, worker_side) = std::os::unix::net::UnixStream::pair().unwrap();
-        worker_side.set_nonblocking(true).unwrap();
-        let worker = tokio::spawn(serve(
-            UnixStream::from_std(worker_side).unwrap(),
-            Arc::new(d),
-        ));
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
+        let worker = tokio::spawn(serve(worker_side, Arc::new(d)));
         // pid 传 0：这是进程内 worker，绝不能对它发信号。
-        let handle = WorkerHandle::connect(OwnedFd::from(main_side), 0, None)
-            .await
-            .unwrap();
+        let handle = WorkerHandle::connect(main_side, 0, None).await.unwrap();
 
         let mut rx = handle
             .subscribe("tick", json!({ "from": 0 }))
@@ -842,15 +935,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_handle_订阅未知频道时流立刻结束() {
-        let (main_side, worker_side) = std::os::unix::net::UnixStream::pair().unwrap();
-        worker_side.set_nonblocking(true).unwrap();
-        tokio::spawn(serve(
-            UnixStream::from_std(worker_side).unwrap(),
-            Arc::new(Dispatcher::new()),
-        ));
-        let handle = WorkerHandle::connect(OwnedFd::from(main_side), 0, None)
-            .await
-            .unwrap();
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
+        tokio::spawn(serve(worker_side, Arc::new(Dispatcher::new())));
+        let handle = WorkerHandle::connect(main_side, 0, None).await.unwrap();
 
         // `subscribe` 本身成功（帧发出去了），失败以「流立刻结束」的形式出现。
         let mut rx = handle.subscribe("没这个频道", Value::Null).await.unwrap();

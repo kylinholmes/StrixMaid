@@ -7,13 +7,14 @@
 //!
 //! | 目录 | 数据源 | 覆盖的采集项 |
 //! |---|---|---|
-//! | [`linux`] | `/proc`、`/sys` | roadmap/08 §4.2 全部八类（目标平台，GPU 视 sysfs 而定） |
+//! | [`linux`] | `/proc`、`/sys` | roadmap/08 §4.2 全部八类（GPU 视 sysfs 而定） |
 //! | [`macos`] | mach、`sysctl`、`getifaddrs`、`getmntinfo` | CPU / 内存 / 负载 / 网络 / 文件系统 |
+//! | [`windows`] | `NtQuerySystemInformation`、`GlobalMemoryStatusEx`、`GetIfTable2`、`IOCTL_DISK_PERFORMANCE`、PDH | 除 PSI 与 `load.1m` 外全部 |
 //!
-//! macOS 是**开发与联调平台**，不是交付目标：那里没有 PSI（`/proc/pressure` 是 Linux
-//! 独有的内核特性），逐设备磁盘 IO 与 GPU 要走 IOKit，成本与收益都不匹配，故都不注册。
-//! 少注册几个采集器不需要任何额外处理——指标是否存在本来就由
-//! `GET /metrics/series` 如实报告，前端据此决定画不画。
+//! 每个平台缺的那几项如实缺席，**不需要任何额外处理**——指标是否存在本来就由
+//! `GET /metrics/series` 如实报告，前端据此决定画不画。这正是 `design.md` §1
+//! 第 2 条「能力探测而非硬依赖」在指标层的体现：macOS 没有 PSI、Windows 没有
+//! 负载均值，那就是没有，不是错误。
 //!
 //! # 约定（两个平台共同遵守）
 //!
@@ -34,11 +35,15 @@ use std::time::Instant;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 use linux as sys;
 #[cfg(target_os = "macos")]
 use macos as sys;
+#[cfg(windows)]
+use windows as sys;
 
 /// 标签集合：键为静态字符串（见 [`crate::metrics::catalog::label`]），值由采集器生成。
 /// 绝大多数指标只有 0–1 个标签，`Vec` 足够。

@@ -157,6 +157,22 @@ button.thBtn:hover {
   flex: none;
 }
 
+/* 服务图标:先占坑再填图。尺寸写死在容器上,图标取到与否、什么时候取到,
+   行高与名称列的排布都不变——否则图标陆续到达时整张表会抖。 */
+.icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.iconImg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 服务端给的是 32×32,缩到 16 显示;万一尺寸不是预期值也只缩不裁 */
+  object-fit: contain;
+}
+
 .desc {
   color: var(--ink-3);
   overflow: hidden;

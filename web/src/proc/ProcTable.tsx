@@ -3,6 +3,7 @@ import { cssVar, withAlpha } from "@/components/Plot";
 import { cx } from "@/lib/cx";
 import { fmtBytes, fmtPct } from "@/lib/fmt";
 import s from "./Proc.module.css";
+import { ProcIcon } from "./ProcIcon";
 import type { Proc, SortState, TreeRow } from "./tree";
 
 interface StateStyle {
@@ -206,6 +207,7 @@ export function ProcTable({
                     ) : (
                       <span className={s.twist} />
                     )}
+                    <ProcIcon name={p.name} />
                     <b>{p.name}</b>
                     {p.cmdline && p.cmdline !== p.name && (
                       <span className={s.cmd}>{p.cmdline}</span>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusDot } from "@/components";
 import { cx } from "@/lib/cx";
 import s from "./Svc.module.css";
+import { SvcIcon } from "./SvcIcon";
 import type { Unit } from "./useUnits";
 
 export interface UnitSort {
@@ -168,6 +169,7 @@ export function UnitTable({
               >
                 <td className={s.name}>
                   <span className={s.nameWrap}>
+                    <SvcIcon name={u.name} />
                     <b>{u.name}</b>
                     {u.description !== u.name && <span className={s.desc}>{u.description}</span>}
                   </span>

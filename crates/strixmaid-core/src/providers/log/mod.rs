@@ -6,6 +6,13 @@
 //!   （`docs/design.md` §4：libsystemd FFI 会毁掉静态构建）；
 //! - macOS：[`oslog::OsLog`]，`log show --style ndjson` 与 `log stream`。
 //!
+//! Windows 上不是子进程而是 FFI：
+//!
+//! - [`eventlog::EventLog`]，`wevtapi` 的 `EvtQuery` / `EvtSubscribe`。
+//!   之所以这次直接上 FFI 而不是起 `wevtutil` 子进程：`wevtutil` 每次调用要
+//!   解析一遍发布者元数据、渲染 XML，一次 200 条的查询要跑好几秒；而
+//!   `EvtSubscribe` 是**推送式**的，follow 不需要轮询。
+//!
 //! 非 journald 的 Linux 系统（`/var/log/*.log`）**不实现**，
 //! 只留 [`FileLogs`] 空壳证明 trait 容得下它。
 //!
@@ -26,6 +33,9 @@ pub mod parse;
 
 #[cfg(target_os = "macos")]
 pub mod oslog;
+
+#[cfg(windows)]
+pub mod eventlog;
 
 use std::sync::Arc;
 
@@ -183,6 +193,22 @@ pub async fn pick_log_provider() -> Option<Arc<dyn LogProvider>> {
         }
         probe => {
             tracing::info!(?probe, "log provider: oslog");
+            Some(Arc::new(l))
+        }
+    }
+}
+
+/// 选择 log provider：Windows 上是事件日志。
+#[cfg(windows)]
+pub async fn pick_log_provider() -> Option<Arc<dyn LogProvider>> {
+    let l = eventlog::EventLog::new();
+    match l.probe().await {
+        Probe::Unavailable { reason } => {
+            tracing::warn!(reason, "事件日志不可用，日志能力关闭");
+            None
+        }
+        probe => {
+            tracing::info!(?probe, "log provider: eventlog");
             Some(Arc::new(l))
         }
     }

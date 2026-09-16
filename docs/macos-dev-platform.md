@@ -146,11 +146,11 @@ OpenPAM 在**服务文件不存在**时整体回退到 `/etc/pam.d/other`,而 ma
 
 | 差异 | 后果 | 处理 |
 |---|---|---|
-| **Linux-PAM 与 OpenPAM 的常量数值不同** | `PAM_ESTABLISH_CRED` 在 Linux-PAM 是 2，而 2 在 OpenPAM 里是 `PAM_DELETE_CRED`——认证成功后不但没建立凭据反而把凭据删了，且 `pam_setcred` 照样返回 0 | `helper/src/pam.rs` 按平台分两套 `consts`，每项注明出处 |
+| **Linux-PAM 与 OpenPAM 的常量数值不同** | `PAM_ESTABLISH_CRED` 在 Linux-PAM 是 2，而 2 在 OpenPAM 里是 `PAM_DELETE_CRED`——认证成功后不但没建立凭据反而把凭据删了，且 `pam_setcred` 照样返回 0 | `helper/src/auth/unix.rs` 按平台分两套 `consts`，每项注明出处 |
 | 没有 `SOCK_CLOEXEC` / `MSG_CMSG_CLOEXEC` | 只能事后 `fcntl(FD_CLOEXEC)`，存在极小的竞态窗口 | `session/framing.rs::set_cloexec`，窗口影响见其文档 |
 | 没有 `MSG_NOSIGNAL` | 写到已关闭的对端会被 `SIGPIPE` 打死 | 改用 `SO_NOSIGPIPE` 套接字选项（覆盖面反而更广，连普通 `write` 也管） |
 | `nix` 在 Apple 上编译掉了 `getgroups` / `getgrouplist` | 编译不过 | 直接调 libc，见 `worker/mod.rs::current_groups` 与 `helper/src/main.rs::getgrouplist` |
-| `initgroups` 第二个参数是 `c_int` 而非 `gid_t` | 类型不匹配 | `helper/src/spawn.rs` 按平台取别名 |
+| `initgroups` 第二个参数是 `c_int` 而非 `gid_t` | 类型不匹配 | `helper/src/spawn/unix.rs` 按平台取别名 |
 | **`scutil --set` 对 `admin` 组成员放行，不需要 root** | 「反正非 root 会失败」这种测试会在开发者自己机器上真的改掉主机名 | 写操作的单测只测错误映射函数，绝不真的调命令 |
 | **`log show` 偶尔把同一条事件吐两次**（逐字节相同、时间戳相同） | 游标随之重复，翻页时它的孪生兄弟会被边界一起漏掉 | `oslog::show` 排序后按游标相邻去重——两条本就无从区分，去重不丢信息 |
 | macOS 自带 bash 3.2 | 没有 `mapfile` / `declare -A`；`set -u` 下空数组展开报错；**按字节解析变量名，`"$var（中文）"` 会把中文吃进变量名** | `scripts/*.sh` 全部兼容 3.2，细节见脚本头部注释 |

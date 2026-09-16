@@ -13,7 +13,13 @@
 //!   概念能对上一半（有 unit 名、有 enable/disable、有运行状态），
 //!   对不上的一半（`Type=` / 依赖图 / cgroup 用量）如实报缺失。
 //!
-//! 三条路径必须产出**同一套** DTO（`strixmaid_types::service`），因此过滤、枚举解析、
+//! Windows 上是第四条：
+//!
+//! - [`scm::ServiceControlManager`]：直接调服务控制管理器的 API。
+//!   四条路径里它与 systemd 的模型**最接近**——有依赖图、有启动类型、
+//!   有「禁用」这一档（正对应 systemd 的 mask），详见该模块的映射表。
+//!
+//! 四条路径必须产出**同一套** DTO（`strixmaid_types::service`），因此过滤、枚举解析、
 //! unit 名校验这些与来源无关的逻辑全部放在本文件，各实现只负责「取原始数据」。
 //!
 //! # 作用域与 uid
@@ -22,6 +28,11 @@
 //! root 主进程连不上其他用户的 bus（`docs/design.md` §5.4）。因此这里只实现「本进程 uid 自己的
 //! user manager」，构造时可用 `with_user_uid` 指定 uid——跨用户由 worker 机制解决：worker 以登录
 //! 用户身份运行，在它里面构造的 provider 天然就是那个用户的。
+
+/// 服务图标与其缓存。与四条实现路径都无关（图标是可执行映像自身的属性，
+/// 不是服务管理器给出的事实），因此不在 [`ServiceProvider`] 这个 trait 里，
+/// 而是一个独立的、与平台无关的外壳。见该模块的文档。
+pub mod icon;
 
 #[cfg(target_os = "linux")]
 pub mod bus;
@@ -32,6 +43,9 @@ pub mod cli;
 
 #[cfg(target_os = "macos")]
 pub mod launchd;
+
+#[cfg(windows)]
+pub mod scm;
 
 use std::sync::Arc;
 
@@ -199,6 +213,25 @@ pub async fn pick_service_provider() -> Option<Arc<dyn ServiceProvider>> {
         probe => {
             tracing::info!(?probe, "service provider: launchctl");
             Some(Arc::new(l))
+        }
+    }
+}
+
+/// 选择 service provider：Windows 上只有服务控制管理器一条路径。
+///
+/// 连不上 SCM 基本只有一种可能——进程跑在没有该权限的受限令牌下；
+/// 那种情况下服务页整体隐藏，与 Linux 上没有 systemd 时一致。
+#[cfg(windows)]
+pub async fn pick_service_provider() -> Option<Arc<dyn ServiceProvider>> {
+    let s = scm::ServiceControlManager::new();
+    match s.probe().await {
+        super::Probe::Unavailable { reason } => {
+            tracing::warn!(reason, "服务控制管理器不可用，服务能力关闭");
+            None
+        }
+        probe => {
+            tracing::info!(?probe, "service provider: SCM");
+            Some(Arc::new(s))
         }
     }
 }

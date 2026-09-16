@@ -19,7 +19,8 @@ use crate::config::AgentConfig;
 #[derive(Debug, Parser)]
 #[command(name = "strixmaid-agent", version, about = "StrixMaid 远程采集 Agent")]
 struct Cli {
-    /// 配置文件路径；缺省 /etc/strixmaid/agent.toml（不存在则全用默认值 + 环境变量）。
+    /// 配置文件路径；缺省 Unix 为 /etc/strixmaid/agent.toml、
+    /// Windows 为 C:\ProgramData\StrixMaid\agent.toml（不存在则全用默认值 + 环境变量）。
     #[arg(long, env = "STRIXMAID_AGENT_CONFIG")]
     config: Option<PathBuf>,
 }

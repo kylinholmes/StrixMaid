@@ -14,19 +14,52 @@
 //! 指向别处的符号链接，realpath 会把路径解析到 `allowed_roots` 之外，而用户
 //! 看到、请求的字面路径明明在里面。校验对象是用户所见的字面路径；代价是
 //! 符号链接可以指向 roots 之外——见上：真正的边界是文件权限。
+//!
+//! # 平台分界
+//!
+//! 流程（读目录、跳过失败条目、排序、大小上限、二进制判定、UTF-8 有损转换）
+//! 两个平台共用，**只有「路径长什么样」与「一条目录项的元数据从哪来」分叉**：
+//!
+//! | 分叉点 | Unix | Windows |
+//! |---|---|---|
+//! | [`normalize`] | 以 `/` 开头，前缀一律拒绝 | 盘符 / UNC / 裸 `\`（= 全部驱动器），见 [`windows`] |
+//! | [`is_allowed`] | `Path::starts_with` | 裸根匹配一切绝对路径；段比较不区分大小写 |
+//! | `EntryMapper` | `st_mode` / `st_uid` / NSS | 文件属性合成 mode、SID 的 RID、`GetNamedSecurityInfoW` |
+//! | [`kind_of`] | 七种文件类型 | 只有 `Dir` / `File` / `Symlink` / `Unknown` |
+//! | `list_blocking` | —— | 列虚拟根 `\` 时改为枚举驱动器 |
+//!
+//! Windows 侧的取数与它对 `mode` / `uid` / `gid` 所做**近似**的全部说明，
+//! 见 [`windows`] 的模块文档。
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use strixmaid_types::file::{DirEntryInfo, DirListing, FileContent, FileKind};
+// `DirEntryInfo` 只在 Unix 侧的 `EntryMapper` 里构造；Windows 侧在
+// [`windows::EntryMapper`] 里，那边自己 use。
+#[cfg(unix)]
+use strixmaid_types::file::DirEntryInfo;
+use strixmaid_types::file::{DirListing, FileContent, FileKind};
 use strixmaid_types::{ApiError, ApiResult};
 
 use super::{Probe, Provider};
+
+#[cfg(windows)]
+pub mod windows;
+
+#[cfg(windows)]
+use windows::EntryMapper;
 
 /// `fs.read` 的大小上限（roadmap/04 §A.3）。超出直接报错，不截断。
 pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
@@ -35,12 +68,14 @@ pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 const NUL_SCAN_BYTES: usize = 8 * 1024;
 
 /// uid / gid → 名字的缓存有效期（roadmap/04 §A.3）。
+#[cfg(unix)]
 const NAME_CACHE_TTL: Duration = Duration::from_secs(60);
 
 // ============================ 路径 ============================
 
 /// 规范化路径：必须以 `/` 开头；`.` 丢弃、`..` 逐段上弹（到根则停留在根）。
 /// 不访问文件系统，因此不解析符号链接（理由见模块文档）。
+#[cfg(unix)]
 pub fn normalize(path: &str) -> ApiResult<PathBuf> {
     if path.is_empty() {
         return Err(ApiError::invalid_request("路径不能为空"));
@@ -67,12 +102,29 @@ pub fn normalize(path: &str) -> ApiResult<PathBuf> {
     Ok(out)
 }
 
+/// 规范化路径（Windows）。语义与实现见 [`windows::normalize`]：
+/// 认盘符 / UNC / verbatim，外加裸的 `/` 或 `\`（= 全部驱动器这个虚拟根）；
+/// `..` 弹到盘根就停，与 Unix 弹到 `/` 就停同理。
+#[cfg(windows)]
+pub fn normalize(path: &str) -> ApiResult<PathBuf> {
+    windows::normalize(path)
+}
+
 /// 规范化后的路径是否位于任一 root 之内（含 root 本身）。
 ///
 /// 用 `Path::starts_with` 做**按路径段**的前缀判断——字符串前缀会把
 /// `/home2` 误判进 `/home`。
+#[cfg(unix)]
 pub fn is_allowed(path: &Path, roots: &[String]) -> bool {
     roots.iter().any(|r| path.starts_with(r))
+}
+
+/// 规范化后的路径是否位于任一 root 之内（含 root 本身）。见 [`windows::is_allowed`]：
+/// 仍然按路径段比较，但裸根匹配任何绝对路径，且段比较不区分大小写
+/// （`c:\users` 与 `C:\Users` 在 Windows 上是同一个目录）。
+#[cfg(windows)]
+pub fn is_allowed(path: &Path, roots: &[String]) -> bool {
+    windows::is_allowed(path, roots)
 }
 
 /// 规范化 + roots 校验，两个方法共用的入口。
@@ -88,11 +140,17 @@ fn resolve(path: &str, roots: &[String]) -> ApiResult<PathBuf> {
 }
 
 // ============================ 名字缓存 ============================
+//
+// Windows 上没有这一层：名字来自 SID 而不是 uid，而 SID → 账户名的缓存已经在
+// `platform::windows::token::account_by_sid` 里（键是完整 SID 串——RID 在域环境
+// 下不唯一，拿它当缓存键会串台）。
 
+#[cfg(unix)]
 type NameCache = Mutex<HashMap<u32, (Instant, Option<String>)>>;
 
 /// 查缓存，过期或缺失再做一次 NSS 查询。查不到（NSS 不可用、uid 无对应用户）
 /// 时缓存 `None`，避免对着一个不存在的 uid 每个条目查一次。
+#[cfg(unix)]
 fn cached_name(
     cache: &NameCache,
     id: u32,
@@ -112,6 +170,7 @@ fn cached_name(
     name
 }
 
+#[cfg(unix)]
 fn user_name(uid: u32) -> Option<String> {
     nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
         .ok()
@@ -119,11 +178,52 @@ fn user_name(uid: u32) -> Option<String> {
         .map(|u| u.name)
 }
 
+#[cfg(unix)]
 fn group_name(gid: u32) -> Option<String> {
     nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
         .ok()
         .flatten()
         .map(|g| g.name)
+}
+
+// ============================ 目录项映射 ============================
+
+/// 把一条目录项映射成 DTO。**每个平台的取数差异都收在这里**。
+///
+/// 做成结构体而不是自由函数，是因为 Windows 侧需要跨条目的状态
+/// （属主查询的预算，见 [`windows::EntryMapper`]）。Unix 侧不需要，
+/// 它是个零大小类型，`map` 的内容与引入这个结构体之前逐字相同。
+#[cfg(unix)]
+struct EntryMapper;
+
+#[cfg(unix)]
+impl EntryMapper {
+    fn new(_dir: &Path) -> Self {
+        Self
+    }
+
+    fn map(
+        &mut self,
+        caches: &Caches,
+        _path: &Path,
+        name: String,
+        meta: &std::fs::Metadata,
+        kind: FileKind,
+        target: Option<String>,
+    ) -> DirEntryInfo {
+        DirEntryInfo {
+            name,
+            kind,
+            size_bytes: meta.size(),
+            mode: meta.permissions().mode() & 0o7777,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            user: cached_name(&caches.users, meta.uid(), user_name),
+            group: cached_name(&caches.groups, meta.gid(), group_name),
+            mtime_ts: meta.mtime(),
+            target,
+        }
+    }
 }
 
 // ============================ provider ============================
@@ -134,9 +234,13 @@ pub struct FsProvider {
     caches: Arc<Caches>,
 }
 
+/// Windows 上是个空结构：名字缓存在 `account_by_sid` 里（见上）。
+/// 保留这个类型是为了让 [`FsProvider`] 与 `list_blocking` 的签名跨平台一致。
 #[derive(Default)]
 struct Caches {
+    #[cfg(unix)]
     users: NameCache,
+    #[cfg(unix)]
     groups: NameCache,
 }
 
@@ -178,7 +282,16 @@ impl Provider for FsProvider {
 }
 
 fn list_blocking(caches: &Caches, dir: &Path) -> ApiResult<DirListing> {
+    // Windows：裸 `\` 是「全部驱动器」这个虚拟根，它不是一个真目录
+    // （read_dir 会落到**当前盘**的根上，那是另一个目录）。在这里截住，
+    // 改为枚举驱动器，见 `windows::list_drives`。
+    #[cfg(windows)]
+    if windows::is_namespace_root(dir) {
+        return Ok(windows::list_drives(dir));
+    }
+
     let rd = std::fs::read_dir(dir).map_err(|e| io_err(dir, &e))?;
+    let mut mapper = EntryMapper::new(dir);
     let mut entries = Vec::new();
     let mut skipped = 0u32;
     for item in rd {
@@ -188,27 +301,24 @@ fn list_blocking(caches: &Caches, dir: &Path) -> ApiResult<DirListing> {
         };
         // read_dir 之后条目随时可能消失（/proc 尤甚），lstat 失败跳过并计数，
         // 不让一个条目毁掉整个列表。
-        let Ok(meta) = std::fs::symlink_metadata(item.path()) else {
+        let path = item.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
             skipped += 1;
             continue;
         };
         let kind = kind_of(&meta.file_type());
         let target = (kind == FileKind::Symlink)
-            .then(|| std::fs::read_link(item.path()).ok())
+            .then(|| std::fs::read_link(&path).ok())
             .flatten()
             .map(|t| t.to_string_lossy().into_owned());
-        entries.push(DirEntryInfo {
-            name: item.file_name().to_string_lossy().into_owned(),
+        entries.push(mapper.map(
+            caches,
+            &path,
+            item.file_name().to_string_lossy().into_owned(),
+            &meta,
             kind,
-            size_bytes: meta.size(),
-            mode: meta.permissions().mode() & 0o7777,
-            uid: meta.uid(),
-            gid: meta.gid(),
-            user: cached_name(&caches.users, meta.uid(), user_name),
-            group: cached_name(&caches.groups, meta.gid(), group_name),
-            mtime_ts: meta.mtime(),
             target,
-        });
+        ));
     }
     // 目录在前，其余按名称（roadmap/04 §A.3）。
     entries.sort_by(|a, b| {
@@ -232,6 +342,9 @@ fn read_blocking(file: &Path) -> ApiResult<FileContent> {
         )));
     }
     // FIFO / 设备文件打开或读取会阻塞、或读出无意义的字节流。
+    // Windows 上没有 FIFO / 设备节点混在普通文件系统里（命名管道在 `\\.\pipe\`、
+    // 设备在 `\\.\` 下，两者都被 `normalize` 挡在门外），这一条在那边等价于
+    // 「不是普通文件就拒」——正是同一行代码的字面含义。
     if !meta.file_type().is_file() {
         return Err(ApiError::invalid_request(format!(
             "{} 不是普通文件",
@@ -278,6 +391,14 @@ fn oversize(file: &Path, actual: u64) -> ApiError {
         .with_detail(format!("上限 {MAX_READ_BYTES} 字节，实际 {actual} 字节"))
 }
 
+/// 文件类型映射（Windows）。见 [`windows::kind_of`]：只可能是
+/// `Dir` / `File` / `Symlink` / `Unknown`，junction 按 `Symlink` 报。
+#[cfg(windows)]
+fn kind_of(ft: &std::fs::FileType) -> FileKind {
+    windows::kind_of(ft)
+}
+
+#[cfg(unix)]
 fn kind_of(ft: &std::fs::FileType) -> FileKind {
     if ft.is_dir() {
         FileKind::Dir
@@ -324,6 +445,7 @@ mod tests {
         rs.iter().map(|s| s.to_string()).collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn 规范化() {
         let n = |p: &str| normalize(p).unwrap().to_string_lossy().into_owned();
@@ -336,6 +458,38 @@ mod tests {
         assert_eq!(normalize("").unwrap_err().code, ErrorCode::InvalidRequest);
     }
 
+    /// Unix 版 `规范化` 的等价物：盘符、正反斜杠、裸根、`..` 弹到盘根就停。
+    #[cfg(windows)]
+    #[test]
+    fn 规范化_windows() {
+        let n = |p: &str| normalize(p).unwrap().to_string_lossy().into_owned();
+        assert_eq!(n(r"C:\a\..\b"), r"C:\b");
+        assert_eq!(n(r"C:\a\.\b"), r"C:\a\b");
+        assert_eq!(n("C:/a/b"), r"C:\a\b");
+        assert_eq!(n(r"C:\a\\b\"), r"C:\a\b");
+        assert_eq!(n(r"C:\"), r"C:\");
+        // 盘符归一成大写：同一个目录不该随请求的写法出现两种字面。
+        assert_eq!(n(r"c:\Users"), r"C:\Users");
+        // `..` 弹到盘根就停，弹不出 C:\——与 Unix 弹到 / 就停同理。
+        assert_eq!(n(r"C:\data\..\.."), r"C:\");
+        assert_eq!(n(r"C:\..\..\Windows"), r"C:\Windows");
+        // 裸 `/` 与 `\` 都是「全部驱动器」这个虚拟根，归一成 `\`。
+        assert_eq!(n("/"), "\\");
+        assert_eq!(n("\\"), "\\");
+        // UNC 保留主机与共享名。
+        assert_eq!(n(r"\\srv\share\a\..\b"), r"\\srv\share\b");
+        assert_eq!(n(r"\\srv\share\..\.."), r"\\srv\share\");
+
+        // 相对路径、空串、设备命名空间一律拒绝。
+        assert_eq!(normalize(r"a\b").unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(normalize("C:a").unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(normalize("").unwrap_err().code, ErrorCode::InvalidRequest);
+        let err = normalize(r"\\.\PhysicalDrive0").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(err.message.contains("设备"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn roots_校验按路径段() {
         let rs = roots(&["/home", "/var/log"]);
@@ -356,10 +510,59 @@ mod tests {
         );
     }
 
+    /// Unix 版 `roots_校验按路径段` 的等价物：段边界、盘符与段的大小写、
+    /// 裸根、以及「`..` 必须先规范化再校验」这条安全性质。
+    #[cfg(windows)]
+    #[test]
+    fn roots_校验按路径段_windows() {
+        let rs = roots(&[r"C:\Users", r"D:\var\log"]);
+        assert!(!is_allowed(Path::new(r"C:\Windows"), &rs));
+        assert!(is_allowed(Path::new(r"C:\Users\x"), &rs));
+        assert!(is_allowed(Path::new(r"C:\Users"), &rs), "root 本身要通过");
+        assert!(is_allowed(Path::new(r"D:\var\log\sys.log"), &rs));
+        assert!(!is_allowed(Path::new(r"C:\Users2\x"), &rs), "字符串前缀不算");
+        assert!(!is_allowed(Path::new(r"D:\var"), &rs));
+        // 盘符不同就是不同的树。
+        assert!(!is_allowed(Path::new(r"E:\Users\x"), &rs));
+
+        // 大小写：Windows 的文件系统默认不区分，配置与请求的写法不该打架。
+        assert!(is_allowed(Path::new(r"c:\users\x"), &rs), "盘符大小写不敏感");
+        assert!(is_allowed(Path::new(r"C:\USERS\x"), &rs), "段大小写不敏感");
+        assert!(is_allowed(
+            Path::new(r"C:\Users"),
+            &roots(&[r"c:\USERS"])
+        ));
+
+        // 裸根 = 全部驱动器，匹配任何绝对路径，也匹配虚拟根自己。
+        let all = roots(&["/"]);
+        assert!(is_allowed(Path::new(r"C:\Windows"), &all));
+        assert!(is_allowed(Path::new(r"\\srv\share\x"), &all));
+        assert!(is_allowed(Path::new("\\"), &all));
+        assert!(is_allowed(Path::new(r"Z:\"), &roots(&["\\"])));
+
+        // `..` 先规范化再校验：C:\Users\..\Windows 实际是 C:\Windows，必须拒绝。
+        let err = resolve(r"C:\Users\..\Windows", &rs).unwrap_err();
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+        // 弹到盘根也一样：C:\Users\..\.. 是 C:\，不在 C:\Users 之内。
+        assert_eq!(
+            resolve(r"C:\Users\..\..", &rs).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+        // 空列表一律拒绝。
+        assert_eq!(
+            resolve("/", &[]).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn 本机_list_proc_self_不炸() {
         // procfs 是 Linux 专有的。按 roadmap/README §7，依赖真实系统的用例用运行期
         // 探测跳过而非 #[ignore]，这样在有 procfs 的机器上它永远是跑着的。
+        //
+        // Windows 上这条探测恒为假（`/proc/self` 会被当成当前盘的
+        // `C:\proc\self`，不存在），用例干净地跳过；就算真有那个目录，
+        // `normalize` 也会先以「不是绝对路径」拒绝它。
         if !Path::new("/proc/self").exists() {
             eprintln!("本机无 procfs，跳过 /proc/self 用例");
             return;
@@ -393,6 +596,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn 本机_读文本_二进制_目录_不存在() {
         let fs = FsProvider::new();
@@ -425,6 +629,105 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidRequest, "对文件 list 应报不是目录");
     }
 
+    /// Unix 版的等价物。取的三条路径是 Windows 上必然存在的：
+    /// `drivers\etc\hosts`（文本）、`cmd.exe`（二进制）、`C:\Windows`（目录）。
+    /// 即便如此也照旧做运行期探测——精简安装 / 非 `C:` 系统盘都可能让假设落空。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 本机_读文本_二进制_目录_不存在_windows() {
+        let fs = FsProvider::new();
+        let all = roots(&["/"]);
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let hosts = format!(r"{sysroot}\System32\drivers\etc\hosts");
+        let cmd = format!(r"{sysroot}\System32\cmd.exe");
+
+        if Path::new(&hosts).is_file() {
+            let c = fs.read(&hosts, &all).await.unwrap();
+            assert!(!c.content.is_empty());
+            assert!(!c.truncated);
+            assert_eq!(c.size_bytes as usize, c.content.len());
+        } else {
+            eprintln!("本机没有 {hosts}，跳过文本用例");
+        }
+
+        if Path::new(&cmd).is_file() {
+            let err = fs.read(&cmd, &all).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidRequest, "{err:?}");
+            assert!(err.message.contains("二进制"), "{}", err.message);
+        } else {
+            eprintln!("本机没有 {cmd}，跳过二进制用例");
+        }
+
+        let err = fs.read(&sysroot, &all).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(err.message.contains("目录"), "{}", err.message);
+
+        let err = fs
+            .read(r"C:\no\such\strixmaid-file", &all)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        if Path::new(&hosts).is_file() {
+            let err = fs.list(&hosts, &all).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidRequest, "对文件 list 应报不是目录：{err:?}");
+        }
+    }
+
+    /// Windows 上 `fs.list` 到虚拟根 `\` 要列出驱动器（资源管理器的「此电脑」）。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 本机_列根得到驱动器() {
+        let fs = FsProvider::new();
+        for req in ["/", "\\"] {
+            let listing = fs.list(req, &roots(&["/"])).await.unwrap();
+            assert_eq!(listing.path, "\\", "虚拟根的规范形式是 `\\`");
+            assert_eq!(listing.skipped, 0);
+            assert!(
+                !listing.entries.is_empty(),
+                "总该有至少一个驱动器：{listing:?}"
+            );
+            for e in &listing.entries {
+                assert_eq!(e.kind, FileKind::Dir);
+                assert_eq!(e.mode, 0o555);
+                assert!(e.user.is_none() && e.group.is_none(), "卷没有属主概念");
+                // name 本身就是可直接请求的绝对路径，前端不必与父路径拼接。
+                assert_eq!(normalize(&e.name).unwrap().to_string_lossy(), e.name);
+            }
+            eprintln!(
+                "本机驱动器（请求 {req:?}）：{:?}",
+                listing.entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// 属主查询是列目录里最贵的一步，拿本机最大的系统目录量一次，
+    /// 数据用来校准 `windows::MAX_OWNER_QUERIES`。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 本机_大目录列举耗时() {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let dir = format!(r"{sysroot}\System32");
+        if !Path::new(&dir).is_dir() {
+            eprintln!("本机没有 {dir}，跳过大目录用例");
+            return;
+        }
+        let fs = FsProvider::new();
+        let t0 = std::time::Instant::now();
+        let listing = fs.list(&dir, &roots(&["/"])).await.unwrap();
+        let cost = t0.elapsed();
+        let named = listing.entries.iter().filter(|e| e.user.is_some()).count();
+        eprintln!(
+            "列 {dir}：{} 条（跳过 {}），{} 条查到属主，耗时 {cost:?}",
+            listing.entries.len(),
+            listing.skipped,
+            named
+        );
+        assert!(!listing.entries.is_empty());
+        // 属主至少要有一部分查得到，否则说明安全描述符这条路整个断了。
+        assert!(named > 0, "一条属主都没查到，安全描述符查询可能失效了");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn 超过大小上限被拒绝() {
         let dir = std::env::temp_dir().join(format!("strixmaid-fs-test-{}", std::process::id()));
@@ -448,6 +751,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn 符号链接原样报告不解引用() {
         let dir = std::env::temp_dir().join(format!(
@@ -470,6 +774,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Unix 版的等价物。Windows 上建符号链接需要 `SeCreateSymbolicLinkPrivilege`
+    /// （管理员）或开了开发者模式，普通用户跑测试时建不出来——
+    /// 因此用**运行期探测**跳过，而不是让用例红着。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 符号链接原样报告不解引用_windows() {
+        let dir = std::env::temp_dir().join(format!(
+            "strixmaid-fs-link-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target = r"C:\Windows\System32\drivers\etc\hosts";
+        if let Err(e) = std::os::windows::fs::symlink_file(target, dir.join("ln")) {
+            eprintln!(
+                "本机建不了符号链接（需要管理员或开发者模式）：{e}；跳过该用例"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let fs = FsProvider::new();
+        let listing = fs
+            .list(&dir.to_string_lossy(), &roots(&["/"]))
+            .await
+            .unwrap();
+        let ln = listing.entries.iter().find(|e| e.name == "ln").unwrap();
+        assert_eq!(ln.kind, FileKind::Symlink);
+        // 原样报告，不解引用。
+        assert_eq!(ln.target.as_deref(), Some(target));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn 无权限的文件报_permission_denied() {
         if nix::unistd::getuid().is_root() {
@@ -496,6 +836,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Unix 版的等价物。Windows 上没有 `0o000` 这种表达方式（权限是 ACL），
+    /// 自己造一个不可读文件要调 `icacls` 或一串 ACL API——对一条断言而言太重。
+    /// 改用系统上必然存在、且**普通用户必然读不到**的 `System32\config\SAM`；
+    /// 以管理员身份跑测试时它是读得到的，所以照旧做运行期探测再跳过。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 无权限的文件报_permission_denied_windows() {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let sam = format!(r"{sysroot}\System32\config\SAM");
+        // 探测要直接去开，不能先 `Path::exists()`：`System32\config` 这个目录
+        // 本身就不让普通用户 stat，`exists()` 会把「没权限」也报成 false，
+        // 于是用例永远跳过、永远测不到想测的那条分支。
+        //
+        // 以管理员跑测试时 SAM 是打得开的（或报「文件被占用」），那时同样跳过。
+        match std::fs::File::open(&sam) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            other => {
+                eprintln!("本机对 {sam} 的访问结果是 {other:?}，不是无权限，跳过该用例");
+                return;
+            }
+        }
+
+        let fs = FsProvider::new();
+        let err = fs.read(&sam, &roots(&["/"])).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn 属主名带缓存() {
         let caches = Caches::default();

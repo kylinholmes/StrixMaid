@@ -14,16 +14,29 @@ use strixmaid_types::capability::UserProbe;
 
 /// 实测当前 worker 身份的 user 层能力。
 pub async fn probe_user() -> UserProbe {
-    // SAFETY: getuid 无副作用。
-    let uid = unsafe { libc::getuid() };
+    let uid = current_uid();
     UserProbe {
         can_read_journal: probe_system_log().await,
-        // polkit 的裁决无法离线探测（`design.md` §6）：只有「已经是 root」这一种
-        // 情况可以确定为真，其余留 None 沿用推导值。
+        // 裁决无法离线探测（`design.md` §6）：只有「已经是最高权限」这一种情况
+        // 可以确定为真，其余留 None 沿用推导值。Windows 上 uid 0 = LocalSystem，
+        // 见 [`crate::platform::windows::token`] 的 SID → uid 映射表。
         can_manage_units: (uid == 0).then_some(true),
         user_units: probe_user_units(uid),
         uid,
     }
+}
+
+/// 当前进程的 uid。
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: getuid 无副作用。
+    unsafe { libc::getuid() }
+}
+
+/// 见 Unix 版。Windows 上是令牌用户 SID 映射出来的 uid。
+#[cfg(windows)]
+fn current_uid() -> u32 {
+    crate::worker::whoami().uid
 }
 
 /// 能否读到**系统**日志，而不只是自己产生的那些。
@@ -83,6 +96,49 @@ fn probe_user_units(_uid: u32) -> Option<bool> {
     Some(true)
 }
 
+/// 能否读到**系统**事件日志，而不只是自己产生的那些。
+///
+/// 判据与另外两个平台一致：读的是一定不属于当前用户的那一路日志。
+/// Windows 上选 `Security` 通道——它默认只有管理员与 `Event Log Readers`
+/// 组能读，普通用户会拿到 `ERROR_ACCESS_DENIED`。这正好是我们要测的那条界线。
+///
+/// 用 `EvtQuery` 而不是起 `wevtutil`：探测在每次建会话时都会跑一遍，
+/// 起子进程的代价（几十毫秒）没有必要，而且这里本来就要链 `wevtapi`。
+#[cfg(windows)]
+async fn probe_system_log() -> Option<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_EVT_CHANNEL_NOT_FOUND};
+
+    use crate::providers::log::eventlog::evt;
+
+    tokio::task::spawn_blocking(|| match evt::open_query("Security", "*") {
+        Ok(_) => Some(true),
+        Err(e) => match e.raw_os_error().map(|c| c as u32) {
+            // 明确被拒 = 明确「读不了系统日志」，这是一个结论。
+            Some(ERROR_ACCESS_DENIED) => Some(false),
+            // 通道不存在（被组策略删了、精简版系统）→ 测不出结论。
+            Some(ERROR_EVT_CHANNEL_NOT_FOUND) => None,
+            // 别的失败（服务没起来等）同样不构成结论。
+            _ => None,
+        },
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Windows 上没有「用户级 unit」这个概念。
+///
+/// 最接近的是**每用户服务**（per-user service，`XxxSvc_<luid>`），但那由系统
+/// 按服务模板自动创建，用户既不能自己定义也不能自己启停——与 systemd 的
+/// `--user` 单元、launchd 的 `gui/<uid>` 域不是一回事。
+///
+/// 报 `Some(false)` 而不是 `None`：这是一个**确定的**结论（这个能力不存在），
+/// 不是「没测出来」。留 `None` 会让调用方沿用按组推导的值，那反而可能是错的。
+#[cfg(windows)]
+fn probe_user_units(_uid: u32) -> Option<bool> {
+    Some(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,10 +146,9 @@ mod tests {
     #[tokio::test]
     async fn 本机实测不_panic_且_uid_正确() {
         let p = probe_user().await;
-        // SAFETY: getuid 无副作用。
-        assert_eq!(p.uid, unsafe { libc::getuid() });
+        assert_eq!(p.uid, current_uid());
 
-        // 非 root 下 can_manage_units 必须是 None（「测不出」），不能是 Some(false)
+        // 非特权下 can_manage_units 必须是 None（「测不出」），不能是 Some(false)
         if p.uid != 0 {
             assert_eq!(
                 p.can_manage_units, None,

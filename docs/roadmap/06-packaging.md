@@ -1,5 +1,13 @@
 # 06 构建与打包
 
+> **Windows 补充（2026-09-16）**：本文的三个产物与 §3.1–§3.5 全部是 Linux 口径，
+> 未因 Windows 支持而改动。Windows 侧另起一套同构的产物，不复用本文的任何结论：
+> `scripts/package-windows.ps1` 产出与 tar.gz 同构的 zip，
+> `packaging/windows/{install,uninstall}.ps1` 对应 `install.sh`，
+> 服务宿主是 SCM 而不是 systemd，没有 pam.d 与静态链接这两件事。
+> 说明见 `packaging/windows/README.md` 与 `docs/windows-platform.md`。
+> CI 里对应 `windows` 与 `package-windows` 两个 job，质量门槛与 §3.6 的 `check` 相同。
+>
 > **实施状态（2026-08-28）**：仓库侧已全部落地——`.cargo/config.toml`（musl
 > rustflags）、`ui` feature（默认开，`--no-default-features` 产出全 404 JSON 的
 > 无 UI 变体，两种变体 clippy 均零警告）、`build.rs` 注入 git sha 与 target

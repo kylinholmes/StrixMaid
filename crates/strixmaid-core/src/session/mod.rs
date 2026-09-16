@@ -31,6 +31,7 @@
 //! 后台清理由 [`SessionManager::spawn_sweeper`] 定期跑 [`SessionManager::sweep`]。
 //! 进程重启后 DB 里残留的会话行没有对应的 worker，[`SessionManager::new`] 会全部清掉。
 
+pub mod channel;
 pub mod framing;
 pub mod helper;
 pub mod worker_handle;
@@ -1096,7 +1097,10 @@ enum Exchange {
     },
 }
 
-/// 向已认证的 helper 要一个 worker：`SpawnWorker` → `WorkerSpawned` → `SCM_RIGHTS` → `Hello`。
+/// 向已认证的 helper 要一个 worker：`SpawnWorker` → `WorkerSpawned` → 取通道 → `Hello`。
+///
+/// 「取通道」这一步两个平台不同：Unix 上是紧跟的一帧 `SCM_RIGHTS`，Windows 上是
+/// `WorkerSpawned.worker_handle` 里的句柄值 + 一次 `DuplicateHandle`。
 ///
 /// `expected_uid` 为 `Some` 时，helper 声明的 uid 与 worker `Hello` 报告的 uid 都必须等于它
 /// ——不等说明身份切换没有发生，这种 worker 绝不能用。
@@ -1112,17 +1116,18 @@ async fn spawn_worker(
             as_root,
         })
         .await?;
-    let (pid, uid, session_opened) = match helper.recv().await? {
+    let (pid, uid, session_opened, worker_handle) = match helper.recv().await? {
         Some(FromHelper::WorkerSpawned {
             pid,
             uid,
             session_opened,
             session_error,
+            worker_handle,
         }) => {
             if let Some(reason) = session_error {
-                tracing::warn!(%reason, "pam_open_session 失败，用户级 unit 不可用");
+                tracing::warn!(%reason, "建立用户会话失败，用户级服务不可用");
             }
-            (pid, uid, session_opened)
+            (pid, uid, session_opened, worker_handle)
         }
         Some(FromHelper::Error { message }) => {
             return Err(if as_root {
@@ -1149,9 +1154,34 @@ async fn spawn_worker(
             "helper 声明的 worker uid={uid} 与预期 {expected} 不符"
         )));
     }
-    let fd = helper.recv_fd().await?;
-    let worker = WorkerHandle::connect(fd, pid, expected_uid).await?;
+    let channel = worker_channel(helper, worker_handle).await?;
+    let worker = WorkerHandle::connect(channel, pid, expected_uid).await?;
     Ok((Arc::new(worker), session_opened))
+}
+
+/// 把 helper 手里那半条 worker 通道拿到主进程来。
+///
+/// Unix：忽略 `worker_handle`（helper 永远发 `None`），收紧跟的那帧 `SCM_RIGHTS`。
+#[cfg(unix)]
+async fn worker_channel(
+    helper: &mut HelperConn,
+    _worker_handle: Option<u64>,
+) -> Result<channel::IpcChannel> {
+    let fd = helper.recv_fd().await?;
+    channel::IpcChannel::from_owned_fd(fd)
+        .map_err(|e| SessionError::Worker(format!("worker 通道注册到 tokio 失败: {e}")))
+}
+
+/// 见 Unix 版。Windows：句柄值就在帧里，用 `DuplicateHandle` 取走。
+#[cfg(windows)]
+async fn worker_channel(
+    helper: &mut HelperConn,
+    worker_handle: Option<u64>,
+) -> Result<channel::IpcChannel> {
+    let raw = worker_handle.ok_or_else(|| {
+        SessionError::Protocol("WorkerSpawned 未携带 worker 通道句柄".to_owned())
+    })?;
+    helper.take_worker_channel(raw)
 }
 
 async fn teardown_admin(admin: Admin) {

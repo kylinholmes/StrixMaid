@@ -31,6 +31,16 @@ web/node_modules/
 web/*.tsbuildinfo
 web/.vite/
 
+# 前端构建产物。**不跟踪**：它是 web/src 的派生物，跟踪一份快照必然与源码漂移
+# （改了组件忘了重建，仓库里那份就是旧的）。由打包脚本在出包前构建，
+# 见 scripts/package.sh 与 scripts/package-windows.ps1。
+#
+# 代价：新克隆后先构建前端才能编 strixmaid-server。**debug 也一样**——
+# rust-embed 的 `folder` 在两档都于编译期求值，目录不存在就直接报错；
+# 区别只是 debug 允许目录为空，release 还要真有 index.html 可嵌。
+# crates/strixmaid-server/build.rs 会在缺失时给出一句可操作的提示。
+web/dist/
+
 # StrixMaid 运行时产物
 /data/
 *.db

@@ -159,15 +159,16 @@ impl CapabilityRegistry {
     ///
     /// | provider id | 字段 | 平台 |
     /// |---|---|---|
-    /// | `systemd` / `launchd` | `systemd` | Linux / macOS |
-    /// | `journald` / `oslog` | `journal` | Linux / macOS |
-    /// | `podman` | `podman` | 两者 |
+    /// | `systemd` / `launchd` / `scm` | `systemd` | Linux / macOS / Windows |
+    /// | `journald` / `oslog` / `eventlog` | `journal` | Linux / macOS / Windows |
+    /// | `podman` | `podman` | 全部 |
     ///
     /// **字段名沿用 Linux 实现的名字，语义是「这项能力可用」而不是「装了这个软件」**
-    /// ——见 [`SystemCapabilities`] 各字段的文档。macOS 上的 launchd 与统一日志
-    /// 必须点亮同样的位，否则前端会把明明可用的服务页与日志页隐藏掉。
-    /// 与其为一个开发平台在 API 契约里加两个新字段（下游代码生成器全要跟着改），
-    /// 不如让「后端是谁」留在 `providers` 列表里，那才是它该待的地方。
+    /// ——见 [`SystemCapabilities`] 各字段的文档。macOS 的 launchd 与统一日志、
+    /// Windows 的 SCM 与事件日志必须点亮同样的位，否则前端会把明明可用的
+    /// 服务页与日志页隐藏掉。与其为每个平台在 API 契约里加两个新字段
+    /// （下游代码生成器全要跟着改），不如让「后端是谁」留在 `providers` 列表里，
+    /// 那才是它该待的地方。
     ///
     /// 其它 id（`host` / `proc`）没有对应字段，只进 `providers` 列表。
     pub async fn probe_all(&self) -> ProbeReport {
@@ -177,8 +178,8 @@ impl CapabilityRegistry {
             let probe = p.probe().await;
             let available = probe.is_available();
             match p.id() {
-                "systemd" | "launchd" => system.systemd = available,
-                "journald" | "oslog" => system.journal = available,
+                "systemd" | "launchd" | "scm" => system.systemd = available,
+                "journald" | "oslog" | "eventlog" => system.journal = available,
                 "podman" => system.podman = available,
                 _ => {}
             }
@@ -216,29 +217,41 @@ pub fn probe_system(helper_path: &Path) -> SystemCapabilities {
 
 /// 服务管理器在运行。
 ///
-/// Linux：systemd 作为 init 在跑，判据是 `/run/systemd/system` 目录存在
-/// （`sd_booted()` 用的就是这一条）。
-/// macOS：launchd 就是 PID 1，永远在跑，恒为 true。
+/// | 平台 | 判据 |
+/// |---|---|
+/// | Linux | systemd 作为 init 在跑，即 `/run/systemd/system` 存在（`sd_booted()` 用的就是这一条） |
+/// | macOS | launchd 就是 PID 1，永远在跑，恒为 true |
+/// | Windows | 服务控制管理器是系统组件，恒为 true；真连不上会由 service provider 的 `probe()` 覆盖掉这一位 |
 pub fn has_systemd() -> bool {
     #[cfg(target_os = "macos")]
     {
         true
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Path::new("/run/systemd/system").is_dir()
     }
 }
 
-/// 日志后端的命令行工具可执行。
+/// 日志后端可用。
 ///
-/// Linux 是 `journalctl`，macOS 是 `/usr/bin/log`。
+/// Linux 是 `journalctl` 在 PATH 里，macOS 是 `/usr/bin/log` 存在，
+/// Windows 是事件日志服务的运行时库 `wevtapi.dll` 在（它是系统组件，恒为真；
+/// 与上面一样，真查不了日志会由 log provider 的 `probe()` 覆盖）。
 pub fn has_journalctl() -> bool {
     #[cfg(target_os = "macos")]
     {
         Path::new("/usr/bin/log").is_file()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         find_executable(Path::new("journalctl")).is_some()
     }
@@ -246,16 +259,20 @@ pub fn has_journalctl() -> bool {
 
 /// polkit 守护进程二进制存在（Debian 系在 `/usr/lib`，RHEL 系在 `/usr/libexec`）。
 ///
-/// macOS 没有 polkit——它的授权走 Authorization Services / TCC，与 polkit
-/// 的「按 action id 询问策略」模型对不上，因此恒为 false。这不影响提权：
-/// 提权的权威判定在 helper 内部（`design.md` §5），polkit 只是让 systemd
-/// 操作能有更细的裁决。
+/// macOS 与 Windows 都没有 polkit，恒为 false：
+///
+/// - macOS 的授权走 Authorization Services / TCC；
+/// - Windows 的走 UAC 与服务的 DACL。
+///
+/// 两者都与 polkit 的「按 action id 询问策略」模型对不上。这不影响提权——
+/// 提权的权威判定在 helper 内部（`design.md` §5），polkit 只是让服务操作
+/// 能有更细的裁决。
 pub fn has_polkit() -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         false
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         ["/usr/lib/polkit-1/polkitd", "/usr/libexec/polkit-1/polkitd"]
             .iter()
@@ -265,14 +282,26 @@ pub fn has_polkit() -> bool {
 
 /// 支持用户级服务单元。
 ///
-/// Linux：`/run/user` 存在（pam_systemd 会为登录用户在此建运行时目录）。
-/// macOS：launchd 的 `gui/<uid>` 与 `user/<uid>` 域是内建的，恒为 true。
+/// | 平台 | 判据 |
+/// |---|---|
+/// | Linux | `/run/user` 存在（pam_systemd 会为登录用户在此建运行时目录） |
+/// | macOS | launchd 的 `gui/<uid>` 与 `user/<uid>` 域是内建的，恒为 true |
+/// | Windows | **false**——SCM 只有一个全机范围的服务表，没有「每用户的服务管理器」这一层 |
+///
+/// Windows 上那些名字带随机后缀的「每用户服务实例」（`OneSyncSvc_1a2b3c`）
+/// 不是等价物：它们由系统按模板自动派生，用户既不能自己装一个，也没有
+/// `systemctl --user` 那样的管理入口。报 true 会让前端显示一个点进去
+/// 什么都做不了的作用域切换。
 pub fn has_user_units() -> bool {
     #[cfg(target_os = "macos")]
     {
         true
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        false
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Path::new("/run/user").is_dir()
     }
@@ -285,6 +314,10 @@ pub fn has_podman() -> bool {
 
 /// 守护进程的 PATH 往往极简（systemd 默认只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`），
 /// 环境变量之外再补这份标准目录，避免「装了但没找到」。
+///
+/// Windows 上没有这个问题：服务继承的是系统 PATH，本来就含 `System32`；
+/// 因此那一侧这份兜底为空。
+#[cfg(not(windows))]
 const FALLBACK_PATH: &[&str] = &[
     "/usr/local/sbin",
     "/usr/local/bin",
@@ -294,27 +327,75 @@ const FALLBACK_PATH: &[&str] = &[
     "/bin",
 ];
 
-/// 找可执行文件：含 `/` 的路径直接检查；否则依次在 `PATH` 与 [`FALLBACK_PATH`] 里找。
+/// 见上。
+#[cfg(windows)]
+const FALLBACK_PATH: &[&str] = &[];
+
+/// 找可执行文件：带路径分隔符的直接检查；否则依次在 `PATH` 与 [`FALLBACK_PATH`] 里找。
+///
+/// # Windows 上还要试后缀
+///
+/// 配置里写的是 `helper_path = "strixmaid-helper"`，而磁盘上的文件叫
+/// `strixmaid-helper.exe`。命令行下是 `cmd` 在替你补 `PATHEXT` 里的后缀，
+/// 而 `CreateProcessW` **不会**——所以这里得自己补，否则「装了但没找到」。
 pub fn find_executable(name_or_path: &Path) -> Option<PathBuf> {
     if name_or_path.as_os_str().is_empty() {
         return None;
     }
     if name_or_path.components().count() > 1 || name_or_path.is_absolute() {
-        return is_executable_file(name_or_path).then(|| name_or_path.to_path_buf());
+        return with_exe_suffix(name_or_path).into_iter().find(|p| is_executable_file(p));
     }
     let env_path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&env_path)
         .chain(FALLBACK_PATH.iter().map(PathBuf::from))
-        .map(|dir| dir.join(name_or_path))
+        .flat_map(|dir| with_exe_suffix(&dir.join(name_or_path)))
         .find(|candidate| is_executable_file(candidate))
 }
 
-/// 是常规文件且任一执行位置位。
+/// 一个候选路径的全部写法：Unix 上就是它自己；Windows 上还要带上补了后缀的版本。
+///
+/// 只补 `.exe`（而不是整个 `PATHEXT`）：本项目要找的东西只有
+/// `strixmaid-helper`、`strixmaid`、`podman` 这几个真正的可执行文件，
+/// 把 `.BAT` / `.CMD` 也算进来反而会让「找到一个同名批处理」这种意外成立。
+fn with_exe_suffix(path: &Path) -> Vec<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        vec![path.to_path_buf()]
+    }
+    #[cfg(windows)]
+    {
+        let has_exe = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+        if has_exe {
+            vec![path.to_path_buf()]
+        } else {
+            let mut with = path.as_os_str().to_owned();
+            with.push(".exe");
+            // 先试带后缀的：Windows 上那才是常态。
+            vec![PathBuf::from(with), path.to_path_buf()]
+        }
+    }
+}
+
+/// 是常规文件且「可执行」。
+///
+/// Unix 看执行位。Windows 没有执行位——**文件存在且是普通文件就算**：
+/// 那里「能不能执行」由映像格式与 DACL 在 `CreateProcessW` 的那一刻裁决，
+/// 事先问不出来。这与本函数的用途相符：它回答的是能力探测里的
+/// 「这台机器上装了这个东西吗」，不是「我现在有权跑它吗」。
 fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +468,12 @@ mod tests {
         assert!(!c.elevated);
     }
 
+    /// Unix 的组惯例：`sudo` 可提权，`adm` / `systemd-journal` / `wheel` 可读 journal。
+    ///
+    /// 这些组名全是 Linux 发行版与 systemd 的产物，Windows 上一个都不存在
+    /// （默认放行组只有 `Administrators`，见 [`DEFAULT_ELEVATE_GROUPS`]），
+    /// 所以本用例是 Unix 专属的；Windows 的对应物见下一条。
+    #[cfg(unix)]
     #[test]
     fn sudo_组可提权_adm_组可读日志() {
         let c = derive_user_caps(1000, "alice", &groups(&["alice", "adm", "sudo"]), false, &default_allow());
@@ -398,6 +485,35 @@ mod tests {
         assert!(!c.can_elevate);
         let c = derive_user_caps(1000, "carol", &groups(&["carol", "wheel"]), false, &default_allow());
         assert!(c.can_read_journal && c.can_elevate);
+    }
+
+    /// 上一条在 Windows 上的等价物：默认放行组只有 `Administrators`，
+    /// Unix 惯例的那几个名字一律不放行——Windows 上没有叫 `sudo` 的组，
+    /// 放行它等于给一个谁都能自建的组名开后门。
+    ///
+    /// 这里不断言 `can_read_journal`：[`JOURNAL_GROUPS`] 是 systemd 的组名，
+    /// Windows 上「能读全量日志」对应的是 `Event Log Readers` 组，
+    /// 本模块目前还没有那条推导。
+    #[cfg(windows)]
+    #[test]
+    fn administrators_组可提权而_unix_组名不放行() {
+        let c = derive_user_caps(
+            1000,
+            "alice",
+            &groups(&["alice", "Administrators"]),
+            false,
+            &default_allow(),
+        );
+        assert!(c.can_elevate);
+        assert!(!c.can_manage_units, "未提权时只给「可以去提权」这一个信号");
+        let c = derive_user_caps(
+            1000,
+            "bob",
+            &groups(&["bob", "sudo", "wheel", "admin"]),
+            false,
+            &default_allow(),
+        );
+        assert!(!c.can_elevate, "Windows 上不存在这几个组，不该放行");
     }
 
     #[test]
@@ -426,6 +542,7 @@ mod tests {
         assert_eq!(id.capabilities(&default_allow()), derive_user_caps(1000, "alice", &id.groups, false, &default_allow()));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn 查找可执行文件() {
         assert!(find_executable(Path::new("sh")).is_some());
@@ -434,6 +551,33 @@ mod tests {
         assert!(find_executable(Path::new("definitely-not-a-real-binary-xyz")).is_none());
         assert!(find_executable(Path::new("/etc/passwd")).is_none(), "不可执行");
         assert!(find_executable(Path::new("/etc")).is_none(), "目录不算");
+    }
+
+    /// Windows 版。要点是**不写后缀也要找得到**——配置里写的是
+    /// `helper_path = "strixmaid-helper"`，磁盘上是 `.exe`。
+    #[cfg(windows)]
+    #[test]
+    fn 查找可执行文件() {
+        // 不带后缀：靠 with_exe_suffix 补 .exe
+        let found = find_executable(Path::new("cmd")).expect("cmd 一定在 PATH 里");
+        assert!(
+            found.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")),
+            "应当补上 .exe：{}",
+            found.display()
+        );
+        // 带后缀、带绝对路径
+        assert!(find_executable(Path::new("cmd.exe")).is_some());
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        assert!(
+            find_executable(Path::new(&format!("{system_root}\\System32\\cmd.exe"))).is_some()
+        );
+
+        assert!(find_executable(Path::new("")).is_none());
+        assert!(find_executable(Path::new("definitely-not-a-real-binary-xyz")).is_none());
+        assert!(
+            find_executable(Path::new(&format!("{system_root}\\System32"))).is_none(),
+            "目录不算"
+        );
     }
 
     struct Fake(&'static str, Probe);
@@ -495,5 +639,22 @@ mod tests {
         // user_units 不该被 systemd 那一项拖成 false
         let caps = probe_system(Path::new("strixmaid-helper"));
         assert!(caps.user_units);
+    }
+
+    /// Windows：SCM 与事件日志是系统组件；没有 polkit；**没有用户级服务管理器**。
+    #[cfg(windows)]
+    #[test]
+    fn windows_的判据是平台事实() {
+        assert!(has_systemd(), "服务控制管理器是系统组件");
+        assert!(has_journalctl(), "事件日志是系统组件");
+        assert!(!has_polkit(), "Windows 没有 polkit");
+        assert!(
+            !has_user_units(),
+            "SCM 只有一张全机服务表，没有 systemctl --user 那一层"
+        );
+        let caps = probe_system(Path::new("strixmaid-helper"));
+        assert!(caps.systemd && caps.journal);
+        assert!(!caps.user_units);
+        assert!(!caps.polkit);
     }
 }
