@@ -23,6 +23,19 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 
+# 前端产物。web/dist 不在 git 里（它是 web/src 的派生物，跟踪必然漂移），
+# 所以每次出包都在这里重建一次——本地与 CI 因此走同一条路，
+# 不会出现「CI 的包是新的、本地打的包是旧的」。
+command -v bun >/dev/null 2>&1 || {
+    echo "缺 bun：前端产物 web/dist 由 bun 构建，见 https://bun.sh" >&2
+    exit 3
+}
+( cd web && bun install --frozen-lockfile && bun run build )
+[ -f web/dist/index.html ] || {
+    echo "前端构建未产出 web/dist/index.html" >&2
+    exit 3
+}
+
 if [ "$arch" = "x86_64" ]; then
     command -v x86_64-linux-musl-gcc >/dev/null 2>&1 || {
         echo "缺 x86_64-linux-musl-gcc：apt install musl-tools（libsqlite3-sys 要编 C 源）" >&2

@@ -56,6 +56,30 @@ if (-not $version) { throw "无法从 `"$($versionLine.Line)`" 解析版本号" 
 $target = 'x86_64-pc-windows-msvc'
 $name = "strixmaid-$version-x86_64-windows"
 
+# 前端产物。web/dist 不在 git 里（它是 web/src 的派生物，跟踪必然漂移），
+# 所以每次出包都在这里重建一次——本地与 CI 因此走同一条路，
+# 不会出现「CI 的包是新的、本地打的包是旧的」。
+#
+# 必须在 cargo build 之前：release 下 rust-embed 会把 web/dist 嵌进二进制，
+# 顺序反了就会嵌进上一次的产物（或者直接因为目录不存在而构建失败）。
+Write-Host "构建前端..." -ForegroundColor Cyan
+if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+    throw "缺 bun：前端产物 web/dist 由 bun 构建，见 https://bun.sh"
+}
+Push-Location (Join-Path $repoRoot 'web')
+try {
+    & bun install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) { throw "bun install 失败（退出码 $LASTEXITCODE）" }
+    & bun run build
+    if ($LASTEXITCODE -ne 0) { throw "bun run build 失败（退出码 $LASTEXITCODE）" }
+}
+finally {
+    Pop-Location
+}
+if (-not (Test-Path (Join-Path $repoRoot 'web\dist\index.html'))) {
+    throw "前端构建未产出 web\dist\index.html"
+}
+
 Write-Host "构建 $Configuration（$target）..." -ForegroundColor Cyan
 Push-Location $repoRoot
 try {
