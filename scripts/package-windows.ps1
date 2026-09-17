@@ -83,7 +83,7 @@ if (-not (Test-Path (Join-Path $repoRoot 'web\dist\index.html'))) {
 Write-Host "构建 $Configuration（$target）..." -ForegroundColor Cyan
 Push-Location $repoRoot
 try {
-    $cargoArgs = @('build', '--target', $target, '-p', 'strixmaid-server', '-p', 'strixmaid-helper')
+    $cargoArgs = @('build', '--target', $target, '-p', 'strixmaid', '-p', 'strixmaid-helper')
     if ($Configuration -eq 'release') { $cargoArgs += '--release' }
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
