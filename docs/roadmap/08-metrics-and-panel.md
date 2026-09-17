@@ -57,7 +57,7 @@
 |---|---|---|
 | 指标常量表 | `crates/strixmaid-core/src/metrics/catalog.rs` | `CATALOG: &[MetricDef]`，58 种；`MetricDef { name, unit, desc, labels }` |
 | 采集器 | `crates/strixmaid-core/src/metrics/collect/linux/{cpu,mem,load,psi,disk,fs,net}.rs` | 按 `catalog` 常量产出 |
-| macOS 采集器 | `.../collect/macos/{cpu,mem,load,fs,net}.rs` | 开发平台实现，无 `disk` / `psi` |
+| macOS 采集器 | `.../collect/macos/{cpu,mem,load,fs,net}.rs` | 无 `disk`（IOKit，未做）/ `psi`（平台没有该特性） |
 | 每核明细开关 | `config.rs:293` `per_core_detail: bool`（默认 `false`） | 关闭时每核只留 `cpu.core.usage` |
 | 存储与聚合 | `metrics/{ring,engine,scheduler}.rs`、`store/` | 五层桶，`design.md` §7.2 |
 | 静态信息 | `strixmaid-types/src/system.rs` | `SystemInfo{ cpu, memory, disks, filesystems, … }` |

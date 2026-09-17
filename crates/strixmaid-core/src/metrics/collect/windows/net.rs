@@ -28,7 +28,24 @@
 //!
 //! # 过滤与合并项
 //!
-//! - 排除回环（`Type == IF_TYPE_SOFTWARE_LOOPBACK`）。
+//! `GetIfTable2` 返回的不全是「接口」——它连 NDIS 的记账对象一起给，本机 54 行里
+//! 只有 7 行对应「网络连接」面板里的网卡。这不是在替使用者判断哪个有用（那条原则
+//! 仍然成立：物理网卡、Hyper-V 虚拟交换机、WSL、VPN 一个不删），而是把根本不是
+//! 独立接口的东西排掉。五条判据，全部取自 `MIB_IF_ROW2` 自己的字段：
+//!
+//! | 判据 | 排掉的东西 | 本机 |
+//! |---|---|---|
+//! | `Type == IF_TYPE_SOFTWARE_LOOPBACK` | 回环 | 1 |
+//! | `FilterInterface` 位 | NDIS 轻量过滤层 | 31 |
+//! | `AccessType == POINT_TO_POINT` | WAN Miniport、Teredo / 6to4 / IP-HTTPS / SSTP / IKEv2 / L2TP / PPTP 隧道 | 11 |
+//! | `PhysicalAddressLength == 0` | 内核调试网卡、Hyper-V 虚拟交换机扩展适配器 | 2 |
+//! | `PhysicalMediumType == Native802_11` 且无 `HardwareInterface` 位 | Wi-Fi Direct 虚拟适配器 | 2 |
+//!
+//! 54 → 7，与「控制面板 › 网络连接」里列出的网卡逐个对上。
+//!
+//! 逐条的理由：
+//!
+//! - **回环**（`Type == IF_TYPE_SOFTWARE_LOOPBACK`）。
 //! - **排除 NDIS 过滤层接口**（`InterfaceAndOperStatusFlags.FilterInterface`）。
 //!   `GetIfTable2` 把每个挂在网卡上的 NDIS 轻量过滤驱动也当成一个接口返回，
 //!   于是一块物理网卡会变出四五行：
@@ -42,10 +59,26 @@
 //!
 //!   这些行的计数**是同一批字节在不同层上再数一遍**，不是另外的流量。留着它们，
 //!   一块网卡会画出四条一模一样的曲线，「全网卡求和」还会把吞吐虚报成四倍。
-//!   本机实测：不过滤 54 个接口，过滤后 22 个。
-//! - 其余接口（物理网卡、Hyper-V 虚拟交换机、WSL、VPN 与 6to4/Teredo 隧道）
-//!   全部保留：哪些有意义取决于机器角色，采集端不替使用者做判断——
-//!   与 Linux / macOS 版一致。
+//! - **点对点接口**（`AccessType == NET_IF_ACCESS_POINT_TO_POINT`）。WAN Miniport
+//!   （`本地连接* 3`…`* 10`）与各类隧道是 RAS/隧道栈的坯子：没有拨上号之前不承载
+//!   任何流量，别名还是系统按序号编的「本地连接* N」，对不上任何人认得的东西。
+//! - **没有物理地址**（`PhysicalAddressLength == 0`）。真网卡——哪怕是纯软件的
+//!   VNIC 与 Hyper-V 虚拟网卡——都有 MAC；没有 MAC 的是内核调试网卡和
+//!   `vSwitch (Default Switch)`（虚拟交换机的**扩展**适配器，与真正过流量的
+//!   `vEthernet (Default Switch)` 是两个东西，后者有 MAC，保留）。
+//! - **虚拟 802.11**（`PhysicalMediumType == NdisPhysicalMediumNative802_11` 且
+//!   位域里没有 `HardwareInterface`）。Wi-Fi Direct 在同一块无线网卡上再虚拟出
+//!   `本地连接* 1` / `* 2`，它们与真网卡同介质同 MAC 长度，只差「背后有没有硬件」
+//!   这一位。真无线网卡必然置 `HardwareInterface`，所以这一条不会误伤第二块网卡；
+//!   也不会误伤蓝牙 PAN 或各家 VNIC，那些的 `PhysicalMediumType` 不是 802.11。
+//!
+//!   `HardwareInterface` 只在这一条里用，不作为通用判据：`vEthernet`、蓝牙 PAN、
+//!   Sangfor / TrustAgent 的 VNIC 全都没有这一位，而它们都要留。
+//!
+//! 保留的那些（物理网卡、Hyper-V 虚拟交换机、WSL、VPN 的 VNIC）一个不删：
+//! 哪个有意义取决于机器角色，采集端不替使用者做判断——与 Linux / macOS 版一致。
+//! 被禁用、网线被拔的网卡也留着（`网络连接` 面板同样列出它们），曲线是平的 0，
+//! 那是有效观测，不是缺失。
 //! - `net.errors`（roadmap/08 §4.2 的合并项）= `InErrors + OutErrors +
 //!   InDiscards + OutDiscards`。**Windows 侧四个计数齐全**，不像 macOS 缺发送
 //!   方向的丢包，所以这条曲线在语义上与 Linux 版完全等价。
@@ -58,6 +91,10 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetIfTable2, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_ROW2, MIB_IF_TABLE2,
+};
+use windows_sys::Win32::NetworkManagement::Ndis::{
+    NDIS_PHYSICAL_MEDIUM, NET_IF_ACCESS_POINT_TO_POINT, NET_IF_ACCESS_TYPE,
+    NdisPhysicalMediumNative802_11,
 };
 
 use super::{CollectError, Collector, Sample, elapsed_secs, rate, sanitize_label};
@@ -97,11 +134,47 @@ pub type IfSnapshot = HashMap<String, IfCounters>;
 /// 所以在这里自己定义。
 const FLAG_FILTER_INTERFACE: u8 = 1 << 1;
 
-/// 是否采集这个接口。
+/// 同一个位域里的 `HardwareInterface`（bit 0）：接口背后有真实设备。
+const FLAG_HARDWARE_INTERFACE: u8 = 1 << 0;
+
+/// `should_collect` 要看的那几个 `MIB_IF_ROW2` 字段，字段名与 `MIB_IF_ROW2` 一致。
 ///
-/// `if_type` 是 IANA 的 `ifType`，`flags` 是 `InterfaceAndOperStatusFlags` 的位域字节。
-pub fn should_collect(if_type: u32, flags: u8) -> bool {
-    if_type != IF_TYPE_SOFTWARE_LOOPBACK && flags & FLAG_FILTER_INTERFACE == 0
+/// 单独立一个结构而不是摊成五个参数：五个同为整数的参数排在一起，调换顺序编译器
+/// 不会报错，而测试用例正好要按位置写一长串数字。
+#[derive(Debug, Clone, Copy)]
+pub struct IfIdent {
+    /// IANA 的 `ifType`。
+    pub if_type: u32,
+    /// `InterfaceAndOperStatusFlags` 的位域字节。
+    pub flags: u8,
+    /// `NET_IF_ACCESS_TYPE`。
+    pub access_type: NET_IF_ACCESS_TYPE,
+    /// MAC 长度，字节。
+    pub phys_addr_len: u32,
+    /// `NDIS_PHYSICAL_MEDIUM`。
+    pub phys_medium: NDIS_PHYSICAL_MEDIUM,
+}
+
+/// 是否采集这个接口。判据与理由见模块文档的表。
+pub fn should_collect(id: IfIdent) -> bool {
+    if id.if_type == IF_TYPE_SOFTWARE_LOOPBACK {
+        return false;
+    }
+    if id.flags & FLAG_FILTER_INTERFACE != 0 {
+        return false;
+    }
+    if id.access_type == NET_IF_ACCESS_POINT_TO_POINT {
+        return false;
+    }
+    if id.phys_addr_len == 0 {
+        return false;
+    }
+    if id.phys_medium == NdisPhysicalMediumNative802_11
+        && id.flags & FLAG_HARDWARE_INTERFACE == 0
+    {
+        return false;
+    }
+    true
 }
 
 /// `FreeMibTable` 的 RAII。
@@ -137,7 +210,13 @@ pub fn read_interfaces() -> std::io::Result<IfSnapshot> {
 
     let mut out = IfSnapshot::with_capacity(count);
     for row in rows {
-        if !should_collect(row.Type, row.InterfaceAndOperStatusFlags._bitfield) {
+        if !should_collect(IfIdent {
+            if_type: row.Type,
+            flags: row.InterfaceAndOperStatusFlags._bitfield,
+            access_type: row.AccessType,
+            phys_addr_len: row.PhysicalAddressLength,
+            phys_medium: row.PhysicalMediumType,
+        }) {
             continue;
         }
         let name = from_wide_nul(&row.Alias);
@@ -237,20 +316,67 @@ mod tests {
         m
     }
 
-    /// `HardwareInterface | ConnectorPresent`，一块真网卡的典型位域。
-    const HARDWARE: u8 = 0b0000_0101;
+    /// 一台真机（Win10 21H2，Realtek 有线 + Intel Wi-Fi + Hyper-V + 两个 VPN VNIC）
+    /// 上 `GetIfTable2` 的全部非过滤层行，字段照抄，末位是「网络连接」面板是否列出它。
+    ///
+    /// 用真实数据而不是造几个典型值：这套判据是从这张表反推出来的，把表钉进测试，
+    /// 将来谁改判据、改出「少一个网卡」或「又冒出一个本地连接*」都会当场失败。
+    const REAL_ROWS: &[(&str, IfIdent, bool)] = &[
+        // (别名, 行, 该不该采)
+        ("以太网 Realtek", ident(6, 0b0000_0101, 2, 6, 14), true),
+        ("WLAN Intel", ident(71, 0b0001_0101, 2, 6, 9), true),
+        ("蓝牙网络连接", ident(6, 0b0001_0000, 2, 6, 10), true),
+        ("vEthernet (Default Switch)", ident(6, 0, 2, 6, 0), true),
+        ("以太网 2 Array VPN（已禁用）", ident(6, 0, 2, 6, 0), true),
+        ("以太网 4 TrustAgent VNIC", ident(6, 0b0001_0000, 2, 6, 14), true),
+        ("本地连接 Sangfor VNIC", ident(53, 0b0001_0000, 2, 6, 0), true),
+        // 以下全部不该出现在页面上
+        ("Loopback Pseudo-Interface 1", ident(24, 0, 1, 0, 0), false),
+        ("以太网-QoS Packet Scheduler（过滤层）", ident(6, 0b0000_0010, 2, 6, 14), false),
+        ("本地连接* 8 WAN Miniport (IP)", ident(6, 0, 3, 0, 0), false),
+        ("本地连接* 9 WAN Miniport (IPv6)", ident(6, 0, 3, 0, 0), false),
+        ("本地连接* 7 WAN Miniport (PPPOE)", ident(23, 0b0001_0000, 3, 0, 0), false),
+        ("本地连接* 3 WAN Miniport (SSTP)", ident(131, 0b0001_0000, 3, 0, 0), false),
+        ("Teredo Tunneling Pseudo-Interface", ident(131, 0, 3, 0, 0), false),
+        ("6to4 Adapter", ident(131, 0, 3, 0, 0), false),
+        ("以太网(内核调试器)", ident(6, 0, 2, 0, 14), false),
+        ("vSwitch (Default Switch) 扩展适配器", ident(6, 0, 2, 0, 0), false),
+        ("本地连接* 1 Wi-Fi Direct", ident(71, 0b0001_0000, 2, 6, 9), false),
+        ("本地连接* 2 Wi-Fi Direct #2", ident(71, 0b0001_0000, 2, 6, 9), false),
+    ];
+
+    const fn ident(
+        if_type: u32,
+        flags: u8,
+        access_type: NET_IF_ACCESS_TYPE,
+        phys_addr_len: u32,
+        phys_medium: NDIS_PHYSICAL_MEDIUM,
+    ) -> IfIdent {
+        IfIdent {
+            if_type,
+            flags,
+            access_type,
+            phys_addr_len,
+            phys_medium,
+        }
+    }
 
     #[test]
-    fn 回环与过滤层接口都被排除() {
-        // 6 = IF_TYPE_ETHERNET_CSMACD，71 = IEEE80211
-        assert!(should_collect(6, HARDWARE));
-        assert!(should_collect(71, HARDWARE));
-        // 虚拟接口（Hyper-V 虚拟交换机、隧道）不带 HardwareInterface 位，照采
-        assert!(should_collect(6, 0));
-        assert!(!should_collect(IF_TYPE_SOFTWARE_LOOPBACK, HARDWARE));
-        // NDIS 过滤层：计数与它下面那块网卡逐字节相同，留着就是四条一样的曲线
-        assert!(!should_collect(6, FLAG_FILTER_INTERFACE));
-        assert!(!should_collect(6, HARDWARE | FLAG_FILTER_INTERFACE));
+    fn 真机每一行的取舍都对() {
+        for (name, row, want) in REAL_ROWS {
+            assert_eq!(should_collect(*row), *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn wifi_direct_与真无线网卡只差硬件位() {
+        // 同介质、同 MAC 长度、同 AccessType，唯一的差别是 HardwareInterface
+        let real = ident(71, 0b0001_0000 | FLAG_HARDWARE_INTERFACE, 2, 6, 9);
+        let virt = ident(71, 0b0001_0000, 2, 6, 9);
+        assert!(should_collect(real), "真无线网卡必然置 HardwareInterface");
+        assert!(!should_collect(virt));
+        // 这一条只管 802.11：没有硬件位的以太网 VNIC 照采，否则 vEthernet 会被误伤
+        assert!(should_collect(ident(6, 0b0001_0000, 2, 6, 0)));
     }
 
     #[test]

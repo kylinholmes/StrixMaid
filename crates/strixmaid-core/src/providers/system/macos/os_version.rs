@@ -7,9 +7,15 @@
 //!
 //! 这份文件是格式极其规整的 XML plist：一层 `<dict>`，全是
 //! `<key>K</key><string>V</string>` 配对，没有嵌套、没有数组、没有二进制格式。
-//! 为读三个字段引入一个 plist 依赖不划算——尤其它只在开发平台上用得到，
+//! 为读三个字段引入一个 plist 依赖不划算——它只在 macOS 上用得到，
 //! 却会进入所有平台的 `Cargo.lock`。解析器只认这一种形状，
 //! 认不出就退回 `sysctl kern.osproductversion`。
+//!
+//! **这条理由后来失效了一半**：`plist` crate 已经因为 launchd provider 要读
+//! 二进制 plist 而进了 macOS 的依赖表（`providers/service/launchd.rs`）。
+//! 这里仍保留手写解析，是因为它已经跑通且带着「认不出就退回 sysctl」的降级
+//! 路径；换成通用解析器是一次纯粹的等价重写，收益为零。记在这里以免下次
+//! 有人照着这段注释得出「本项目不依赖 plist」的错误结论。
 
 use std::fs;
 

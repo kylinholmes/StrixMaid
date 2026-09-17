@@ -33,16 +33,25 @@
     background-color var(--t-color) var(--ease),
     color var(--t-color) var(--ease);
 }
-/* 两端的档跟着外框收角。不用 overflow: hidden 收——那会把焦点环一起裁掉，
-   而本项目的焦点环是往外推 2px 的（base.css）。圆角为 0 的语言下这两条是空操作。 */
-.item:first-child {
+/* 两端的档跟着外框收角，用的是**内弧**（外弧 − 框线宽，见 tokens.css）。
+   直接用 --radius-md 会让选中档的底色从外框圆角处探出一角。
+   不用 overflow: hidden 收——那会把焦点环一起裁掉，
+   而本项目的焦点环是往外推 2px 的（base.css）。圆角为 0 的语言下这两条是空操作。
+
+   用 :first-of-type 而不是 :first-child：外层是 <fieldset>，它的第一个子元素
+   永远是 <legend>（读屏要的标签），所以没有任何一个 .item 会是 :first-child，
+   这一条连同上面的 border-left: 0 会整个静默失效——选中档的左上/左下就是直角。
+   :first-of-type 认的是「同类元素里的第一个」，legend 不是 button，正好落在首档上。
+   末档那条同理改写，虽然 :last-child 本来就对，但两端用同一套选择器才不会
+   下次有人往 fieldset 末尾加个东西时又坏一边。 */
+.item:first-of-type {
   border-left: 0;
-  border-start-start-radius: var(--radius-md);
-  border-end-start-radius: var(--radius-md);
+  border-start-start-radius: var(--radius-md-inset);
+  border-end-start-radius: var(--radius-md-inset);
 }
-.item:last-child {
-  border-start-end-radius: var(--radius-md);
-  border-end-end-radius: var(--radius-md);
+.item:last-of-type {
+  border-start-end-radius: var(--radius-md-inset);
+  border-end-end-radius: var(--radius-md-inset);
 }
 .item:hover {
   background: var(--surface-2);

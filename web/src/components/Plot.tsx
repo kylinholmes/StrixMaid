@@ -84,6 +84,11 @@ export function Plot({
   dataRef.current = data;
   const tipRef2 = useRef(tip);
   tipRef2.current = tip;
+  /* 高度可能来自弹性布局（性能页的首图），拖窗口时逐帧在变。
+     它不进 `shape`：改尺寸走 setSize，一帧重建一次 uPlot 实例太贵。
+     实例内部的回调都读这个 ref，读 props 会拿到建实例那一刻的旧值。 */
+  const heightRef = useRef(height);
+  heightRef.current = height;
   const mode = useTheme((t) => t.mode);
 
   // 结构性参数变化（序列形状 / 主题 / 上限模式）→ 重建实例
@@ -92,7 +97,6 @@ export function Plot({
     st: series.map((x) => [x.stroke, x.width, x.dash, x.fill]),
     bands,
     yMax,
-    height,
     tone,
     mode,
     noCursor,
@@ -109,7 +113,7 @@ export function Plot({
 
     const opts: uPlot.Options = {
       width: host.clientWidth || 300,
-      height,
+      height: heightRef.current,
       padding: [0, 0, 0, 0],
       legend: { show: false },
       cursor: noCursor
@@ -173,7 +177,8 @@ export function Plot({
             const w = el.offsetWidth;
             const hostW = host.clientWidth;
             const x = left + 12 + w > hostW - 4 ? left - w - 12 : left + 12;
-            const y = typeof top === "number" && top >= 0 ? Math.min(top + 14, height - 24) : 8;
+            const y =
+              typeof top === "number" && top >= 0 ? Math.min(top + 14, heightRef.current - 24) : 8;
             el.style.left = `${Math.max(2, x)}px`;
             el.style.top = `${y}px`;
           },
@@ -239,7 +244,7 @@ export function Plot({
     plotRef.current = u;
 
     const ro = new ResizeObserver(() => {
-      if (host.clientWidth > 0) u.setSize({ width: host.clientWidth, height });
+      if (host.clientWidth > 0) u.setSize({ width: host.clientWidth, height: heightRef.current });
     });
     ro.observe(host);
 
@@ -249,6 +254,14 @@ export function Plot({
       plotRef.current = null;
     };
   }, [shape]);
+
+  // 高度变化（首图吃掉的剩余空间随窗口变）：改尺寸，不重建
+  useEffect(() => {
+    const host = hostRef.current;
+    if (host && plotRef.current) {
+      plotRef.current.setSize({ width: host.clientWidth || 300, height });
+    }
+  }, [height]);
 
   // 数据更新：直接 setData 重绘
   useEffect(() => {

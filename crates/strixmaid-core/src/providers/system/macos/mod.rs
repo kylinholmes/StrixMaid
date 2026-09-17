@@ -72,8 +72,10 @@ pub fn collect_system_info() -> SystemInfo {
         filesystems: storage::read_filesystems(),
         uptime_secs: (ts - boot_ts).max(0) as u64,
         boot_ts,
-        // GPU / 网卡拓扑走 IOKit / getifaddrs，P0 不做（macOS 只是开发平台，
-        // 面板的资源组在 Linux 上验证即可）。如实留空，不是缺陷。
+        // GPU / 网卡拓扑走 IOKit / getifaddrs，P0 不做。如实留空，不是冒充。
+        // 注意这是「**还没做**」而不是「平台没有」——macOS 自 2026-09 起是交付
+        // 目标（design.md §2.1 的 macOS 补充），这一项因此是一笔待补的能力，
+        // 而不是可以永远搁置的开发平台缺口。
         gpus: Vec::new(),
         networks: Vec::new(),
     }

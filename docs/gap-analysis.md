@@ -146,11 +146,12 @@ PAM 登录的用户重输密码即可获得 root worker。
 
 01 决定安全模型，且是 03 / 04 / 08 / 09 的前置，应最先做。02 很小，紧随 01。03 是剩余工作中最大的独立块。06 与 07 应并行准备：没有可安装的产物就无法在 root 环境做 07。
 
-## 7. 开发平台
+## 7. macOS
 
-工程现在同时能在 macOS 上编译、测试、运行（三个二进制齐全，测试全绿，clippy 零 warning，
-四个 provider 全部探测可用）。这**不改变本文的任何结论**——授权模型缺口、P0 未完成项、
-未验证项在两个平台上完全相同。详见 [`macos-dev-platform.md`](./macos-dev-platform.md)。
+工程同时能在 macOS 上编译、测试、运行（三个二进制齐全，测试全绿，clippy 零 warning，
+四个 provider 全部探测可用）。2026-09 起 macOS 从开发平台提升为**交付目标**
+（launchd 服务定义、安装脚本、发布包）。这**不改变本文的任何结论**——授权模型缺口、
+P0 未完成项、未验证项在两个平台上完全相同。详见 [`macos-platform.md`](./macos-platform.md)。
 
 顺带修掉的一个历史问题：`.gitignore` 里 Cargo 模板自带的裸 `debug` 规则在任意层级生效，
 把 `crates/strixmaid-server/src/debug/`（§12.1 的调试页）整个吞掉了，导致该目录**从未进入

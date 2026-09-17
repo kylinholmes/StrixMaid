@@ -94,8 +94,9 @@ pub struct GlobalArgs {
     #[arg(short = 'l', long, global = true, value_name = "ADDR")]
     pub listen: Option<SocketAddr>,
 
-    /// 数据目录，存放 SQLite [默认: Unix /var/lib/strixmaid，
-    /// Windows C:\ProgramData\StrixMaid\data；环境变量 STRIXMAID_DATA_DIR]
+    /// 数据目录，存放 SQLite [默认: Linux /var/lib/strixmaid，
+    /// macOS /var/db/strixmaid，Windows C:\ProgramData\StrixMaid\data；
+    /// 环境变量 STRIXMAID_DATA_DIR]
     #[arg(short = 'd', long, global = true, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
 

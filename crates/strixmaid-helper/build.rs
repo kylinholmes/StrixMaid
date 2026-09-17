@@ -13,9 +13,13 @@
 //! macOS 自带 OpenPAM，SDK 里有 `libpam.tbd`，`-lpam` 直接可用，不需要装任何东西。
 //! （`-l:` 是 GNU ld 的语法，Apple 的链接器不认。）
 //!
-//! macOS 是开发平台而非交付目标——`design.md` §2.1 的三个产物都是 Linux 二进制。
-//! 这里能链上，只是为了让认证链路能在本机跑通并联调。注意 OpenPAM 与 Linux-PAM
-//! 的**常量数值不同**，那部分的处理见 `src/auth/unix.rs` 的 `consts` 模块。
+//! macOS 自 2026-09 起是交付目标（`design.md` §2.1 的 macOS 补充），
+//! 这条链接路径因此不再只服务于本机联调，发布包里的 helper 走的就是它：
+//! 运行期解析到 `/usr/lib/libpam.2.dylib`，目标机器不需要装任何东西。
+//! `scripts/package-macos.sh` 出包前用 `otool -L` 断言这一条确实成立。
+//!
+//! 注意 OpenPAM 与 Linux-PAM 的**常量数值不同**，那部分的处理见
+//! `src/auth/unix.rs` 的 `consts` 模块。
 //!
 //! # 交叉工具链的出口：`STRIXMAID_PAM_LINK_ARG`
 //!

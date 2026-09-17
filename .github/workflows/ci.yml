@@ -15,59 +15,93 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  # 前端的质量门槛，以及整条 workflow 里**唯一一次**前端构建。
+  #
+  # web/dist 不在 git 里（它是 web/src 的派生物，跟踪必然漂移——曾经发生过：
+  # deb 装出来的 UI 停在几十个提交之前）。而 rust-embed 的 `folder` 在 **debug 下
+  # 同样**于编译期求值，目录不存在就直接报 "folder does not exist"，所以凡是要编
+  # strixmaid-server 的 job 都得先有 web/dist，不只是出包那几个。原先每个这样的
+  # job 各自构建一遍，同一份产物在一次 workflow 里被算了四次；现在集中在这里构建
+  # 一次，下游用 artifact 取走。
+  #
+  # 顺带把前端真正的门槛补上：`bun run build` 里的 `tsc -b` 只覆盖类型这一条，
+  # biome（`check`）与 vitest（`test`）以前在整个 workflow 里一次都没跑过。
+  # 三条分成三个 step 而不是串进一个 run，是为了挂的时候一眼看出挂在哪一条。
+  frontend:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # web/dist 不在 git 里，而 rust-embed 的 `folder` 在 **debug 下同样**
-      # 于编译期求值——目录不存在就直接报 "folder does not exist"。
-      # 所以凡是要编 strixmaid-server 的 job 都得先构建前端，不只是出包那几个。
       - uses: oven-sh/setup-bun@v2
-      - name: 构建前端（rust-embed 的 folder 必须存在）
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          bun run build
-      - name: clippy（零警告是质量门槛）
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: clippy（无 UI 变体也必须干净）
-        run: cargo clippy -p strixmaid-server --no-default-features --all-targets -- -D warnings
-      - name: test
-        run: |
-          cargo build -p strixmaid-server -p strixmaid-helper
-          cargo test --workspace
+      - name: 安装依赖
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: biome（格式与 lint）
+        working-directory: web
+        run: bun run check
+      - name: 类型检查
+        working-directory: web
+        run: bun run typecheck
+      - name: vitest
+        working-directory: web
+        run: bun run test
+      - name: 构建
+        working-directory: web
+        run: bun run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist
+          # 产物为空就直接失败：下游 job 拿到一个空目录时，报出来的会是 rust-embed
+          # 或者 SPA 回退 404 之类离原因很远的症状。
+          if-no-files-found: error
 
-  # Windows 是正式支持的运行平台而不是「顺带能编」，所以质量门槛与 Linux 完全
-  # 相同：零 clippy 警告、全部测试通过（docs/windows-platform.md）。
+  # 三个平台共用同一套质量门槛：零 clippy 警告、全部测试通过。
   #
-  # 为什么不把它并进上面的 check：那个 job 还要跑 musl / zigbuild 相关的断言，
-  # 而 Windows 侧的产物形态完全不同（无 PAM、服务走 SCM、资源要 rc.exe）。
-  # 两条路各自独立，一边挂了另一边的结果仍然有用。
+  # Windows 与 macOS 都是正式支持的运行平台而不是「顺带能编」，所以门槛与 Linux
+  # 完全相同（docs/windows-platform.md、docs/macos-platform.md）。
   #
-  # 需要真实系统能力的测试（ConPTY、事件日志、以管理员身份改系统设置）一律
-  # 写成运行时探测 + eprintln 跳过，不用 #[ignore]，所以在 runner 上照跑不误。
-  windows:
-    runs-on: windows-latest
+  # 原先 Linux 与 Windows 是两个彼此独立的 job，理由是「一边挂了另一边的结果仍然
+  # 有用」。矩阵保住了这一点，靠的是 `fail-fast: false`（与下面 verify 的发行版矩阵
+  # 同一个写法）：某个平台挂掉不会取消其余平台，三份结果都看得到。换来的是再加一个
+  # 平台不必复制一整个 job。
+  #
+  # 平台特有的那两步用 `if:` 挂在矩阵里，不为它们拆回独立 job：
+  #   - 无 UI 变体的 clippy 与平台无关（`--no-default-features` 只关掉 rust-embed 那条
+  #     路径），跑一个平台就够，三个平台各跑一遍只是重复；
+  #   - PowerShell 5.1 的解析检查只有 Windows runner 上才有那个宿主。
+  #
+  # 共享的只是**门槛**，不是打包：发布物的形态本来就三样（Windows 无 PAM、服务走
+  # SCM、资源要 rc.exe；Linux 要 musl 静态与 glibc 2.28 基线；macOS 走 launchd 且只出
+  # Apple Silicon），所以下面每个平台仍是各自一条打包的路。
+  #
+  # 需要真实系统能力的测试（ConPTY、事件日志、以管理员身份改系统设置）一律写成
+  # 运行时探测 + eprintln 跳过，不用 #[ignore]，所以在 runner 上照跑不误。
+  quality:
+    needs: [frontend]
+    strategy:
+      fail-fast: false          # 一个平台挂了要看其余平台的结果，那才知道是不是平台相关
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 同 check job：web/dist 不在 git 里，rust-embed 的 folder 在 debug 下
-      # 也要求目录存在，所以这里同样得先构建前端。
-      - uses: oven-sh/setup-bun@v2
-      - name: 构建前端（rust-embed 的 folder 必须存在）
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          bun run build
+      # web/dist 不在 git 里，而 rust-embed 的 folder 在 **debug 下同样**要求目录
+      # 存在（理由见 frontend job），所以碰 cargo 之前先把前端产物取回来。
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+      - name: clippy（零警告是质量门槛）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy（无 UI 变体也必须干净）
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo clippy -p strixmaid-server --no-default-features --all-targets -- -D warnings
       # 先 build 再 test：有用例会 spawn 真实的 helper 与 worker 可执行文件，
-      # 它们得先存在于 target 目录里（与上面 check job 里同一个理由）。
+      # 它们得先存在于 target 目录里。
       - name: build
         run: cargo build --workspace
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
       # 安装脚本必须在 Windows **自带**的 PowerShell 5.1 下可解析。
@@ -75,6 +109,7 @@ jobs:
       # 一是不用 7 才有的语法，二是文件编码——5.1 读没有 BOM 的 .ps1 时按系统
       # ANSI 代码页解码，中文注释会变成乱码并吞掉引号，直接报语法错误。
       - name: PowerShell 脚本语法检查（5.1）
+        if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
           $files = @(
@@ -101,16 +136,22 @@ jobs:
   # Windows 发布 zip（scripts/package-windows.ps1）。与 Linux 侧的 package job
   # 同构，区别在于二进制就在本 job 里构建——Windows 的资源编译要 rc.exe
   # （Windows SDK），交叉编译拿不到，见 crates/*/build.rs 的说明。
+  #
+  # needs 从原先那个独立的 windows job 改成整个 quality 矩阵：GitHub 的 needs 只能
+  # 挂在整个 job 上，挂不到单条矩阵腿。代价是任一平台的门槛挂掉都不出 zip——这是
+  # 把门槛收紧而不是放松，可以接受；三个平台各自的结果仍然看得到（fail-fast: false）。
   package-windows:
-    needs: [windows]
+    needs: [quality]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # 打包脚本自己会构建前端（web/dist 不在 git 里），这里只需把 bun 准备好。
-      # 不在这里重复一次 bun run build：让本地跑脚本与 CI 跑脚本走完全同一条路，
-      # 否则「CI 能出包、本地出的包是旧前端」这类差异会再次出现。
+      # 不在这里重复一次 bun run build、也不下载 frontend job 的 artifact：让本地
+      # 跑脚本与 CI 跑脚本走完全同一条路，否则「CI 能出包、本地出的包是旧前端」
+      # 这类差异会再次出现。这是「前端只构建一次」的**唯一例外**（macOS 侧同理），
+      # 而且是刻意的——要去掉它就得改脚本，可脚本正是本地出包的唯一入口。
       - uses: oven-sh/setup-bun@v2
       - name: 组装 zip（脚本内含前端构建）
         run: ./scripts/package-windows.ps1
@@ -162,7 +203,95 @@ jobs:
           name: strixmaid-windows-x86_64
           path: strixmaid-*-x86_64-windows.zip
 
+  # macOS 只出 Apple Silicon（aarch64-apple-darwin）：不做 Intel、不做 universal、
+  # 暂不签名公证。macos-latest 本身就是 arm64 runner，原生构建，不涉及交叉工具链。
+  #
+  # 位置与 build-musl 相同：先把二进制构建出来、把架构断言钉在这里，打包是下一个
+  # job 的事。一个 job 只挂一件事，看 job 名就知道是编译挂了还是组装挂了。
+  build-macos:
+    needs: [frontend]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 与 package-macos 共用一份缓存。那个 job 会由打包脚本再走一遍同样的
+          # release 构建（刻意如此，见其说明），共用缓存至少免掉依赖那一大半。
+          shared-key: macos-release
+      # 与 quality / build-musl 同一个理由：release 下 rust-embed 要把 web/dist 嵌进
+      # 二进制，产物必须先就位。取 frontend job 构建好的那一份，不再自己构建一遍。
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+      - name: 构建（release）
+        run: cargo build --release --target aarch64-apple-darwin -p strixmaid-server -p strixmaid-agent -p strixmaid-helper
+      - name: 断言只有 arm64（不做 universal，也不许混进 x86_64）
+        # lipo -archs 对单架构二进制只输出一个词。哪天误开了 universal、或者误用了
+        # x86_64 目标，这里立刻报出来，而不是等用户装完发现体积翻倍或者跑不起来。
+        run: |
+          for bin in strixmaid strixmaid-agent strixmaid-helper; do
+            f="target/aarch64-apple-darwin/release/$bin"
+            archs=$(lipo -archs "$f")
+            echo "$f: $archs"
+            [ "$archs" = "arm64" ] || { echo "$f 的架构是「$archs」，预期只有 arm64"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: strixmaid-macos-aarch64
+          path: |
+            target/aarch64-apple-darwin/release/strixmaid
+            target/aarch64-apple-darwin/release/strixmaid-agent
+            target/aarch64-apple-darwin/release/strixmaid-helper
+
+  # macOS 发布 tar.gz（scripts/package-macos.sh）。产物命名与布局与 Linux 侧的
+  # package job 同构，换平台的人不必重新认路。
+  #
+  # 与 package-windows 是同一处取舍：打包脚本自己构建（前端与 cargo 都在脚本里），
+  # 本 job **不**把 build-macos 的二进制喂进去，为的是本地出包与 CI 出包走完全同
+  # 一条路。build-macos 的存在不是为它准备输入，而是把架构断言与裸二进制产物钉在
+  # 一个独立 job 里，一如 build-musl 之于 package。
+  package-macos:
+    needs: [quality, build-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
+      # 前端同样由脚本构建（与 package-windows 一致），这里只把 bun 准备好。
+      - uses: oven-sh/setup-bun@v2
+      - name: 组装 tar.gz（脚本内含前端与 cargo 构建）
+        run: scripts/package-macos.sh
+      - name: 包内容自检（缺一个文件要等装到一半才发现）
+        # 文件名里的版本号取自 Cargo.toml，这里不重复解析一遍，用通配符对上即可。
+        run: |
+          tar xzf strixmaid-*-aarch64*.tar.gz
+          out=$(find . -maxdepth 1 -type d -name 'strixmaid-*-aarch64*' | head -1)
+          [ -n "$out" ] || { echo "tar.gz 里没有预期的顶层目录"; exit 1; }
+          ls -lR "$out"
+          for f in strixmaid strixmaid-helper LICENSE; do
+            [ -e "$out/$f" ] || { echo "发布物缺 $f"; exit 1; }
+          done
+          [ -x "$out/strixmaid" ] || { echo "可执行位丢了"; exit 1; }
+          # 包里的那一份也验一次架构：build-macos 验的是 target 目录里的产物，
+          # 而真正交付出去的是这一份，中间隔着一次脚本自己的构建。
+          archs=$(lipo -archs "$out/strixmaid")
+          echo "包内 strixmaid: $archs"
+          [ "$archs" = "arm64" ] || { echo "包里的 strixmaid 架构是「$archs」，预期只有 arm64"; exit 1; }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: strixmaid-dist-aarch64-macos
+          path: strixmaid-*-aarch64*.tar.gz
+
   build-musl:
+    needs: [frontend]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -174,14 +303,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       # web/dist 不在 git 里(它是 web/src 的派生物,跟踪必然漂移——曾经发生过:
       # deb 装出来的 UI 停在几十个提交之前)。本 job 直接调 cargo 而不走
-      # scripts/package.sh,所以要在这里自己把前端构建出来,
-      # 否则 release 下 rust-embed 嵌不到东西、构建会失败。
-      - uses: oven-sh/setup-bun@v2
-      - name: 构建前端(release 下由 rust-embed 嵌入)
-        run: |
-          cd web
-          bun install --frozen-lockfile
-          bun run build
+      # scripts/package.sh,所以要先把前端产物摆到位,否则 release 下 rust-embed
+      # 嵌不到东西、构建会失败。取 frontend job 那一份,不再自己构建一遍。
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
       - name: 静态构建
         run: cargo build --release --target x86_64-unknown-linux-musl -p strixmaid-server -p strixmaid-agent
       - name: 断言静态链接
@@ -206,6 +333,8 @@ jobs:
             target/x86_64-unknown-linux-musl/release/strixmaid
             target/x86_64-unknown-linux-musl/release/strixmaid-agent
 
+  # 本 job 不需要 web/dist：rust-embed 只在 strixmaid-server 里，helper 不嵌前端，
+  # 所以它也不依赖 frontend job。
   build-helper:
     runs-on: ubuntu-24.04
     steps:
@@ -260,9 +389,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      # 按名字逐个取，不整个 download：本 job 只要两个 build job 的裸二进制，
+      # 前端与 macOS 的产物拖下来也用不上。
       - uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          name: strixmaid-musl-x86_64
+          path: artifacts/strixmaid-musl-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: strixmaid-helper-gnu228
+          path: artifacts/strixmaid-helper-gnu228
       - name: 组装发布目录
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
@@ -300,9 +436,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      # 同 package job：只取两个 build job 的裸二进制。
       - uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          name: strixmaid-musl-x86_64
+          path: artifacts/strixmaid-musl-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: strixmaid-helper-gnu228
+          path: artifacts/strixmaid-helper-gnu228
       - name: 组装 deb
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
@@ -410,7 +552,16 @@ jobs:
     needs: [build-musl, build-helper]
     runs-on: ubuntu-24.04
     steps:
+      # 按名字取，不整个 download：这里只关心 Linux 两个 build job 的裸二进制，
+      # 不必把前端产物与 macOS 产物也拖下来。
       - uses: actions/download-artifact@v8
+        with:
+          name: strixmaid-musl-x86_64
+          path: strixmaid-musl-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: strixmaid-helper-gnu228
+          path: strixmaid-helper-gnu228
       - name: 体积上限（design.md Q3 / roadmap/06 §5.2）
         run: |
           check() { s=$(stat -c%s "$1"); echo "$1: $s bytes"; [ "$s" -le "$2" ] || { echo "超出上限 $2"; exit 1; }; }
