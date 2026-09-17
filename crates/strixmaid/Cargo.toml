@@ -38,6 +38,8 @@ strixmaid-core = { version = "0.1.0", path = "../strixmaid-core" }
 strixmaid-node = { version = "0.1.0", path = "../strixmaid-node" }
 strixmaid-types = { version = "0.1.0", path = "../strixmaid-types" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
+# Agent 模式拨号回上级 Server 的那条 WS（三个平台都要）。
+tokio-tungstenite = "0.30.0"
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["trace", "compression-gzip", "cors"] }
 tracing = "0.1.44"
@@ -54,9 +56,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Services",
 ] }
 
-tokio-tungstenite = "0.30.0"
-
-[dev-dependencies]
 
 # 版本资源与应用程序清单（见 build.rs 的 “Windows 资源” 一节）。
 # cfg 按**宿主**匹配，Linux / macOS 上的构建不会拉到它。
