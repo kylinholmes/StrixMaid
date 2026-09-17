@@ -55,7 +55,7 @@ sudo packaging/install.sh --start         # 装完立即启动
 
 | 位置 | 内容 |
 |---|---|
-| `/usr/local/bin/` | `strixmaid`、`strixmaid-agent`、`strixmaid-helper` |
+| `/usr/local/bin/` | `strixmaid`、`strixmaid-helper` |
 | `/etc/strixmaid/config.toml` | 默认配置，由 `strixmaid config example` 现场生成 |
 | `/etc/pam.d/strixmaid` | PAM 服务配置（**必须有**，见下） |
 | `/var/db/strixmaid/` | SQLite（指标 / 会话 / 审计） |
@@ -125,7 +125,8 @@ tail -f /var/log/strixmaid/server.log
 
 ## Agent 节点
 
-包里带了 `strixmaid-agent` 与它的 plist，但**不会自动启动**：它的 `server_url` 与
+包里带了 Agent 的 plist（跑的是 `strixmaid agent`，与 Server 同一个二进制），
+但**不会自动启动**：它的 `server_url` 与
 `token` 没有可猜的默认值，没写配置起了也只会立即退出。plist 里用
 `KeepAlive` 的 `PathState` 盯着 `/etc/strixmaid/agent.toml`，文件不存在就不保活。
 

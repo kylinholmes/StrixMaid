@@ -36,8 +36,7 @@
 
 | 产物 | 链接方式 | 内容 |
 |---|---|---|
-| `strixmaid` | 静态 musl | UI + AgentCore + Server + worker 模式 |
-| `strixmaid-agent` | 静态 musl | AgentCore + worker 模式，无 UI |
+| `strixmaid` | 静态 musl | UI + AgentCore + Server 与 Agent 两种模式 + worker 模式 |
 | `strixmaid-helper` | 动态 glibc | PAM 认证、setuid fork、NSS 代理 |
 
 `worker` 不是独立二进制，而是主二进制的子命令（`strixmaid worker`）。helper 只负责「PAM 认证 → setuid → exec strixmaid worker」，因此可以做到极小。
@@ -185,8 +184,9 @@ strixmaid/
 │  │                                  + 审计 + WS 频道 + Windows 服务托管。
 │  │                                  core 是「能力库」，node 是「把能力做成 API」，
 │  │                                  两个宿主装载同一个 node（§11）
-│  ├─ strixmaid-server/             薄：node + 前端嵌入 + 节点目录 + 管道
-│  ├─ strixmaid-agent/              薄：node + 向 Server 拨号
+│  ├─ strixmaid/                    薄：node + 前端嵌入 + 节点目录 + 管道 + 拨号回上级。
+│  │                                  产物就叫 `strixmaid`，`serve` 与 `agent`
+│  │                                  是它的两种模式（2026-09-17 合并，见 §11）
 │  └─ strixmaid-helper/             独立二进制，动态链接
 └─ web/                             React 前端，构建产物由 rust-embed 嵌入
 ```
@@ -687,6 +687,7 @@ helper 是「需要动态链接或需要切换身份的操作」的唯一出口�
 
 - Server = 转发层 + API 提供者 + 中心存储；**业务逻辑全在 AgentCore**。
 - Server 内含一个 AgentCore 实例，即 `local` 节点，与远程节点走完全相同的代码路径。
+- **Agent 与 Server 是同一个二进制的两种模式**（2026-09-17 合并）。`strixmaid serve` 监听端口、带前端、管下级；`strixmaid agent` 拨号回上级、不监听。此前是两个二进制，而 4.18 MB 与 10.5 MB 的差距几乎全是 node 层——Agent 补全管理能力之后本来就要拿到那一层，那个体积躲不掉，合并真正多花的只有前端资源 0.83 MB。换来的是产物矩阵减半、远程推装时推的就是自己这份二进制，以及「级联」与「就地提升成 Server」从换二进制变成改一个参数。Windows 上两种模式的服务名不同（`StrixMaid` / `StrixMaidAgent`），可以装在同一台机器上。
 - **Agent 也有完整的存储与分层聚合能力**，本地保留自己的历史数据。
 - Agent 主动连 Server，**一条双向复用的 WS 同时承载「Agent → Server 指标推送」与「Server → Agent 管理请求」**。好处：NAT 后的 Agent 可用，Server 不需要维护 N 个拉取定时器。
 - Server 重启或网络中断后，凭时间戳游标向 Agent 请求补发**整个断连期间**的数据，曲线不留洞。

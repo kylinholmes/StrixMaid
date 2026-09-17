@@ -107,8 +107,53 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// 按层加载。`path` 为 `--config` 的值；`None` 用缺省路径（可缺席）。
-    pub fn load(path: Option<&Path>) -> anyhow::Result<AgentConfig> {
+
+    /// 带注释的示例配置。
+    ///
+    /// 与 `Config::example_toml()` 同理：**由二进制自己生成**，不在打包脚本里手抄。
+    /// 路径取值按平台不同（`data_dir` 的缺省在 Linux / macOS / Windows 上是三个值），
+    /// 手抄一份必然会漂。安装脚本一律 `strixmaid-agent config example > agent.toml`。
+    ///
+    /// 只列必填项与最常改的几项；其余走内置默认值，写全反而让人以为都得填。
+    pub fn example_toml() -> String {
+        let d = AgentConfig::default();
+        format!(
+            "# StrixMaid agent 配置。填好两个必填项即可启动。\n\
+             # 环境变量同名覆盖：STRIXMAID_AGENT_SERVER_URL 等（嵌套键用 __）。\n\
+             # 命令行优先级最高：--server-url / --data-dir。\n\
+             \n\
+             # 【必填】指标推给哪台 Server。跨公网请在服务端前用反向代理终结 TLS。\n\
+             server_url = \"ws://<server>:9700\"\n\
+             \n\
+             # 【必填】预共享 token：在服务端注册节点（POST /nodes）时返回，只出现一次。\n\
+             # 不想写进本文件可改用 token_file（读首行）：\n\
+             #   token_file = \"/etc/strixmaid/agent.token\"\n\
+             token = \"<node token>\"\n\
+             \n\
+             # 节点标识；必须与服务端登记的 id 一致。缺省按平台取机器标识。\n\
+             # node_id = \"\"\n\
+             \n\
+             # 面板上的显示名。缺省取主机名。\n\
+             # node_name = \"\"\n\
+             \n\
+             # 本地 SQLite 目录。本机缺省：{data_dir}\n\
+             # data_dir = \"{data_dir}\"\n\
+             \n\
+             # 推送节拍（秒），允许 5–300。落盘每分钟一次，取它的零头即可。\n\
+             # sync_interval_secs = {sync}\n",
+            data_dir = d.data_dir.display(),
+            sync = d.sync_interval_secs,
+        )
+    }
+
+    /// 同上，外加一层命令行覆盖（优先级最高，见 `design.md` §12）。
+    ///
+    /// `cli` 序列化出来的 `None` 字段会被 figment 跳过，不会覆盖下层——
+    /// 所以没给的参数不会把配置文件里的值抹成空。
+    pub fn load_with<T: serde::Serialize>(
+        path: Option<&Path>,
+        cli: Option<&T>,
+    ) -> anyhow::Result<AgentConfig> {
         let mut figment = Figment::from(Serialized::defaults(AgentConfig::default()));
         match path {
             Some(p) => {
@@ -124,8 +169,11 @@ impl AgentConfig {
                 }
             }
         }
+        let mut figment = figment.merge(Env::prefixed("STRIXMAID_AGENT_").split("__"));
+        if let Some(cli) = cli {
+            figment = figment.merge(Serialized::defaults(cli));
+        }
         let cfg: AgentConfig = figment
-            .merge(Env::prefixed("STRIXMAID_AGENT_").split("__"))
             .extract()
             .context("解析 Agent 配置失败")?;
         cfg.validate()?;

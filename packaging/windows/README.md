@@ -121,7 +121,20 @@ ACL 一律按 **SID** 授权而不是组名：内建组的显示名是本地化�
   带 BOM 的配置解析器会直接拒绝。`Set-Content -Encoding UTF8` 在 5.1 上会写 BOM，
   安装脚本因此改用 `System.Text.UTF8Encoding($false)` 写回。
 
-## 这个包里没有 `strixmaid-agent.exe`
+## 当 Agent 用：同一个 exe，另一种模式
 
-Windows 侧的服务宿主（`service` 子命令族）只做在主二进制里，agent 没有被 SCM
-托管的入口，装进来也只能手工前台运行。补上服务宿主之后再纳入发布包。
+不再有单独的 `strixmaid-agent.exe`——2026-09-17 起 Agent 与 Server 是同一个二进制的
+两种模式（`design.md` §11：AgentCore 是唯一的业务逻辑所在地，两者都只是它的宿主）。
+
+```powershell
+# 生成 agent 的示例配置（与 server 的是两份，必填项不同）
+.\strixmaid.exe config example --agent > C:\ProgramData\StrixMaid\agent.toml
+# 填好 server_url 与 token 之后，注册成开机自启的服务
+.\strixmaid.exe service --mode agent install --start
+```
+
+两种模式的服务名不同（`StrixMaid` / `StrixMaidAgent`），**可以装在同一台机器上**
+互不干扰——一台机器既当面板又向上级汇报是成立的部署。
+
+服务账户也不同：Server 用 `LocalSystem`（要以任意登录用户的身份派生 worker，
+只有它拿得到那个特权），Agent 用 `NT AUTHORITY\LocalService`，按最小权限起步。

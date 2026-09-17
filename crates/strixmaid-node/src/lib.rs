@@ -40,6 +40,7 @@
 //! 这是依赖倒置：node 定义缝，宿主填。node 的依赖表里因此没有任何「多节点」的东西。
 
 pub mod apidoc;
+pub mod cli;
 pub mod assets;
 pub mod auth;
 pub mod error;

@@ -4,7 +4,6 @@
 #
 #     strixmaid-<版本>-aarch64/
 #     ├── strixmaid
-#     ├── strixmaid-agent
 #     ├── strixmaid-helper
 #     ├── README.md                  安装与卸载说明（packaging/macos/README.md）
 #     ├── LICENSE
@@ -83,7 +82,7 @@ command -v bun >/dev/null 2>&1 || {
 }
 
 cargo build --release --target "$target" \
-    -p strixmaid-server -p strixmaid-agent -p strixmaid-helper
+    -p strixmaid -p strixmaid-helper
 
 # target 目录可以被 CARGO_TARGET_DIR 或 .cargo/config.toml 改掉，因此问 cargo
 # 而不是假定 <repo>/target（package-windows.ps1 出于同样的理由这么做）。
@@ -92,7 +91,7 @@ target_dir=$(cargo metadata --no-deps --format-version 1 --manifest-path Cargo.t
 [ -n "$target_dir" ] || target_dir="$root/target"
 bindir="$target_dir/$target/release"
 
-for bin in strixmaid strixmaid-agent strixmaid-helper; do
+for bin in strixmaid strixmaid-helper; do
     [ -f "$bindir/$bin" ] || { echo "构建产物缺失：${bindir}/${bin}" >&2; exit 4; }
 done
 
@@ -104,7 +103,7 @@ done
 # 就确认它在别人的机器上能跑。macOS 上没有「全静态」这个选项（libSystem 只有
 # 动态版），所以检查的是另外三件事。
 
-for bin in strixmaid strixmaid-agent strixmaid-helper; do
+for bin in strixmaid strixmaid-helper; do
     f="$bindir/$bin"
 
     # 1. 架构必须恰好是 arm64。不是 universal（那是另一种交付形态，本项目不做），
@@ -165,7 +164,6 @@ stage=$(mktemp -d)
 mkdir -p "$stage/$out/packaging/pam.d"
 
 cp "$bindir/strixmaid"        "$stage/$out/"
-cp "$bindir/strixmaid-agent"  "$stage/$out/"
 cp "$bindir/strixmaid-helper" "$stage/$out/"
 cp LICENSE                    "$stage/$out/"
 cp packaging/macos/README.md  "$stage/$out/"

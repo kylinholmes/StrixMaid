@@ -88,7 +88,7 @@ done
 # --------------------------------------------------------------------------
 #
 # 只删自己装的这三个文件，不动 /usr/local/bin 这个目录本身——那里面是别人的东西。
-for f in strixmaid strixmaid-agent strixmaid-helper; do
+for f in strixmaid strixmaid-helper; do
     if [ -e "$bindir/$f" ]; then
         rm -f "$bindir/$f"
     fi

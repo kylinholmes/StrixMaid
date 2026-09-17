@@ -13,7 +13,9 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/strixmaid-agent
+# 2026-09-17 起 Agent 与 Server 是同一个二进制的两种模式（design.md §11）。
+# 旧版这里是 /usr/bin/strixmaid-agent，升级时该文件会被删掉。
+ExecStart=/usr/bin/strixmaid agent
 Restart=on-failure
 RestartSec=2
 StateDirectory=strixmaid-agent

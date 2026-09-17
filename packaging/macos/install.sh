@@ -89,7 +89,7 @@ fi
 # 脚本位于发布包的 packaging/ 下，二进制在它的上一级。
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-for f in strixmaid strixmaid-agent strixmaid-helper; do
+for f in strixmaid strixmaid-helper; do
     [ -f "$here/$f" ] || {
         echo "发布包不完整，缺 ${here}/${f}。请在解压后的目录里运行 packaging/install.sh。" >&2
         exit 2
@@ -116,7 +116,7 @@ done
 install -d -o root -g wheel -m 0755 "$bindir"
 # helper 由主进程（root）spawn，不需要 setuid 位；0755 root:wheel 即可。
 # 注意 macOS 的 root 主组是 wheel 而不是 root。
-for f in strixmaid strixmaid-agent strixmaid-helper; do
+for f in strixmaid strixmaid-helper; do
     install -m 0755 -o root -g wheel "$here/$f" "$bindir/$f"
 done
 
@@ -129,7 +129,7 @@ done
 # 清的是安装后的副本，不是发布包里的原件：install(1) 是否连扩展属性一起复制
 # 不同系统版本上表现不一，对目标文件清一次最稳妥。属性本来就不存在时
 # xattr 会报错，这里吞掉。
-for f in strixmaid strixmaid-agent strixmaid-helper; do
+for f in strixmaid strixmaid-helper; do
     xattr -d com.apple.quarantine "$bindir/$f" 2>/dev/null || true
 done
 
@@ -221,7 +221,7 @@ listen=$(grep -E '^listen *= *' "$confdir/config.toml" | head -1 | sed 's/.*= */
 cat <<TIP
 
 安装完成。
-    二进制    $bindir/{strixmaid,strixmaid-agent,strixmaid-helper}
+    二进制    $bindir/{strixmaid,strixmaid-helper}
     配置      $confdir/config.toml
     数据      $datadir
     日志      $logdir/server.log

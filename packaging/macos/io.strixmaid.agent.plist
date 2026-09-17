@@ -48,7 +48,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/strixmaid-agent</string>
+        <string>/usr/local/bin/strixmaid</string>
+        <string>agent</string>
     </array>
 
     <key>RunAtLoad</key>

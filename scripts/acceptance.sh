@@ -41,12 +41,32 @@ section() { printf '\n%s── %s%s\n' "$c_dim" "$1" "$c_off"; }
 section "静态：路由层不得再直接持有 provider（§7 第 1 条）"
 
 # roadmap 原文写的是「grep 为 0 处」，但那样会把**注释里提到这些名字**也算成违规。
-# 要验的是「路由不再持有 / 构造 provider」，不是「这些词不许出现」——
-# 一句 `HTTP 请求 → exec::call → worker 内的 HostProvider` 恰恰是有用的说明。
-# 因此先剥掉注释行再 grep。
-HITS="$(grep -rnE 'HostProvider|ProcProvider|pick_service_provider|pick_log_provider' \
-        "$ROOT/crates/strixmaid-server/src/routes/" 2>/dev/null \
-        | grep -vE ':[[:space:]]*//' || true)"
+# 要验的是「路由不再经 provider **执行请求**」，不是「这些词不许出现」——
+# 一句 `HTTP 请求 → exec::call → worker 内的 HostProvider` 恰恰是有用的说明，
+# 因此先剥掉注释行；测试模块也整段切掉（路由单测会造 router 验 OpenAPI 登记，
+# 那是夹具不是生产代码），与下面查 RPC 字面量那条同一口径。
+#
+# `ProcProvider` / `ServiceIcons` 是**有意的例外**，只允许出现在两处：
+# `routes/mod.rs` 的 `ApiStates` 字段与 `routes/processes.rs` / `services.rs` 的
+# `router()` 入参。图标是可执行映像自身的属性，与登录用户无关，缓存挂在主进程上，
+# 不经 worker 是对的（见那两个模块的文档）。出现在别处仍然算违规。
+#
+# 2026-09-17：本条此前只剥注释不剥测试，且在图标功能落地后就与设计不符，
+# 一直没暴露——本脚本没接进 CI。
+STRICT='HostProvider|pick_service_provider|pick_log_provider'
+EXEMPT_FILES='routes/mod.rs|routes/processes.rs|routes/services.rs'
+HITS=""
+for f in "$ROOT"/crates/strixmaid-node/src/routes/*.rs; do
+  body="$(awk '/^#\[cfg\(test\)\]/{exit} {print FILENAME":"NR":"$0}' "$f")"
+  hit="$(printf '%s\n' "$body" | grep -E "$STRICT" | grep -vE ':[[:space:]]*//' || true)"
+  # 图标那两个类型：只在豁免文件里放行
+  if ! printf '%s' "$f" | grep -qE "$EXEMPT_FILES"; then
+    more="$(printf '%s\n' "$body" | grep -E 'ProcProvider|ServiceIcons' | grep -vE ':[[:space:]]*//' || true)"
+    [[ -n "$more" ]] && hit="${hit}${more}"$'\n'
+  fi
+  [[ -n "$hit" ]] && HITS="${HITS}${hit}"$'\n'
+done
+HITS="$(printf '%s' "$HITS" | grep -v '^$' || true)"
 if [[ -z "$HITS" ]]; then
   ok "routes/ 下没有 provider 的代码引用（注释里的说明不算）"
 else
@@ -54,7 +74,7 @@ else
 fi
 
 # 处理器必须经 exec::call 走 worker
-CALLS="$(grep -rlE 'exec::call' "$ROOT/crates/strixmaid-server/src/routes/" 2>/dev/null | wc -l | tr -d ' ')"
+CALLS="$(grep -rlE 'exec::call' "$ROOT/crates/strixmaid-node/src/routes/" 2>/dev/null | wc -l | tr -d ' ')"
 if [[ "$CALLS" -ge 4 ]]; then
   ok "有 ${CALLS} 个路由模块经 exec::call 执行"
 else
@@ -67,7 +87,7 @@ fi
 # 那是样本数据（审计记录的 action 列），不是被派发的 RPC 方法名。
 # 用 `#[cfg(test)]` 作分界，把每个文件的测试模块整段切掉再查。
 LITERALS=""
-for f in "$ROOT"/crates/strixmaid-server/src/routes/*.rs; do
+for f in "$ROOT"/crates/strixmaid-node/src/routes/*.rs; do
   hit="$(awk '/^#\[cfg\(test\)\]/{exit} {print FILENAME":"NR":"$0}' "$f" \
          | grep -E '"(host|proc|service|log|caps)\.[a-z_]+"' || true)"
   [[ -n "$hit" ]] && LITERALS="${LITERALS}${hit}"$'\n'

@@ -26,6 +26,7 @@
 mod app;
 mod cli;
 mod embed;
+mod agent;
 mod routes_nodes;
 #[cfg(windows)]
 mod winsvc_app;
@@ -53,8 +54,8 @@ fn main() -> anyhow::Result<()> {
     // Windows 服务子命令必须在进程主线程上处理，理由见本文件的模块文档。
     // 这一支自带（或不需要）运行时，绝不能进到下面的 block_on 里。
     #[cfg(windows)]
-    if let Some(Command::Service { action }) = &cli.command {
-        return strixmaid_node::winsvc::dispatch(action, winsvc_app::app(&cli.global));
+    if let Some(Command::Service { mode, action }) = &cli.command {
+        return strixmaid_node::winsvc::dispatch(action, winsvc_app::app(*mode, &cli.global));
     }
 
     tokio::runtime::Builder::new_multi_thread()
@@ -75,11 +76,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // `config example` 只打印文本，不加载配置（roadmap/06 §3.4）。
     if let Some(Command::Config { action }) = &cli.command {
         match action {
-            ConfigAction::Example => {
+            // 两种模式的必填项完全不同，所以是两份配置文件、两份示例。
+            ConfigAction::Example { agent: false } => {
                 print!("{}", Config::example_toml());
                 return Ok(());
             }
+            ConfigAction::Example { agent: true } => {
+                print!("{}", crate::agent::config::AgentConfig::example_toml());
+                return Ok(());
+            }
         }
+    }
+
+    // Agent 模式：读的是另一个配置文件，也不监听端口，与下面 server 那条路径
+    // 从第一步就分岔，所以在这里整个截住。
+    if let Some(Command::Agent(args)) = &cli.command {
+        return crate::agent::run(&cli.global, args).await;
     }
 
     // 先加载配置再起 tracing —— 日志级别本身来自配置。

@@ -12,7 +12,9 @@ fi
 
 # 1. 二进制
 install -m 0755 -o root -g root "$here/strixmaid"        /usr/bin/strixmaid
-install -m 0755 -o root -g root "$here/strixmaid-agent"  /usr/bin/strixmaid-agent
+# Agent 与 Server 是同一个二进制的两种模式，装一份就够（design.md §11）。
+# 从旧版升级时清掉那个已经不存在的二进制，免得 unit 指向一个陈旧的文件。
+rm -f /usr/bin/strixmaid-agent
 # helper 由主进程（root）spawn，不需要 setuid 位；0755 root:root 即可。
 install -m 0755 -o root -g root "$here/strixmaid-helper" /usr/bin/strixmaid-helper
 
@@ -56,6 +58,6 @@ cat <<TIP
     systemctl enable --now strixmaid
 监听地址：${listen:-127.0.0.1:9700}
 默认只监听 127.0.0.1；对外访问请在前面配置反向代理（TLS 在反代终结）。
-Agent 节点另装 strixmaid-agent（systemctl enable --now strixmaid-agent），
+Agent 节点用同一个二进制的 agent 模式（systemctl enable --now strixmaid-agent），
 其 token 由服务端 POST /api/v1/nodes 登记获得。
 TIP

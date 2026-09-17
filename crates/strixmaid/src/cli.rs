@@ -109,7 +109,7 @@ pub struct GlobalArgs {
         long,
         global = true,
         value_name = "LEVEL",
-        value_parser = parse_log_level
+        value_parser = strixmaid_node::cli::parse_log_level
     )]
     pub log_level: Option<LogLevel>,
 }
@@ -144,26 +144,21 @@ struct CliLogOverrides {
     level: Option<LogLevel>,
 }
 
-/// 把日志级别名解析成 core 的 [`LogLevel`]。
-///
-/// core 的 `LogLevel` 不派生 `clap::ValueEnum`（types/core 不依赖 clap），
-/// 所以在这里手工列出候选，让 clap 给出可读的报错而不是等到 figment 反序列化才失败。
-fn parse_log_level(raw: &str) -> Result<LogLevel, String> {
-    LogLevel::ALL
-        .iter()
-        .copied()
-        .find(|level| level.as_str().eq_ignore_ascii_case(raw))
-        .ok_or_else(|| {
-            let candidates: Vec<&str> = LogLevel::ALL.iter().map(|l| l.as_str()).collect();
-            format!("必须是以下之一: {}", candidates.join(" / "))
-        })
-}
 
 /// 子命令。
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// 启动 HTTP 服务（缺省行为）
     Serve,
+
+    /// 以 Agent 身份运行：本地采集并拨号回上级 Server，不监听端口
+    ///
+    /// 与 `serve` 是同一个二进制的两种模式（`design.md` §11：AgentCore 是唯一的
+    /// 业务逻辑所在地，Server 与 Agent 都只是它的宿主）。区别只有三样：这边不嵌
+    /// 前端、不管下级节点、主动拨号回上级。
+    ///
+    /// 读的是**另一个配置文件**（`agent.toml`），因为两种模式的必填项完全不同。
+    Agent(AgentArgs),
 
     /// 会话 worker：以登录用户身份运行，由 helper 认证并切换身份后拉起
     ///
@@ -178,19 +173,77 @@ pub enum Command {
     },
 
     /// Windows 服务（SCM）：注册、注销、启停、查询，以及由 SCM 拉起时的运行入口
+    ///
+    /// 两种模式各有自己的服务名，可以装在同一台机器上互不干扰，见 `--mode`。
     #[cfg(windows)]
     Service {
+        /// 这条服务以哪种模式运行 [默认: server]
+        ///
+        /// `server` 注册成 `StrixMaid`，`agent` 注册成 `StrixMaidAgent`。
+        /// `service run` 由 SCM 调用时也靠它决定跑哪一边——注册表里那条命令行
+        /// 是 `install` 时按本参数写死的。
+        #[arg(long, global = true, value_name = "MODE", default_value = "server")]
+        mode: ServiceMode,
+
         #[command(subcommand)]
         action: strixmaid_node::winsvc::ServiceAction,
     },
+}
+
+/// `service` 的运行模式。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ServiceMode {
+    /// 监听 HTTP、带前端、管下级节点。
+    Server,
+    /// 采集并拨号回上级 Server。
+    Agent,
 }
 
 /// `config` 的动作。
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
     /// 输出带注释的示例配置（安装脚本用它生成 /etc/strixmaid/config.toml）
-    Example,
+    Example {
+        /// 输出 Agent 模式的示例配置（agent.toml）而不是 Server 的
+        ///
+        /// 两种模式的必填项完全不同，所以是两份配置文件、两份示例。
+        #[arg(long)]
+        agent: bool,
+    },
 }
+
+/// `agent` 子命令的参数。
+///
+/// 只有一项是 Agent 独有的：上级 Server 的地址。`--config` / `--data-dir` /
+/// `--log-level` 走全局参数——两种模式对它们的语义一致，只是读的配置文件不同。
+#[derive(Debug, Clone, Args)]
+pub struct AgentArgs {
+    /// 上级 Server 地址，如 `ws://host:9700`
+    ///
+    /// 路径部分不用写，Agent 自己拼 `/ws/agent`。也可写在 agent.toml 里，
+    /// 或用环境变量 `STRIXMAID_AGENT_SERVER_URL`。
+    #[arg(short = 's', long, value_name = "URL")]
+    pub server_url: Option<String>,
+}
+
+impl AgentArgs {
+    /// 折算成 figment 的命令行层。字段名与 [`crate::agent::config::AgentConfig`] 一一对应。
+    pub fn overrides(&self, global: &GlobalArgs) -> AgentCliOverrides {
+        AgentCliOverrides {
+            server_url: self.server_url.clone(),
+            data_dir: global.data_dir.clone(),
+        }
+    }
+}
+
+/// Agent 模式的命令行覆盖层。全 `None` 的字段会被 figment 跳过，不覆盖下层。
+#[derive(Debug, Serialize)]
+pub struct AgentCliOverrides {
+    server_url: Option<String>,
+    data_dir: Option<PathBuf>,
+}
+
 
 /// `worker` 子命令参数。
 ///
@@ -385,14 +438,56 @@ mod tests {
         ])
         .unwrap();
         let Some(Command::Service {
+            mode,
             action: strixmaid_node::winsvc::ServiceAction::Install(args),
         }) = cli.command
         else {
             panic!("应当解析成 service install");
         };
+        // 不给 --mode 时装的是 Server，这是缺省
+        assert_eq!(mode, ServiceMode::Server);
         assert!(args.start);
         assert_eq!(args.account.as_deref(), Some("LocalSystem"));
         assert!(args.exe.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn 服务可以按_agent_模式安装() {
+        let cli = Cli::try_parse_from(["strixmaid", "service", "--mode", "agent", "install"])
+            .expect("service --mode agent install");
+        let Some(Command::Service { mode, .. }) = cli.command else {
+            panic!("应当解析成 service install");
+        };
+        assert_eq!(mode, ServiceMode::Agent);
+    }
+
+    #[test]
+    fn agent_子命令认得上级地址() {
+        let cli = Cli::try_parse_from(["strixmaid", "agent", "-s", "ws://up:9700"])
+            .expect("agent -s");
+        let Some(Command::Agent(args)) = cli.command else {
+            panic!("应当解析成 agent");
+        };
+        assert_eq!(args.server_url.as_deref(), Some("ws://up:9700"));
+    }
+
+    #[test]
+    fn 示例配置分两种模式() {
+        let cli = Cli::try_parse_from(["strixmaid", "config", "example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                action: ConfigAction::Example { agent: false }
+            })
+        ));
+        let cli = Cli::try_parse_from(["strixmaid", "config", "example", "--agent"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                action: ConfigAction::Example { agent: true }
+            })
+        ));
     }
 
     #[cfg(not(windows))]

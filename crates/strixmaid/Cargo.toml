@@ -1,5 +1,5 @@
 [package]
-name         = "strixmaid-server"
+name         = "strixmaid"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -27,6 +27,7 @@ apidoc = ["strixmaid-node/apidoc"]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
+figment = { version = "0.10.19", features = ["toml", "env"] }
 futures = "0.3.34"
 mime_guess = "2.0.5"
 rand = "0.10.2"
@@ -53,8 +54,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Services",
 ] }
 
-[dev-dependencies]
 tokio-tungstenite = "0.30.0"
+
+[dev-dependencies]
 
 # 版本资源与应用程序清单（见 build.rs 的 “Windows 资源” 一节）。
 # cfg 按**宿主**匹配，Linux / macOS 上的构建不会拉到它。

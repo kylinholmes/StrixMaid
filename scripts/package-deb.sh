@@ -7,7 +7,7 @@
 #
 # 产出两个包:
 #   strixmaid_<ver>_<arch>.deb        server(静态 musl)+ helper(glibc 2.28)+ unit + pam.d
-#   strixmaid-agent_<ver>_<arch>.deb  agent(静态 musl)+ unit,无 pam/helper
+#   strixmaid-agent_<ver>_<arch>.deb  只装 unit 与示例配置;二进制来自 strixmaid
 #
 # 用法: package-deb.sh --bins <目录:含三个二进制> --version <deb 版本> --out <目录>
 set -eu
@@ -108,40 +108,38 @@ dpkg-deb --build --root-owner-group "$root" "$out/strixmaid_${version}_${arch}.d
 rm -rf "$root"
 
 # ---------------------------------------------------------------------------
-# strixmaid-agent(静态 musl,无任何依赖)
+# strixmaid-agent(只有 unit 与示例配置,二进制由 strixmaid 提供)
 # ---------------------------------------------------------------------------
+# 2026-09-17 起 Agent 与 Server 是同一个二进制的两种模式(design.md §11),
+# 所以这个包里【没有二进制】,只有 unit 与示例配置,靠 Depends 把 strixmaid 拉进来。
+# 保留成独立包是为了 `apt install strixmaid-agent` 这个用法仍然成立——
+# 装的是「这台机器当 agent」这件事,不是一个可执行文件。
 root=$(mktemp -d)
-install -D -m 0755 "$bins/strixmaid-agent" "$root/usr/bin/strixmaid-agent"
 install -D -m 0644 "$here/packaging/strixmaid-agent.service" "$root/lib/systemd/system/strixmaid-agent.service"
 install -D -m 0644 "$here/LICENSE" "$root/usr/share/doc/strixmaid-agent/LICENSE"
 
 # 示例配置放 doc 而不是直接落 /etc:server_url/token 没有可猜的默认值,
 # 生成一个残缺的 /etc 配置只会让 unit 的 ConditionPathExists 放行然后照样崩
+# 示例配置由【刚构建出来的】二进制生成,不是手抄一份快照:
+# data_dir 的缺省在三个平台上是三个值,手抄必然会漂。
 mkdir -p "$root/usr/share/doc/strixmaid-agent"
-cat > "$root/usr/share/doc/strixmaid-agent/agent.toml.example" <<'EOF'
-# StrixMaid agent 配置。抄到 /etc/strixmaid/agent.toml 并填好两个必填项。
-# 环境变量同名覆盖:STRIXMAID_AGENT_SERVER_URL 等(嵌套键用 __)。
-
-# 指标推给哪台 StrixMaid server(仅 ws://;跨公网走服务端前的反向代理终结 TLS)
-server_url = "ws://<server>:9700"
-
-# 预共享 token:在服务端注册节点(POST /nodes)时返回。
-# 不想写进本文件可改用 token_file = "/etc/strixmaid/agent.token"(读首行)。
-token = "<node token>"
-EOF
+"$bins/strixmaid" config example --agent > "$root/usr/share/doc/strixmaid-agent/agent.toml.example"
 
 mkdir -p "$root/DEBIAN"
 cat > "$root/DEBIAN/control" <<EOF
 Package: strixmaid-agent
 Version: $version
 Architecture: $arch
+Depends: strixmaid (= $version)
 Maintainer: StrixMaid <noreply@github.com>
 Section: admin
 Priority: optional
 Homepage: https://github.com/kylinholmes/StrixMaid
-Description: metrics agent for StrixMaid
- Static (musl) agent that pushes host metrics to a StrixMaid server
- over a single outbound WebSocket. No UI, no PAM.
+Description: agent-mode unit for StrixMaid
+ Systemd unit and example config that run the strixmaid binary in agent mode:
+ collect host metrics locally and push them to an upstream StrixMaid server
+ over a single outbound WebSocket. The binary itself ships in the strixmaid
+ package - agent and server are two modes of one executable.
 EOF
 
 cat > "$root/DEBIAN/postinst" <<'EOF'
