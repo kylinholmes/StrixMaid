@@ -181,8 +181,12 @@ strixmaid/
 │  │   ├─ session/                  会话与 worker 生命周期、提权状态
 │  │   ├─ worker/                   worker 模式的 RPC 服务端
 │  │   └─ capability/               两层能力探测
-│  ├─ strixmaid-server/             薄：axum 路由 + WS + 前端嵌入 + 节点汇聚
-│  ├─ strixmaid-agent/              薄：AgentCore 宿主 + 向 Server 推送
+│  ├─ strixmaid-node/               ★ 一台主机的完整 API：axum Router + 认证与会话
+│  │                                  + 审计 + WS 频道 + Windows 服务托管。
+│  │                                  core 是「能力库」，node 是「把能力做成 API」，
+│  │                                  两个宿主装载同一个 node（§11）
+│  ├─ strixmaid-server/             薄：node + 前端嵌入 + 节点目录 + 管道
+│  ├─ strixmaid-agent/              薄：node + 向 Server 拨号
 │  └─ strixmaid-helper/             独立二进制，动态链接
 └─ web/                             React 前端，构建产物由 rust-embed 嵌入
 ```
@@ -686,8 +690,10 @@ helper 是「需要动态链接或需要切换身份的操作」的唯一出口�
 - **Agent 也有完整的存储与分层聚合能力**，本地保留自己的历史数据。
 - Agent 主动连 Server，**一条双向复用的 WS 同时承载「Agent → Server 指标推送」与「Server → Agent 管理请求」**。好处：NAT 后的 Agent 可用，Server 不需要维护 N 个拉取定时器。
 - Server 重启或网络中断后，凭时间戳游标向 Agent 请求补发**整个断连期间**的数据，曲线不留洞。
-- MVP 中 HTTP 路径不带节点标识，但 `strixmaid-core` 的 trait 从第一天起就接受 node 上下文；将来加路径前缀是纯 routing 层改动。
-- MVP 中 Agent 仅只读采集，不接受远程管理操作——跨节点的管理身份映射等有真实场景再设计。
+- HTTP 路径带节点标识：`/nodes/<id>/api/v1/**`，`local` 即 Server 自身那个实例。`/api/v1/**` 保留为 `local` 的别名。
+- **Agent 接受远程管理操作**（2026-09-17 修订，方案见 `roadmap/11-multi-host.md`）。此前写的是「MVP 仅只读，有真实场景再设计」——场景出现了：在面板里添加一台空白主机，输入其本地账户口令，自动装好 agent，此后该主机与 Server 本机完全等价。
+- 跨节点**不做身份映射**。操作者用的是目标主机的本地账户，认证对话经 Server 透传到该主机，PAM / `LogonUserW` 在那一侧发生，Server 只搬字节、不持有可复用的凭据。因此每个节点一套会话。
+- Server 对远程节点是**管道而非翻译器**：不为任何端点写转发代码。业务逻辑装在 `strixmaid-node`（见下面的目录树），Agent 与 Server 提供同一个 `axum::Router`；Server 把浏览器的请求原样送进那条 WS 上的一条多路复用流，由对侧的 `Router` 直接处理。
 
 ---
 
