@@ -16,7 +16,6 @@ pub mod files;
 pub mod health;
 pub mod logs;
 pub mod metrics;
-pub mod nodes;
 pub mod processes;
 pub mod services;
 pub mod system;
@@ -91,7 +90,14 @@ pub struct ApiStates {
     pub metrics: Arc<metrics::MetricsState>,
     pub terminals: terminals::TerminalState,
     pub files: files::FilesState,
-    pub nodes: nodes::NodesState,
+    /// 宿主追加的受保护路由。
+    ///
+    /// Server 用它挂 `/nodes`（节点目录是 Server 的职责，node 只认识本机这一个
+    /// 节点）。必须与其余受保护路由**同批**套上鉴权中间件，否则 OpenAPI 里那批
+    /// 端点的 security 声明会与其余的不一致。
+    ///
+    /// Agent 传 `None`。
+    pub extra_protected: Option<OpenApiRouter<()>>,
 }
 
 /// `/api/v1` 下的全部路由。各子 router 自带状态，因此返回无状态的 `OpenApiRouter<()>`。
@@ -111,8 +117,12 @@ pub fn api_v1(s: ApiStates) -> OpenApiRouter<()> {
         .merge(metrics::router(s.metrics))
         .merge(audit::router(s.audit))
         .merge(terminals::router(s.terminals))
-        .merge(files::router(s.files))
-        .merge(nodes::router(s.nodes));
+        .merge(files::router(s.files));
+    // 追加在最后：搬家前 `/nodes` 就是这个位置，OpenAPI 的路径顺序要保持一致。
+    let protected = match s.extra_protected {
+        Some(extra) => protected.merge(extra),
+        None => protected,
+    };
     let protected = protect_openapi(protected, s.auth);
 
     public.merge(soft).merge(protected)

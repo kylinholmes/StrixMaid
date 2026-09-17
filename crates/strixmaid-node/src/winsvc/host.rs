@@ -65,8 +65,8 @@ use windows_sys::Win32::System::Services::{
     SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
 };
 
-use super::{SERVICE_NAME, logging};
-use crate::cli::GlobalArgs;
+use super::{ServiceApp, logging};
+
 use crate::{ShutdownKind, StartupReporter};
 
 /// 启动期每一步的 `dwWaitHint`：告诉 SCM「下一次 checkpoint 推进之前最多要这么久」。
@@ -110,11 +110,11 @@ const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
 /// 进程内唯一的服务控制状态，见模块文档。
 static CONTROL: OnceLock<ServiceControl> = OnceLock::new();
 
-/// `service run` 解析出来的全局参数，供分派线程上的 [`service_main`] 取用。
+/// 宿主给的服务实现，供分派线程上的 [`service_main`] 取用。
 ///
 /// 分派线程拿不到 `main` 的栈，而 `service_main` 的签名里没有自定义上下文
 /// （SCM 只给「启动参数」，那是另一回事，见 [`service_main`]）。
-static STARTUP: OnceLock<GlobalArgs> = OnceLock::new();
+static APP: OnceLock<&'static dyn ServiceApp> = OnceLock::new();
 
 /// `SERVICE_STATUS_HANDLE` 的跨线程包装。
 ///
@@ -239,7 +239,10 @@ impl StartupReporter for ScmReporter {
 
     fn ready(&self) {
         self.control.running();
-        tracing::info!(service = SERVICE_NAME, "已向 SCM 报告 SERVICE_RUNNING");
+        tracing::info!(
+            service = APP.get().map_or("", |a| a.identity().name),
+            "已向 SCM 报告 SERVICE_RUNNING"
+        );
     }
 }
 
@@ -247,12 +250,12 @@ impl StartupReporter for ScmReporter {
 ///
 /// 手工在命令行里跑会失败并给出提示，见 [`super::explain`] 对
 /// `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` 的翻译。
-pub fn run(global: &GlobalArgs) -> anyhow::Result<()> {
-    if STARTUP.set(global.clone()).is_err() {
+pub fn run(app: &'static dyn ServiceApp) -> anyhow::Result<()> {
+    if APP.set(app).is_err() {
         bail!("`service run` 在一个进程里只能调用一次");
     }
 
-    let mut name = to_wide(SERVICE_NAME);
+    let mut name = to_wide(app.identity().name);
     // 服务表以「全零项」结尾，这是 `StartServiceCtrlDispatcherW` 的约定。
     let table = [
         SERVICE_TABLE_ENTRYW {
@@ -316,7 +319,7 @@ fn register() -> Option<&'static ServiceControl> {
         shutdown: watch::channel(None).0,
     });
 
-    let name = to_wide(SERVICE_NAME);
+    let name = to_wide(APP.get().expect("register 只在 run 之后被调用").identity().name);
     // SAFETY: name 以 NUL 结尾且在调用期间存活；上下文指针指向 `CONTROL`
     // 这个进程级 `OnceLock` 里的值，其地址在进程存续期间一直有效，
     // 因此 SCM 在任何时刻回调都不会悬垂。
@@ -336,19 +339,20 @@ fn register() -> Option<&'static ServiceControl> {
 
 /// 在分派线程上跑完整个服务。
 fn run_service(control: &'static ServiceControl) -> anyhow::Result<()> {
-    let global = STARTUP
+    let app = APP
         .get()
-        .expect("run() 在把主线程交给 SCM 之前已经写入启动参数");
+        .expect("run() 在把主线程交给 SCM 之前已经写入服务实现");
+    let id = app.identity();
 
-    let config = crate::load_config(global)?;
-    control.advance(SERVICE_START_PENDING, START_WAIT_HINT_MS);
-
-    // 日志必须在这一步就位：往后的任何输出都只能进文件，服务进程没有 stderr。
-    let log_path = logging::init(&config, global.log_level.is_some())?;
+    // 读配置并把日志落到文件。日志必须在这一步就位：往后的任何输出都只能进文件，
+    // 服务进程没有 stderr。两件事都由宿主做——配置的来源与日志的落点都是它的知识。
+    let (config, log_path) = app.prepare()?;
     tracing::info!(
-        service = SERVICE_NAME,
+        service = id.name,
         log = %log_path.display(),
-        version = env!("CARGO_PKG_VERSION"),
+        // 取宿主二进制的版本，不是 `strixmaid-node` 的：本模块搬进 node 之后，
+        // 这里写 env!("CARGO_PKG_VERSION") 会取错。
+        version = id.version,
         "以 Windows 服务身份启动"
     );
     control.advance(SERVICE_START_PENDING, START_WAIT_HINT_MS);
@@ -360,8 +364,8 @@ fn run_service(control: &'static ServiceControl) -> anyhow::Result<()> {
         .context("创建 tokio 运行时失败")?;
 
     let reporter = Arc::new(ScmReporter { control });
-    let shutdown = wait_shutdown(control.shutdown.subscribe());
-    let result = runtime.block_on(crate::serve_with(config, reporter, shutdown));
+    let shutdown = Box::pin(wait_shutdown(control.shutdown.subscribe()));
+    let result = runtime.block_on(app.serve(config, reporter, shutdown));
 
     // 先落运行时再报 STOPPED：SCM 一看到 STOPPED 就可能立刻按恢复策略重启服务，
     // 那时本进程最好已经没有仍在跑的线程，否则两代进程会抢同一个监听端口与

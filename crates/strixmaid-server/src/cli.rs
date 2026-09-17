@@ -181,63 +181,8 @@ pub enum Command {
     #[cfg(windows)]
     Service {
         #[command(subcommand)]
-        action: ServiceAction,
+        action: strixmaid_node::winsvc::ServiceAction,
     },
-}
-
-/// `service` 的动作（仅 Windows）。
-///
-/// `run` 与其余五个不是一类东西：`run` 是**被 SCM 调用**的入口，其余五个是
-/// 管理员在命令行上**调用 SCM**。两者共用同一个服务名常量
-/// （`crate::service::SERVICE_NAME`），install 写进注册表的命令行里带的正是
-/// `service run`。
-#[cfg(windows)]
-#[derive(Debug, Subcommand)]
-pub enum ServiceAction {
-    /// 由服务控制管理器（SCM）调用的运行入口，不供手工执行
-    ///
-    /// 直接在命令行里跑会在连接 SCM 时失败并给出提示；前台运行请用 `serve`。
-    Run,
-
-    /// 注册为自动启动的 Windows 服务（需要管理员权限）
-    Install(ServiceInstallArgs),
-
-    /// 注销服务（需要管理员权限）
-    Uninstall,
-
-    /// 启动已注册的服务（需要管理员权限）
-    Start,
-
-    /// 停止正在运行的服务（需要管理员权限）
-    Stop,
-
-    /// 查询服务当前状态（只读，无需管理员权限）
-    Status,
-}
-
-/// `service install` 的参数（仅 Windows）。
-#[cfg(windows)]
-#[derive(Debug, Args)]
-pub struct ServiceInstallArgs {
-    /// 写进服务 ImagePath 的可执行文件路径 [默认: 当前可执行文件]
-    ///
-    /// 注册的是**绝对路径**：服务由 `services.exe` 拉起，工作目录是
-    /// `%SystemRoot%\system32`，相对路径解析不到。
-    #[arg(long, value_name = "PATH")]
-    pub exe: Option<PathBuf>,
-
-    /// 服务账户 [默认: LocalSystem]
-    ///
-    /// 只接受三个内置的、无口令的服务账户：`LocalSystem`、
-    /// `NT AUTHORITY\LocalService`、`NT AUTHORITY\NetworkService`。
-    /// 域账户需要口令，而明文口令不进命令行、不进注册表——那种部署请在
-    /// 安装后用「服务」管理单元设置登录账户。
-    #[arg(long, value_name = "ACCOUNT")]
-    pub account: Option<String>,
-
-    /// 注册完成后立即启动一次
-    #[arg(long)]
-    pub start: bool,
 }
 
 /// `config` 的动作。
@@ -440,7 +385,7 @@ mod tests {
         ])
         .unwrap();
         let Some(Command::Service {
-            action: ServiceAction::Install(args),
+            action: strixmaid_node::winsvc::ServiceAction::Install(args),
         }) = cli.command
         else {
             panic!("应当解析成 service install");

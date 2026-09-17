@@ -35,8 +35,6 @@ use std::sync::Mutex;
 use anyhow::Context as _;
 use strixmaid_core::config::Config;
 
-use crate::cli::GlobalArgs;
-
 /// 缺省日志目录。
 ///
 /// 与 `strixmaid_core::config::DEFAULT_DATA_DIR`（`C:\ProgramData\StrixMaid\data`）
@@ -142,10 +140,12 @@ fn rotate_if_large(path: &Path) {
 ///
 /// 配置读不出来时回落到 [`DEFAULT_LOG_DIR`] 并如实按默认值显示——这里宁可
 /// 报一个「默认位置」，也不猜一个可能不存在的路径。
-pub fn describe_target(global: &GlobalArgs) -> String {
-    let dir = match crate::load_config(global) {
-        Ok(config) => log_dir_for(&config.data_dir),
-        Err(_) => PathBuf::from(DEFAULT_LOG_DIR),
+/// `config` 为 `None` 表示配置读不出来——由调用方判断，因为「配置从哪读」
+/// 是宿主的知识（server 与 agent 的配置文件不是同一个）。
+pub fn describe_target(config: Option<&Config>) -> String {
+    let dir = match config {
+        Some(c) => log_dir_for(&c.data_dir),
+        None => PathBuf::from(DEFAULT_LOG_DIR),
     };
     dir.join(LOG_FILE).display().to_string()
 }

@@ -8,7 +8,6 @@
 //!
 //! 认证中间件由其它模块统一接线，本模块不做鉴权。
 
-pub mod agent;
 pub mod channels;
 pub mod handler;
 pub mod hub;

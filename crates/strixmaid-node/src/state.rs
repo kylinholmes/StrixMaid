@@ -11,6 +11,12 @@ pub struct AppState {
     started_at: Instant,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     /// 以「此刻」为启动时间创建状态。
     pub fn new() -> Self {

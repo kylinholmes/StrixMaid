@@ -18,7 +18,7 @@ use strixmaid_types::ApiError;
 use strixmaid_types::metrics::MetricSnapshot;
 use strixmaid_types::ws::WsChannel;
 
-use crate::ws::agent::AgentRegistry;
+use crate::RemoteSnapshots;
 use crate::ws::hub::{ChannelEvent, ChannelSource, ChannelStream, SubscribeContext, broadcast_stream};
 
 /// 订阅参数。
@@ -37,7 +37,7 @@ struct Params {
 pub struct MetricsLive {
     engine: MetricsEngine,
     /// 非 local 节点的快照来源。
-    agents: Option<Arc<AgentRegistry>>,
+    agents: Option<Arc<dyn RemoteSnapshots>>,
 }
 
 impl MetricsLive {
@@ -51,7 +51,7 @@ impl MetricsLive {
 
     /// 接上 Agent 注册表。
     #[must_use]
-    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+    pub fn with_agents(mut self, agents: Arc<dyn RemoteSnapshots>) -> Self {
         self.agents = Some(agents);
         self
     }

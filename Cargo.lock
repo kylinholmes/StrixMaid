@@ -2250,6 +2250,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "strixmaid-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "strixmaid-core",
+ "strixmaid-types",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-scalar",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "strixmaid-server"
 version = "0.1.0"
 dependencies = [
@@ -2264,6 +2289,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strixmaid-core",
+ "strixmaid-node",
  "strixmaid-types",
  "tokio",
  "tokio-tungstenite 0.30.0",

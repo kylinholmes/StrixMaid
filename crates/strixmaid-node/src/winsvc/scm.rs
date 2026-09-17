@@ -1,7 +1,7 @@
 //! 从命令行这一侧操作 SCM：注册、注销、启停、查询。
 //!
 //! 与 [`super::host`] 的方向正好相反——那边是「SCM 调用本进程」，这边是
-//! 「本进程调用 SCM」。两边共用 [`super::SERVICE_NAME`]，注册时写进
+//! 「本进程调用 SCM」。两边共用同一份 [`super::ServiceIdentity`]，注册时写进
 //! `ImagePath` 的命令行也正是 `<exe> service run`。
 //!
 //! # 为什么不调 `sc.exe`
@@ -40,8 +40,8 @@ use windows_sys::Win32::System::Services::{
     SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 
-use super::{DESCRIPTION, DISPLAY_NAME, SERVICE_NAME, explain, state_text};
-use crate::cli::{GlobalArgs, ServiceInstallArgs};
+use super::{ServiceIdentity, ServiceInstallArgs, explain, state_text};
+
 
 /// 等服务进入目标状态的总上限。
 ///
@@ -108,13 +108,13 @@ fn open_manager(access: u32) -> anyhow::Result<ScHandle> {
 }
 
 /// 打开本服务。
-fn open_service(mgr: &ScHandle, access: u32) -> anyhow::Result<ScHandle> {
-    let name = to_wide(SERVICE_NAME);
+fn open_service(id: &ServiceIdentity, mgr: &ScHandle, access: u32) -> anyhow::Result<ScHandle> {
+    let name = to_wide(id.name);
     // SAFETY: name 以 NUL 结尾并在调用期间存活；mgr 是有效的 SCM 句柄。
     let raw = unsafe { OpenServiceW(mgr.raw(), name.as_ptr(), access) };
     // SAFETY: raw 刚由 OpenServiceW 返回，尚无其它持有者。
     unsafe { ScHandle::new(raw) }
-        .map_err(|code| anyhow::anyhow!("打开服务 {SERVICE_NAME} 失败：{}", explain(code)))
+        .map_err(|code| anyhow::anyhow!("打开服务 {} 失败：{}", id.name, explain(code)))
 }
 
 /// 查一次服务状态。
@@ -151,7 +151,12 @@ fn query(svc: &ScHandle) -> anyhow::Result<SERVICE_STATUS_PROCESS> {
 /// （`packaging/windows/install.ps1` 就直接依赖这一点），若在这里报
 /// `ERROR_SERVICE_EXISTS`，安装脚本要么先卸载——那会丢掉管理员在服务管理单元里
 /// 做过的调整（登录账户、依赖、延迟启动）——要么把错误吞掉，两条都不好。
-pub fn install(args: &ServiceInstallArgs, global: &GlobalArgs) -> anyhow::Result<()> {
+pub fn install(
+    id: &ServiceIdentity,
+    args: &ServiceInstallArgs,
+    run_args: &[String],
+    log_target: &str,
+) -> anyhow::Result<()> {
     let exe = match &args.exe {
         Some(p) => p.clone(),
         None => std::env::current_exe().context("取当前可执行文件路径失败")?,
@@ -164,7 +169,7 @@ pub fn install(args: &ServiceInstallArgs, global: &GlobalArgs) -> anyhow::Result
         bail!("可执行文件不存在: {}", exe.display());
     }
     let account = match args.account.as_deref() {
-        None => LOCAL_SYSTEM,
+        None => id.default_account,
         Some(a) => normalize_account(a).ok_or_else(|| {
             anyhow::anyhow!(
                 "不支持的服务账户 `{a}`。只接受三个无口令的内置账户：\
@@ -174,12 +179,12 @@ pub fn install(args: &ServiceInstallArgs, global: &GlobalArgs) -> anyhow::Result
             )
         })?,
     };
-    let cmdline = image_path(&exe, global);
+    let cmdline = image_path(&exe, run_args);
 
     let mgr = open_manager(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
 
-    let name = to_wide(SERVICE_NAME);
-    let display = to_wide(DISPLAY_NAME);
+    let name = to_wide(id.name);
+    let display = to_wide(id.display_name);
     let path = to_wide(&cmdline);
     let acct = to_wide(account);
     // SAFETY: 四个宽字符串都以 NUL 结尾且在调用期间存活；
@@ -204,27 +209,27 @@ pub fn install(args: &ServiceInstallArgs, global: &GlobalArgs) -> anyhow::Result
     // SAFETY: raw 刚由 CreateServiceW 返回，尚无其它持有者。
     let (svc, created) = match unsafe { ScHandle::new(raw) } {
         Ok(svc) => (svc, true),
-        Err(ERROR_SERVICE_EXISTS) => (reconfigure(&mgr, &path, &display, &acct)?, false),
+        Err(ERROR_SERVICE_EXISTS) => (reconfigure(id, &mgr, &path, &display, &acct)?, false),
         Err(code) => bail!("注册服务失败：{}", explain(code)),
     };
 
-    set_description(&svc)?;
+    set_description(id, &svc)?;
     set_failure_actions(&svc)?;
 
     if created {
-        println!("已注册服务 {SERVICE_NAME}（{DISPLAY_NAME}）");
+        println!("已注册服务 {}（{}）", id.name, id.display_name);
     } else {
-        println!("服务 {SERVICE_NAME} 已存在，已更新其配置");
+        println!("服务 {} 已存在，已更新其配置", id.name);
     }
     println!("  账户    : {account}");
     println!("  启动类型: 自动");
     println!("  命令行  : {cmdline}");
-    println!("  日志    : {}", super::logging::describe_target(global));
+    println!("  日志    : {log_target}");
 
     if args.start {
         drop(svc);
         drop(mgr);
-        return start();
+        return start(id);
     }
     println!("用 `strixmaid service start` 启动它。");
     Ok(())
@@ -236,12 +241,13 @@ pub fn install(args: &ServiceInstallArgs, global: &GlobalArgs) -> anyhow::Result
 /// （统一回到自动启动）、登录账户。其余一律传 `SERVICE_NO_CHANGE` / 空指针
 /// ——依赖关系、载入顺序组这些可能是管理员手工调过的，重复安装不该把它们抹平。
 fn reconfigure(
+    id: &ServiceIdentity,
     mgr: &ScHandle,
     image_path: &[u16],
     display: &[u16],
     account: &[u16],
 ) -> anyhow::Result<ScHandle> {
-    let svc = open_service(mgr, SERVICE_ALL_ACCESS)?;
+    let svc = open_service(id, mgr, SERVICE_ALL_ACCESS)?;
     // SAFETY: 三个宽字符串都以 NUL 结尾且在调用期间存活；
     // TagId 与依赖表传空指针（= 不改），口令传空（内置账户无口令）。
     let ok = unsafe {
@@ -272,9 +278,9 @@ fn reconfigure(
 /// 先尽力停掉再删：`DeleteService` 对运行中的服务只会把它标成「待删除」，
 /// 句柄全部关闭且服务停止后才真正消失。直接删会留下一个查得到、启不动的残影，
 /// 紧接着再 `install` 还会撞上 `ERROR_SERVICE_MARKED_FOR_DELETE`。
-pub fn uninstall() -> anyhow::Result<()> {
+pub fn uninstall(id: &ServiceIdentity) -> anyhow::Result<()> {
     let mgr = open_manager(SC_MANAGER_CONNECT)?;
-    let svc = open_service(&mgr, SERVICE_ALL_ACCESS)?;
+    let svc = open_service(id, &mgr, SERVICE_ALL_ACCESS)?;
 
     let st = query(&svc)?;
     if st.dwCurrentState != SERVICE_STOPPED {
@@ -290,7 +296,7 @@ pub fn uninstall() -> anyhow::Result<()> {
         let code = unsafe { GetLastError() };
         bail!("注销服务失败：{}", explain(code));
     }
-    println!("已注销服务 {SERVICE_NAME}");
+    println!("已注销服务 {}", id.name);
     Ok(())
 }
 
@@ -298,11 +304,11 @@ pub fn uninstall() -> anyhow::Result<()> {
 ///
 /// 服务已在运行不算失败：`install --start` 与安装脚本都会重复调用它，
 /// 「已经是想要的状态」应当安静地通过（与 systemd `start` 的语义一致）。
-pub fn start() -> anyhow::Result<()> {
+pub fn start(id: &ServiceIdentity) -> anyhow::Result<()> {
     use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
 
     let mgr = open_manager(SC_MANAGER_CONNECT)?;
-    let svc = open_service(&mgr, SERVICE_START | SERVICE_QUERY_STATUS)?;
+    let svc = open_service(id, &mgr, SERVICE_START | SERVICE_QUERY_STATUS)?;
 
     // SAFETY: svc 带 SERVICE_START；不传启动参数，故个数为 0、指针为空。
     let ok = unsafe { StartServiceW(svc.raw(), 0, std::ptr::null()) };
@@ -314,27 +320,27 @@ pub fn start() -> anyhow::Result<()> {
         }
     }
     let st = wait_for(&svc, SERVICE_RUNNING)?;
-    println!("服务 {SERVICE_NAME} 已启动（pid {}）", st.dwProcessId);
+    println!("服务 {} 已启动（pid {}）", id.name, st.dwProcessId);
     Ok(())
 }
 
 /// `service stop`。
-pub fn stop() -> anyhow::Result<()> {
+pub fn stop(id: &ServiceIdentity) -> anyhow::Result<()> {
     let mgr = open_manager(SC_MANAGER_CONNECT)?;
-    let svc = open_service(&mgr, SERVICE_STOP | SERVICE_QUERY_STATUS)?;
+    let svc = open_service(id, &mgr, SERVICE_STOP | SERVICE_QUERY_STATUS)?;
     send_stop(&svc)?;
     wait_for(&svc, SERVICE_STOPPED)?;
-    println!("服务 {SERVICE_NAME} 已停止");
+    println!("服务 {} 已停止", id.name);
     Ok(())
 }
 
 /// `service status`。
-pub fn status() -> anyhow::Result<()> {
+pub fn status(id: &ServiceIdentity) -> anyhow::Result<()> {
     let mgr = open_manager(SC_MANAGER_CONNECT)?;
-    let svc = open_service(&mgr, SERVICE_QUERY_STATUS)?;
+    let svc = open_service(id, &mgr, SERVICE_QUERY_STATUS)?;
     let st = query(&svc)?;
 
-    println!("服务  : {SERVICE_NAME}（{DISPLAY_NAME}）");
+    println!("服务  : {}（{}）", id.name, id.display_name);
     println!("状态  : {}", state_text(st.dwCurrentState));
     if st.dwProcessId != 0 {
         println!("进程  : {}", st.dwProcessId);
@@ -430,8 +436,8 @@ fn wait_for(svc: &ScHandle, target: u32) -> anyhow::Result<SERVICE_STATUS_PROCES
 }
 
 /// 写服务描述。
-fn set_description(svc: &ScHandle) -> anyhow::Result<()> {
-    let mut text = to_wide(DESCRIPTION);
+fn set_description(id: &ServiceIdentity, svc: &ScHandle) -> anyhow::Result<()> {
+    let mut text = to_wide(id.description);
     let info = SERVICE_DESCRIPTIONW {
         lpDescription: text.as_mut_ptr(),
     };
@@ -541,28 +547,13 @@ fn normalize_account(input: &str) -> Option<&'static str> {
 /// 用户会话里 `set STRIXMAID_...` 对它没有任何影响。要靠环境变量配置服务，
 /// 得改**系统**环境变量并重启服务；更常规的做法是把配置写进配置文件、
 /// 安装时用 `--config` 指过去。
-fn image_path(exe: &Path, global: &GlobalArgs) -> String {
+fn image_path(exe: &Path, run_args: &[String]) -> String {
     let mut parts = vec![
         quote_arg(&exe.display().to_string()),
         "service".to_owned(),
         "run".to_owned(),
     ];
-    if let Some(path) = &global.config {
-        parts.push("--config".to_owned());
-        parts.push(quote_arg(&path.display().to_string()));
-    }
-    if let Some(addr) = &global.listen {
-        parts.push("--listen".to_owned());
-        parts.push(addr.to_string());
-    }
-    if let Some(dir) = &global.data_dir {
-        parts.push("--data-dir".to_owned());
-        parts.push(quote_arg(&dir.display().to_string()));
-    }
-    if let Some(level) = &global.log_level {
-        parts.push("--log-level".to_owned());
-        parts.push(level.as_str().to_owned());
-    }
+    parts.extend(run_args.iter().map(|a| quote_arg(a)));
     parts.join(" ")
 }
 
@@ -612,34 +603,26 @@ fn quote_arg(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::path::PathBuf;
-
-    use strixmaid_core::config::LogLevel;
-
     use super::*;
 
-    fn empty_global() -> GlobalArgs {
-        GlobalArgs {
-            config: None,
-            listen: None,
-            data_dir: None,
-            log_level: None,
-        }
+    /// 宿主给的 `run_args`：`service run` 之后的那串参数。
+    ///
+    /// 搬进 node 之前这里传的是 server 的 `GlobalArgs`，由 `image_path` 自己拆成
+    /// `--config` / `--listen` / … 四项。现在拼参数是**宿主**的事（agent 的全局参数
+    /// 与 server 不是一套），`image_path` 只负责引号与拼接，所以测试直接给成品。
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]
     fn 命令行最简形态只有可执行文件与子命令() {
-        let line = image_path(Path::new(r"C:\tools\strixmaid.exe"), &empty_global());
+        let line = image_path(Path::new(r"C:\tools\strixmaid.exe"), &[]);
         assert_eq!(line, r"C:\tools\strixmaid.exe service run");
     }
 
     #[test]
     fn 带空格的路径必须加引号() {
-        let line = image_path(
-            Path::new(r"C:\Program Files\StrixMaid\strixmaid.exe"),
-            &empty_global(),
-        );
+        let line = image_path(Path::new(r"C:\Program Files\StrixMaid\strixmaid.exe"), &[]);
         assert_eq!(
             line,
             r#""C:\Program Files\StrixMaid\strixmaid.exe" service run"#
@@ -647,14 +630,20 @@ mod tests {
     }
 
     #[test]
-    fn 显式给出的全局参数逐项透传() {
-        let global = GlobalArgs {
-            config: Some(PathBuf::from(r"C:\ProgramData\StrixMaid\config.toml")),
-            listen: Some("0.0.0.0:9700".parse::<SocketAddr>().unwrap()),
-            data_dir: Some(PathBuf::from(r"D:\data dir")),
-            log_level: Some(LogLevel::Debug),
-        };
-        let line = image_path(Path::new(r"C:\tools\strixmaid.exe"), &global);
+    fn 宿主给的参数逐项透传并按需加引号() {
+        let line = image_path(
+            Path::new(r"C:\tools\strixmaid.exe"),
+            &args(&[
+                "--config",
+                r"C:\ProgramData\StrixMaid\config.toml",
+                "--listen",
+                "0.0.0.0:9700",
+                "--data-dir",
+                r"D:\data dir",
+                "--log-level",
+                "debug",
+            ]),
+        );
         assert_eq!(
             line,
             concat!(

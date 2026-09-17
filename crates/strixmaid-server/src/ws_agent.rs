@@ -39,7 +39,7 @@ use strixmaid_types::ws::{WS_PROTOCOL_VERSION, WsEnvelope, WsMsgType};
 use strixmaid_types::{ApiError, ErrorCode};
 use tokio::sync::broadcast;
 
-use crate::error::ApiErr;
+use strixmaid_node::error::ApiErr;
 
 /// 每节点快照广播的队列深度。快照是全量替换，丢几帧无所谓。
 const SNAPSHOT_CAPACITY: usize = 8;
@@ -167,7 +167,7 @@ async fn upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     // 鉴权在升级之前：失败要能回一个带状态码的 HTTP 响应。
-    let Some(token) = crate::auth::extract::bearer_from_ws_protocol(&headers) else {
+    let Some(token) = strixmaid_node::auth::extract::bearer_from_ws_protocol(&headers) else {
         return ApiErr(ApiError::new(
             ErrorCode::Unauthenticated,
             "缺少 Agent token（Sec-WebSocket-Protocol: bearer, <token>）",
@@ -189,7 +189,7 @@ async fn upgrade(
                 .into_response();
         }
     };
-    ws.protocols([crate::auth::extract::WS_BEARER_PROTOCOL])
+    ws.protocols([strixmaid_node::auth::extract::WS_BEARER_PROTOCOL])
         .on_upgrade(move |socket| serve(st, socket, node))
 }
 
@@ -385,6 +385,28 @@ async fn send_env(
     let text = serde_json::to_string(env).unwrap_or_default();
     sink.send(Message::Text(text.into())).await
 }
+
+/// 把注册表接到 node 的 [`RemoteSnapshots`] 缝上。
+///
+/// node 只认识本机这一个节点，「别的节点」的概念由宿主注入（依赖倒置，见
+/// `strixmaid_node::RemoteSnapshots`）。方法体逐字转发给同名的固有方法——
+/// 保留固有方法是因为 Server 内部还有几处直接用它，不必绕 trait 对象。
+impl strixmaid_node::RemoteSnapshots for AgentRegistry {
+    fn latest(&self, node: &str) -> Option<std::sync::Arc<MetricSnapshot>> {
+        AgentRegistry::latest(self, node)
+    }
+
+    fn subscribe(
+        &self,
+        node: &str,
+    ) -> Option<(
+        Option<std::sync::Arc<MetricSnapshot>>,
+        broadcast::Receiver<std::sync::Arc<MetricSnapshot>>,
+    )> {
+        AgentRegistry::subscribe(self, node)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

@@ -16,7 +16,7 @@ use strixmaid_types::metrics::{
     MetricQuery, MetricQueryResp, MetricSnapshot, SeriesListQuery, SeriesMeta, SnapshotQuery,
 };
 
-use crate::ws::agent::AgentRegistry;
+use crate::RemoteSnapshots;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -28,7 +28,7 @@ pub struct MetricsState {
     engine: MetricsEngine,
     /// `?node=` 指向非 local 节点时，`/metrics/current` 从这里取该节点最近
     /// 一帧 `agent.snapshot`（roadmap/05 §3.3）。
-    agents: Option<Arc<AgentRegistry>>,
+    agents: Option<Arc<dyn RemoteSnapshots>>,
 }
 
 impl MetricsState {
@@ -42,7 +42,7 @@ impl MetricsState {
 
     /// 接上 Agent 注册表。
     #[must_use]
-    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+    pub fn with_agents(mut self, agents: Arc<dyn RemoteSnapshots>) -> Self {
         self.agents = Some(agents);
         self
     }

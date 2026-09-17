@@ -30,7 +30,7 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use strixmaid_types::ApiError;
 
-use crate::error::ApiErr;
+use strixmaid_node::error::ApiErr;
 
 /// `web/dist` 的编译期视图。
 ///

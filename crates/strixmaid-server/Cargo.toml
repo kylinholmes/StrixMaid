@@ -19,13 +19,9 @@ ui = []
 # 在 release 构建中也暴露 OpenAPI 文档端点（/api/v1/openapi.json 与 /api/docs）。
 # debug 构建无条件暴露，无需此 feature；见 src/apidoc.rs。
 #
-# 注意：utoipa-scalar 刻意保持为非可选依赖。gate 条件是
-# `any(debug_assertions, feature = "apidoc")`，而 feature 无法被 debug_assertions
-# 自动打开，若把它标成 optional，debug 构建就会缺依赖。真正占体积的是
-# src/vendor/scalar.standalone.js（约 3.7 MiB），那份 include_bytes! 在被 gate 掉的
-# 模块里，关掉时一个字节都不会进二进制；utoipa-scalar 本身只有十几行代码，
-# 在未被引用时由 LTO 剥除。
-apidoc = []
+# 文档端点与 /debug 页的实现都在 strixmaid-node 里，所以必须把 feature 转发过去：
+# 只开自己这一个，node 那边仍然是关的，gate 两边不同步。
+apidoc = ["strixmaid-node/apidoc"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -38,6 +34,7 @@ rust-embed = "8.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 strixmaid-core = { version = "0.1.0", path = "../strixmaid-core" }
+strixmaid-node = { version = "0.1.0", path = "../strixmaid-node" }
 strixmaid-types = { version = "0.1.0", path = "../strixmaid-types" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
 tower = "0.5.3"

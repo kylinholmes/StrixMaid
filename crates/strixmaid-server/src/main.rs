@@ -20,105 +20,32 @@
 //! `#[tokio::main]` 会把主线程变成 `block_on` 的宿主，与之冲突。因此这里手工建
 //! 运行时，只在需要异步的那几条路径上 `block_on`。
 
-mod apidoc;
+// 业务逻辑一律在 `strixmaid-node`（`design.md` §11：AgentCore 是唯一的业务逻辑
+// 所在地，Server 与 Agent 都只是它的宿主）。本 crate 只剩四样 Server 独有的东西：
+// 前端资源、节点目录、Agent 拨进来的那条 WS，以及进程入口。
 mod app;
-mod assets;
-mod auth;
 mod cli;
-#[cfg(any(debug_assertions, feature = "apidoc"))]
-mod debug;
 mod embed;
-mod error;
-mod routes;
+mod routes_nodes;
 #[cfg(windows)]
-mod service;
-mod state;
-mod ws;
+mod winsvc_app;
+mod ws_agent;
 
 use std::future::{Future, IntoFuture as _};
 use std::io::IsTerminal as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::Parser as _;
 use strixmaid_core::config::{Config, cli_layer};
 use tracing_subscriber::EnvFilter;
 
+use strixmaid_node::state::AppState;
+use strixmaid_node::{NoReporter, ShutdownKind, StartupReporter, routes, ws};
+
 use crate::cli::{Cli, Command, ConfigAction, GlobalArgs, WorkerArgs};
-use crate::state::AppState;
 
-/// 正常关停时留给 axum 排空在途连接的上限。
-///
-/// axum 的 graceful shutdown 会等**所有**连接自然结束，而本服务的 WebSocket
-/// （指标推送、终端）在客户端不主动断开时永远不会结束，无上限地等下去等于不退出。
-const GRACEFUL_DRAIN: Duration = Duration::from_secs(20);
-
-/// 紧急关停时留给 axum 排空在途连接的上限。见 [`ShutdownKind::Urgent`]。
-const URGENT_DRAIN: Duration = Duration::from_millis(800);
-
-/// 紧急关停时留给「落盘 + 关库」的上限。
-///
-/// 系统在 `CTRL_CLOSE_EVENT` / `SERVICE_CONTROL_SHUTDOWN` 之后只给几秒，
-/// 超时即 `TerminateProcess`。这里取一个明显小于那个时限的值，宁可少收几个
-/// 后台任务，也要保证 SQLite 有机会正常关闭。
-const URGENT_CLEANUP: Duration = Duration::from_secs(2);
-
-/// 关停的紧迫程度。
-///
-/// Unix 上只有一档：`SIGTERM` / `SIGINT` 之后进程想跑多久跑多久，systemd 的
-/// `TimeoutStopSec` 默认 90 秒。Windows 不是——控制台的
-/// `CTRL_CLOSE_EVENT`、`CTRL_SHUTDOWN_EVENT` 与 SCM 的 `SERVICE_CONTROL_SHUTDOWN`
-/// 都只给**几秒**（受 `WaitToKillServiceTimeout` 等策略约束，默认 5 秒），
-/// 到点直接 `TerminateProcess`，处理函数里做多少事都是徒劳。
-///
-/// 因此把「收到什么」与「还能做多少」分开：信号源负责判定档位，关停路径按档位
-/// 决定做全套还是只保命。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShutdownKind {
-    /// 完整关停：排空在途请求、落盘、逐个关掉 worker 与 helper、正常关库。
-    ///
-    /// 对应 Unix 的 `SIGTERM` / `SIGINT`、Windows 的 Ctrl-C / Ctrl-Break，
-    /// 以及 SCM 的 `SERVICE_CONTROL_STOP` / `SERVICE_CONTROL_PRESHUTDOWN`。
-    Graceful,
-    /// 紧急关停：只做「不做就会丢数据」的两件事——把未满分钟的指标落盘、
-    /// 正常关闭 SQLite——并各自带超时。**不等** worker 退出：进程一死，
-    /// IPC 管道断开，worker 读到 EOF 会自行结束，内核也会回收句柄。
-    ///
-    /// 对应 Windows 的 Ctrl-Close / Ctrl-Shutdown 与 SCM 的
-    /// `SERVICE_CONTROL_SHUTDOWN`。Unix 侧不产生这一档。
-    Urgent,
-}
-
-impl ShutdownKind {
-    /// 这一档给 axum 多少时间排空在途连接。
-    const fn drain_budget(self) -> Duration {
-        match self {
-            ShutdownKind::Graceful => GRACEFUL_DRAIN,
-            ShutdownKind::Urgent => URGENT_DRAIN,
-        }
-    }
-}
-
-/// 启动进度的观察者。
-///
-/// 前台运行时没人关心进度，所以默认实现全是空的。Windows 服务模式下不一样：
-/// SCM 要求进程在 `SERVICE_START_PENDING` 期间持续上报**递增的**
-/// `dwCheckPoint`，否则会在 `dwWaitHint` 到期后判定服务启动失败并把进程杀掉。
-/// 启动里最慢的几步（开库、起 helper、探测能力）都埋在 [`serve_with`] 内部，
-/// 与其让宿主在外面猜时间，不如把上报点做成回调交给它。
-pub(crate) trait StartupReporter: Send + Sync {
-    /// 进入下一个启动阶段。
-    fn stage(&self, _name: &str) {}
-    /// 监听套接字已就绪、开始接受请求。
-    fn ready(&self) {}
-}
-
-/// 前台运行时的空实现。
-pub(crate) struct NoReporter;
-
-impl StartupReporter for NoReporter {}
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -127,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     // 这一支自带（或不需要）运行时，绝不能进到下面的 block_on 里。
     #[cfg(windows)]
     if let Some(Command::Service { action }) = &cli.command {
-        return service::dispatch(action, &cli.global);
+        return strixmaid_node::winsvc::dispatch(action, winsvc_app::app(&cli.global));
     }
 
     tokio::runtime::Builder::new_multi_thread()
@@ -263,7 +190,7 @@ pub(crate) async fn serve_with(
         .await
         .context("初始化会话管理失败")?;
     let sweeper = sessions.spawn_sweeper(std::time::Duration::from_secs(5));
-    let auth = auth::AuthState::new(sessions.clone(), config.trusted_proxies.clone());
+    let auth = strixmaid_node::auth::AuthState::new(sessions.clone(), config.trusted_proxies.clone());
 
     // ---- 终端注册表（roadmap/03 §4.3）----
     //
@@ -272,7 +199,7 @@ pub(crate) async fn serve_with(
     let terminals = TerminalRegistry::new(config.terminal.clone());
     sessions.set_terminal_registry(terminals.clone());
     // 非 REST 的关闭（空闲、shell 自退、登出）经观察者写审计（roadmap/03 §7）。
-    terminals.set_observer(Arc::new(auth::audit::TerminalAudit::new(
+    terminals.set_observer(Arc::new(strixmaid_node::auth::audit::TerminalAudit::new(
         store.clone(),
         strixmaid_core::session::LOCAL_NODE_ID,
     )));
@@ -327,7 +254,7 @@ pub(crate) async fn serve_with(
     tracing::info!(caps = ?report.system, "system 能力");
 
     // ---- Agent 汇聚（roadmap/05）----
-    let agents = ws::agent::AgentRegistry::new();
+    let agents = crate::ws_agent::AgentRegistry::new();
 
     // ---- WS 控制面 ----
     let hub = Arc::new(ws::Hub::new());
@@ -399,13 +326,17 @@ pub(crate) async fn serve_with(
             store.clone(),
         ),
         files: routes::files::FilesState::new(auth.clone(), &config.files.allowed_roots),
-        nodes: routes::nodes::NodesState::new(store.clone(), agents.clone(), auth.clone()),
+        // `/nodes` 是 Server 独有的：node 只认识本机这一个节点。经 `extra_protected`
+        // 挂进去，与其余受保护路由同批套鉴权（见 `routes::ApiStates` 的字段说明）。
+        extra_protected: Some(crate::routes_nodes::router(
+            crate::routes_nodes::NodesState::new(store.clone(), agents.clone(), auth.clone()),
+        )),
     };
     let router = app::build(
         states,
         hub,
         auth,
-        ws::agent::AgentSocketState {
+        crate::ws_agent::AgentSocketState {
             store: store.clone(),
             registry: agents.clone(),
         },
@@ -495,14 +426,14 @@ pub(crate) async fn serve_with(
             // 只保数据：`sessions.shutdown()` 要逐个等 worker 进程退出，
             // 在只有几秒的时限里既做不完也没必要——进程一退，IPC 端点关闭，
             // worker 读到 EOF 自行结束。
-            let done = tokio::time::timeout(URGENT_CLEANUP, async {
+            let done = tokio::time::timeout(strixmaid_node::URGENT_CLEANUP, async {
                 engine.stop().await;
                 store.close().await;
             })
             .await;
             if done.is_err() {
                 tracing::error!(
-                    budget = ?URGENT_CLEANUP,
+                    budget = ?strixmaid_node::URGENT_CLEANUP,
                     "紧急关停：落盘与关库未在时限内完成，可能丢失最后一分钟的指标"
                 );
             } else {

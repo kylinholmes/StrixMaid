@@ -25,11 +25,11 @@ use strixmaid_types::{ApiError, ErrorCode};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::auth::AuthState;
-use crate::auth::exec::RequestOrigin;
-use crate::auth::{audit, audit::Record};
-use crate::error::ApiResult;
-use crate::ws::agent::AgentRegistry;
+use strixmaid_node::auth::AuthState;
+use strixmaid_node::auth::exec::RequestOrigin;
+use strixmaid_node::auth::{audit, audit::Record};
+use strixmaid_node::error::ApiResult;
+use crate::ws_agent::AgentRegistry;
 
 /// 节点路由的状态。
 #[derive(Clone)]

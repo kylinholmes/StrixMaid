@@ -37,50 +37,189 @@ pub mod host;
 pub mod logging;
 pub mod scm;
 
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use anyhow::bail;
+use clap::{Args, Subcommand};
+use strixmaid_core::config::Config;
 
-use crate::cli::{GlobalArgs, ServiceAction};
+use crate::{ShutdownKind, StartupReporter};
 
-/// SCM 里的服务名（键名）。
+/// `service` 的动作（仅 Windows）。
 ///
-/// 这一个常量同时决定三处：`CreateServiceW` 注册用的名字、
-/// `StartServiceCtrlDispatcherW` 的服务表项、以及注册表下
-/// `HKLM\SYSTEM\CurrentControlSet\Services\<名字>`。三处必须一致，
-/// 因此只在这里定义一次。
-pub const SERVICE_NAME: &str = "StrixMaid";
+/// `run` 与其余五个不是一类东西：`run` 是**被 SCM 调用**的入口，其余五个是
+/// 管理员在命令行上**调用 SCM**。两者共用同一个服务名常量
+/// （`crate::service::SERVICE_NAME`），install 写进注册表的命令行里带的正是
+/// `service run`。
+#[cfg(windows)]
+#[derive(Debug, Subcommand)]
+pub enum ServiceAction {
+    /// 由服务控制管理器（SCM）调用的运行入口，不供手工执行
+    ///
+    /// 直接在命令行里跑会在连接 SCM 时失败并给出提示；前台运行请用 `serve`。
+    Run,
 
-/// 服务管理单元里显示的名字。
-pub const DISPLAY_NAME: &str = "StrixMaid 服务器管理面板";
+    /// 注册为自动启动的 Windows 服务（需要管理员权限）
+    Install(ServiceInstallArgs),
 
-/// 服务描述，显示在服务管理单元的「描述」列。
-pub const DESCRIPTION: &str = "StrixMaid：轻量、通用、现代化的服务器观测与管理平台。提供 HTTP/WebSocket 控制面，\
-     按登录用户身份派生 worker 执行管理操作。";
+    /// 注销服务（需要管理员权限）
+    Uninstall,
+
+    /// 启动已注册的服务（需要管理员权限）
+    Start,
+
+    /// 停止正在运行的服务（需要管理员权限）
+    Stop,
+
+    /// 查询服务当前状态（只读，无需管理员权限）
+    Status,
+}
+
+/// `service install` 的参数（仅 Windows）。
+#[cfg(windows)]
+#[derive(Debug, Args)]
+pub struct ServiceInstallArgs {
+    /// 写进服务 ImagePath 的可执行文件路径 [默认: 当前可执行文件]
+    ///
+    /// 注册的是**绝对路径**：服务由 `services.exe` 拉起，工作目录是
+    /// `%SystemRoot%\system32`，相对路径解析不到。
+    #[arg(long, value_name = "PATH")]
+    pub exe: Option<PathBuf>,
+
+    /// 服务账户 [默认: LocalSystem]
+    ///
+    /// 只接受三个内置的、无口令的服务账户：`LocalSystem`、
+    /// `NT AUTHORITY\LocalService`、`NT AUTHORITY\NetworkService`。
+    /// 域账户需要口令，而明文口令不进命令行、不进注册表——那种部署请在
+    /// 安装后用「服务」管理单元设置登录账户。
+    #[arg(long, value_name = "ACCOUNT")]
+    pub account: Option<String>,
+
+    /// 注册完成后立即启动一次
+    #[arg(long)]
+    pub start: bool,
+}
+
+/// 一个 Windows 服务的身份。
+///
+/// 三处必须一致：`CreateServiceW` 注册用的名字、`StartServiceCtrlDispatcherW`
+/// 的服务表项、以及注册表下那个键。收在一个结构里，宿主给一份 `&'static`，
+/// 三处都从它取。
+///
+/// `version` 必须由**宿主**给：本模块搬进 `strixmaid-node` 之后，在这里写
+/// `env!("CARGO_PKG_VERSION")` 取到的是 node 的版本，不是那个二进制的版本。
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceIdentity {
+    /// SCM 里的服务名（键名）。
+    pub name: &'static str,
+    /// 服务管理单元里显示的名字。
+    pub display_name: &'static str,
+    /// 显示在服务管理单元「描述」列的说明。
+    pub description: &'static str,
+    /// 宿主二进制的版本号，写进启动日志。
+    pub version: &'static str,
+    /// `install` 未指定 `--account` 时用的账户。
+    ///
+    /// Server 用 `LocalSystem`（要以任意用户身份派生 worker）；Agent 用
+    /// `NT AUTHORITY\LocalService`——只读采集器，最小权限起步。
+    pub default_account: &'static str,
+}
+
+impl ServiceIdentity {
+    /// SCM 对服务名的硬约束。宿主应在自己的测试里断言一次。
+    ///
+    /// 独立成方法而不是写死在本 crate 的测试里：服务名由**宿主**给，本 crate
+    /// 看不到它们，只能把规则交出去。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty() {
+            return Err("服务名不能为空".into());
+        }
+        // SCM 的服务名不允许含正斜杠与反斜杠。
+        if self.name.contains(['/', '\\']) {
+            return Err(format!("服务名 {} 不能含斜杠", self.name));
+        }
+        if self.name.len() >= 256 {
+            return Err("SCM 的服务名上限是 256 个字符".into());
+        }
+        if self.display_name.is_empty() {
+            return Err("显示名不能为空".into());
+        }
+        if self.description.is_empty() {
+            return Err("描述不能为空".into());
+        }
+        Ok(())
+    }
+}
+
+/// 服务跑起来之后真正要做的事，由宿主实现。
+///
+/// 被 SCM 拉起时的次序：主线程交给分派器 → 分派线程上 [`prepare`] → 建运行时 →
+/// [`serve`]。两段分开是因为 SCM 要求进程在 `SERVICE_START_PENDING` 期间持续上报
+/// **递增的** `dwCheckPoint`，而最慢的几步（读配置、开库、起 helper）分别落在这
+/// 两段里；宿主每推进一步调一次 reporter，SCM 才知道服务是在启动而不是卡死。
+///
+/// [`prepare`]: ServiceApp::prepare
+/// [`serve`]: ServiceApp::serve
+pub trait ServiceApp: Send + Sync + 'static {
+    /// 这个服务的身份。
+    fn identity(&self) -> &'static ServiceIdentity;
+
+    /// `service install` 注册进 SCM 的命令行里，跟在 `<exe> service run` 之后的参数。
+    ///
+    /// 服务由 `services.exe` 拉起，环境与工作目录都不是安装时那一套，所以凡是
+    /// 从命令行来的配置都要在这里如实带上。
+    fn run_args(&self) -> Vec<String>;
+
+    /// `service install` 打印「日志去哪了」用的一句话。
+    ///
+    /// 由宿主算而不是这里算：日志目录来自配置，而**配置从哪读**是宿主的知识
+    /// （server 与 agent 不是同一个配置文件）。现成的算法见
+    /// [`logging::describe_target`]。
+    fn log_target(&self) -> String;
+
+    /// 同步准备：加载配置、把日志落到文件。返回配置与日志文件路径。
+    ///
+    /// **日志必须在这一步就位**——往后的任何输出都只能进文件，服务进程没有 stderr。
+    fn prepare(&self) -> anyhow::Result<(Config, PathBuf)>;
+
+    /// 在宿主建好的运行时里跑完整个服务。
+    fn serve(
+        &self,
+        config: Config,
+        reporter: Arc<dyn StartupReporter>,
+        shutdown: Pin<Box<dyn Future<Output = ShutdownKind> + Send>>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+}
 
 /// 分派 `service` 子命令。
 ///
 /// 由 `main` 在**进程主线程**上直接调用，不经过 tokio 运行时——`Run` 那一支要把
 /// 主线程交给 `StartServiceCtrlDispatcherW`，详见 [`host`] 的模块文档。
-pub fn dispatch(action: &ServiceAction, global: &GlobalArgs) -> anyhow::Result<()> {
+pub fn dispatch(action: &ServiceAction, app: &'static dyn ServiceApp) -> anyhow::Result<()> {
+    let id = app.identity();
     match action {
-        ServiceAction::Run => host::run(global),
+        ServiceAction::Run => host::run(app),
         ServiceAction::Install(args) => {
-            require_admin("install")?;
-            scm::install(args, global)
+            require_admin(id, "install")?;
+            scm::install(id, args, &app.run_args(), &app.log_target())
         }
         ServiceAction::Uninstall => {
-            require_admin("uninstall")?;
-            scm::uninstall()
+            require_admin(id, "uninstall")?;
+            scm::uninstall(id)
         }
         ServiceAction::Start => {
-            require_admin("start")?;
-            scm::start()
+            require_admin(id, "start")?;
+            scm::start(id)
         }
         ServiceAction::Stop => {
-            require_admin("stop")?;
-            scm::stop()
+            require_admin(id, "stop")?;
+            scm::stop(id)
         }
         // 查询只要 `SC_MANAGER_CONNECT` + `SERVICE_QUERY_STATUS`，普通用户就有。
-        ServiceAction::Status => scm::status(),
+        ServiceAction::Status => scm::status(id),
     }
 }
 
@@ -91,12 +230,13 @@ pub fn dispatch(action: &ServiceAction, global: &GlobalArgs) -> anyhow::Result<(
 /// 服务照样装不上。提前自查的唯一目的是错误信息：`ERROR_ACCESS_DENIED` 经
 /// `io::Error` 格式化出来是「拒绝访问。 (os error 5)」，看到它的人无从知道
 /// 问题出在没用管理员命令提示符，还是出在组策略、还是出在服务名被占用。
-fn require_admin(what: &str) -> anyhow::Result<()> {
+fn require_admin(id: &ServiceIdentity, what: &str) -> anyhow::Result<()> {
     if strixmaid_core::platform::windows::is_elevated() {
         return Ok(());
     }
+    let name = id.name;
     bail!(
-        "`strixmaid service {what}` 需要管理员权限。\
+        "对服务 {name} 执行 `service {what}` 需要管理员权限。\
          请在「管理员命令提示符」或管理员 PowerShell 中重新运行；\
          若当前账户不在 Administrators 组内，先换用管理员账户。"
     );
@@ -211,19 +351,40 @@ mod tests {
             eprintln!("当前进程已提升，跳过：这条断言只在未提升的令牌下有意义");
             return;
         }
-        let err = require_admin("install").expect_err("未提升时应当报错");
+        let err = require_admin(&SAMPLE, "install").expect_err("未提升时应当报错");
         let text = err.to_string();
         assert!(text.contains("管理员"), "{text}");
         assert!(text.contains("service install"), "{text}");
     }
 
+    const SAMPLE: ServiceIdentity = ServiceIdentity {
+        name: "Sample",
+        display_name: "示例服务",
+        description: "示例",
+        version: "0.0.0",
+        default_account: "LocalSystem",
+    };
+
     #[test]
-    fn 服务名与显示名不为空且不含分隔符() {
-        assert!(!SERVICE_NAME.is_empty());
-        // SCM 的服务名不允许含正斜杠与反斜杠。
-        assert!(!SERVICE_NAME.contains(['/', '\\']), "{SERVICE_NAME}");
-        assert!(SERVICE_NAME.len() < 256, "SCM 的服务名上限是 256 个字符");
-        assert!(!DISPLAY_NAME.is_empty());
-        assert!(!DESCRIPTION.is_empty());
+    fn 身份自检认得出四种不合法() {
+        assert!(SAMPLE.validate().is_ok());
+
+        let empty_name = ServiceIdentity { name: "", ..SAMPLE };
+        assert!(empty_name.validate().is_err());
+
+        // SCM 的服务名不允许含正斜杠与反斜杠
+        let back = ServiceIdentity {
+            name: r"a\b",
+            ..SAMPLE
+        };
+        assert!(back.validate().is_err(), "反斜杠应被拒");
+        let fwd = ServiceIdentity { name: "a/b", ..SAMPLE };
+        assert!(fwd.validate().is_err(), "正斜杠应被拒");
+
+        let no_display = ServiceIdentity {
+            display_name: "",
+            ..SAMPLE
+        };
+        assert!(no_display.validate().is_err());
     }
 }
