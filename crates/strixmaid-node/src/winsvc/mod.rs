@@ -44,7 +44,6 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use clap::{Args, Subcommand};
-use strixmaid_core::config::Config;
 
 use crate::{ShutdownKind, StartupReporter};
 
@@ -180,15 +179,19 @@ pub trait ServiceApp: Send + Sync + 'static {
     /// [`logging::describe_target`]。
     fn log_target(&self) -> String;
 
-    /// 同步准备：加载配置、把日志落到文件。返回配置与日志文件路径。
+    /// 同步准备：把日志落到文件，返回实际写入的路径。
     ///
     /// **日志必须在这一步就位**——往后的任何输出都只能进文件，服务进程没有 stderr。
-    fn prepare(&self) -> anyhow::Result<(Config, PathBuf)>;
+    ///
+    /// 配置**不**从这里出去。两种模式读的不是同一个文件（server 的 `Config`、
+    /// agent 的 `AgentConfig`），让这个签名认一个具体类型，就等于逼着另一方伪造
+    /// 一个自己根本不用的值。宿主在 [`serve`](ServiceApp::serve) 里读自己那份——
+    /// 代价是 server 会多解析一次 TOML，相对开库与能力探测可以忽略。
+    fn prepare(&self) -> anyhow::Result<PathBuf>;
 
     /// 在宿主建好的运行时里跑完整个服务。
     fn serve(
         &self,
-        config: Config,
         reporter: Arc<dyn StartupReporter>,
         shutdown: Pin<Box<dyn Future<Output = ShutdownKind> + Send>>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;

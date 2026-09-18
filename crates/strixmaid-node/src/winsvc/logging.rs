@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Context as _;
-use strixmaid_core::config::Config;
 
 /// 缺省日志目录。
 ///
@@ -70,10 +69,15 @@ pub fn log_dir_for(data_dir: &Path) -> PathBuf {
 
 /// 初始化服务模式的 tracing 订阅者，返回实际写入的文件路径。
 ///
-/// 过滤器与前台模式完全一致（`crate::log_filter`），只换输出端。ANSI 一律关闭：
-/// 文件里存一堆转义序列既不便 `type`，也不便被日志采集读走。
-pub fn init(config: &Config, log_level_from_cli: bool) -> anyhow::Result<PathBuf> {
-    let dir = log_dir_for(&config.data_dir);
+/// 输出端换成文件，ANSI 一律关闭：文件里存一堆转义序列既不便 `type`，
+/// 也不便被日志采集读走。
+///
+/// 只要 `data_dir` 与一个现成的过滤器，**不要整个 `Config`**：两种服务模式读的
+/// 不是同一个配置文件（server 的 `Config`、agent 的 `AgentConfig`），要一个具体
+/// 类型就会逼着其中一方伪造。过滤器由调用方用 [`crate::log_filter`] 或别的口径
+/// 算好——「日志级别从哪来」本来就是宿主的知识。
+pub fn init(data_dir: &Path, filter: tracing_subscriber::EnvFilter) -> anyhow::Result<PathBuf> {
+    let dir = log_dir_for(data_dir);
     let path = open_target(&dir)?;
     let file = OpenOptions::new()
         .create(true)
@@ -81,7 +85,6 @@ pub fn init(config: &Config, log_level_from_cli: bool) -> anyhow::Result<PathBuf
         .open(&path)
         .with_context(|| format!("打开日志文件失败: {}", path.display()))?;
 
-    let filter = crate::log_filter(config, log_level_from_cli)?;
     // `Mutex<File>` 而不是裸 `File`：tracing 的 fmt 层写一条事件可能分成多次
     // `write`，多个线程同时写会把两条日志绞在一起。`Mutex` 把一条事件的多次写
     // 串起来，代价是一次无竞争的加锁。
@@ -140,11 +143,11 @@ fn rotate_if_large(path: &Path) {
 ///
 /// 配置读不出来时回落到 [`DEFAULT_LOG_DIR`] 并如实按默认值显示——这里宁可
 /// 报一个「默认位置」，也不猜一个可能不存在的路径。
-/// `config` 为 `None` 表示配置读不出来——由调用方判断，因为「配置从哪读」
+/// `data_dir` 为 `None` 表示配置读不出来——由调用方判断，因为「配置从哪读」
 /// 是宿主的知识（server 与 agent 的配置文件不是同一个）。
-pub fn describe_target(config: Option<&Config>) -> String {
-    let dir = match config {
-        Some(c) => log_dir_for(&c.data_dir),
+pub fn describe_target(data_dir: Option<&Path>) -> String {
+    let dir = match data_dir {
+        Some(d) => log_dir_for(d),
         None => PathBuf::from(DEFAULT_LOG_DIR),
     };
     dir.join(LOG_FILE).display().to_string()

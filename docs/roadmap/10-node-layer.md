@@ -182,8 +182,10 @@ crates/strixmaid/src   3,492 行
 2. **`ws/tests.rs` 怎么拆。** 641 行里既有 hub 的单测也有 agent 协议的单测，实施时按被测对象分，拆不开的留在 server 并在报告里说明。
 3. ~~**`Node::start` / `Node::shutdown` 未抽取**（§3.3 的实施偏离）。~~ **已做（2026-09-18，第二次提交）**，见 §3.3。`11-multi-host.md` 的这块地基铺好了。
 
-4. **监听失败时不走 `node.shutdown()`。** `serve_with` 里 `TcpListener::bind` 的 `?` 直接返回，此时 `Node` 已经起来了，SQLite 没被干净关闭，下次启动要做一次 WAL 恢复。端口被占是最常见的启动失败，所以这条路径不算冷门。搬家前后行为一致，因此本方案刻意不改——抽出 `Node::shutdown` 之后修它只是三行，但那是一处**行为变化**，不该混在以「OpenAPI 逐字节相同」为门槛的提交里。
+4. ~~**监听失败时不走 `node.shutdown()`。**~~ **已修（2026-09-18，第三次提交）。** `bind` 失败时先 `node.shutdown(Graceful)` 再返回。回归测试断言的是 `-wal` 不残留——那是「有没有干净关库」唯一在外部看得见的痕迹。
 
-5. **`ServiceApp::prepare` 的返回类型绑死在 `Config` 上。** Agent 模式读的是 `agent.toml`，形状与 `Config` 不同，现在的做法是构造一个**只填了 `data_dir`、仅供定位日志落点**的 `Config`，真实配置在 `serve` 里再读一次（见 `crates/strixmaid/src/winsvc_app.rs`）。能跑但别扭，干净的做法是让 `prepare` 返回一个宿主自定义的关联类型。
+5. ~~**`ServiceApp::prepare` 的返回类型绑死在 `Config` 上。**~~ **已修（同上）。** 根因不在 `prepare`，在 `winsvc::logging` 上：它要一整个 `Config`，却只用 `data_dir` 与日志级别两样。把 `logging::init` 改成收 `(&Path, EnvFilter)` 之后，`prepare` 只需返回日志路径，`serve` 各读各的配置，伪造的 `Config` 随之消失。
+
+   顺带查出一个**真 bug**：原先 `log_target()` 不分模式，一律去读 server 的配置。于是 `service install --mode agent --config agent.toml` 打印的「日志去哪了」是 `C:\ProgramData\StrixMaid\logs`——把 agent.toml 当 server 配置解析失败后静默回落的默认值，连命令行上的 `--data-dir` 都一并吞掉。照着那个路径去看，看到的是空目录。已用变异验证：把 `log_target` 换回旧写法，新加的两条测试立刻转红。
 
 6. ~~**`debug/` 的归属。**~~ **已定**：归 node（`crates/strixmaid-node/src/debug/`）。担心的「耦合到 `embed`」没有发生——它渲染的全是 node 自己的状态。

@@ -164,9 +164,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 /// `SERVICE_START_PENDING` 上报）；`shutdown` 一旦解析出 [`ShutdownKind`]
 /// 就进入关停，档位决定后面还等多久。
 ///
-/// 监听失败时直接 `?` 返回，**不**走 `node.shutdown()`：这与搬家前的行为一致
-/// （端口被占时留下未干净关闭的 SQLite，下次启动做一次 WAL 恢复）。要改的话
-/// 见 `docs/roadmap/10-node-layer.md` §7。
 pub(crate) async fn serve_with(
     config: Config,
     reporter: Arc<dyn StartupReporter>,
@@ -211,11 +208,17 @@ pub(crate) async fn serve_with(
         },
     );
 
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("无法监听 {listen}"))?;
-    let local_addr = listener.local_addr().context("获取监听地址失败")?;
-    tracing::info!(%local_addr, "开始接受请求");
+    // 绑端口。失败时**先把 node 收干净再返回**：此刻库已经开着、worker 可能已派生，
+    // 直接 `?` 走人会把 SQLite 留在未干净关闭的状态（`-wal` 残留，下次启动做一次
+    // WAL 恢复）。端口被占是最常见的启动失败，这条路径不冷门。
+    let listener = match bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            node.shutdown(ShutdownKind::Graceful).await;
+            return Err(e);
+        }
+    };
+    tracing::info!(local_addr = %listener.local_addr().unwrap_or(listen), "开始接受请求");
     reporter.ready();
 
     // 关停档位要跨两处读：交给 axum 的 graceful-shutdown future 在那里写入，
@@ -277,6 +280,16 @@ pub(crate) async fn serve_with(
     // 周期任务、落盘、关 worker、关库，按档位做多做少，全在 node 里。
     node.shutdown(kind).await;
     Ok(())
+}
+
+/// 绑监听端口。
+///
+/// 单拎出来是为了让 [`serve_with`] 里那句 `match` 短到一眼能看出「失败要先收 node」
+/// ——这正是这条路径原先漏掉的事。
+async fn bind(addr: std::net::SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("无法监听 {addr}"))
 }
 
 /// `worker` 子命令：由 helper 完成认证与身份切换后拉起，通过命令行上指定的
@@ -449,5 +462,62 @@ async fn shutdown_signal() -> ShutdownKind {
             tracing::warn!("系统正在关机，只给几秒，走紧急关停");
             ShutdownKind::Urgent
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 占住一个端口并返回它，用来逼 `serve_with` 在 `bind` 上失败。
+    async fn occupied_port() -> (tokio::net::TcpListener, u16) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    }
+
+    /// 端口被占时也要把 node 收干净。
+    ///
+    /// `Node::start` 成功之后 `bind` 才失败，此时库已经开着。要是直接 `?` 返回，
+    /// SQLite 不会走到 `close()`，`-wal` 留在盘上（下次启动做一次 WAL 恢复）。
+    /// 端口被占是最常见的启动失败，这条路径不冷门。
+    ///
+    /// 断言用 `-wal` 是否残留来判「有没有干净关库」：硬杀进程留下的 `-wal`
+    /// 有几百 KB，正常 `close()` 会做 checkpoint 并把它删掉。
+    #[tokio::test]
+    async fn 监听失败也要干净关停() {
+        let dir = std::env::temp_dir().join(format!(
+            "strixmaid-bindfail-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (_hold, port) = occupied_port().await;
+        let config = Config {
+            data_dir: dir.clone(),
+            listen: format!("127.0.0.1:{port}"),
+            ..Config::default()
+        };
+
+        let err = serve_with(
+            config,
+            Arc::new(NoReporter),
+            std::future::pending::<ShutdownKind>(),
+        )
+        .await
+        .expect_err("端口被占，serve_with 应当报错");
+        assert!(
+            format!("{err:#}").contains("无法监听"),
+            "错误应当说清楚是监听失败：{err:#}"
+        );
+
+        assert!(dir.join("strixmaid.db").exists(), "库确实建过");
+        assert!(
+            !dir.join("strixmaid.db-wal").exists(),
+            "库没有被干净关闭：-wal 还在。node 已经起来了，bind 失败时要先 shutdown"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
