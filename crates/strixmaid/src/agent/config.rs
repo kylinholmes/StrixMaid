@@ -148,8 +148,11 @@ impl AgentConfig {
 
     /// 同上，外加一层命令行覆盖（优先级最高，见 `design.md` §12）。
     ///
-    /// `cli` 序列化出来的 `None` 字段会被 figment 跳过，不会覆盖下层——
-    /// 所以没给的参数不会把配置文件里的值抹成空。
+    /// `cli` 经 [`strixmaid_core::config::cli_layer`] 转换，它会**递归剔除所有
+    /// `None` / 空值**。这一步不能省：clap 的可选参数未指定时序列化成 `null`，
+    /// 直接交给 figment 会把配置文件与环境变量里的值覆盖成空，而且报的错是
+    /// 「invalid type: found option, expected path string」这种看不出因果的话。
+    /// core 那边的文档管它叫「figment 分层配置里最常见的坑」，确实。
     pub fn load_with<T: serde::Serialize>(
         path: Option<&Path>,
         cli: Option<&T>,
@@ -171,7 +174,7 @@ impl AgentConfig {
         }
         let mut figment = figment.merge(Env::prefixed("STRIXMAID_AGENT_").split("__"));
         if let Some(cli) = cli {
-            figment = figment.merge(Serialized::defaults(cli));
+            figment = figment.merge(strixmaid_core::config::cli_layer(cli)?);
         }
         let cfg: AgentConfig = figment
             .extract()
@@ -295,6 +298,85 @@ fn machine_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 只为 `load_with` 的两条用例造一个临时配置文件。
+    ///
+    /// 不引 `tempfile`：整个仓库没有这个依赖，为两条测试加一个不划算。
+    /// 名字带进程 id 与用例名，并发跑也不会撞。
+    struct TempToml(PathBuf);
+
+    impl TempToml {
+        fn new(tag: &str, body: &str) -> TempToml {
+            let p = std::env::temp_dir().join(format!(
+                "strixmaid-agent-{}-{}.toml",
+                std::process::id(),
+                tag
+            ));
+            std::fs::write(&p, body).expect("写临时配置");
+            TempToml(p)
+        }
+    }
+
+    impl Drop for TempToml {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const FILE_BODY: &str =
+        "server_url = \"ws://from-file:9700\"\ntoken = \"t\"\ndata_dir = \"/from/file\"\n";
+
+    #[derive(serde::Serialize)]
+    struct Overrides {
+        server_url: Option<String>,
+        data_dir: Option<PathBuf>,
+    }
+
+    /// 命令行层必须经 `cli_layer` 剔空，否则未指定的可选参数会把下层覆盖成空。
+    ///
+    /// 2026-09-17 踩过：`load_with` 里直接 `Serialized::defaults(cli)`，于是
+    /// `--data-dir` 没给时 `Option::None` 被当成一个值序列化进去，figment 报
+    /// 「invalid type: found option, expected path string」——一句看不出因果的话。
+    /// 本机从没真正起过 agent（只测了 `config example` 与参数拒绝），
+    /// 直到 CI 的 07 验收里 agent 起不来才暴露。
+    ///
+    /// 这条钉的就是「全 None 的覆盖层等于没有覆盖层」。
+    #[test]
+    fn 全空的命令行层不覆盖配置文件里的值() {
+        let f = TempToml::new("allnone", FILE_BODY);
+        let cfg = AgentConfig::load_with(
+            Some(&f.0),
+            Some(&Overrides {
+                server_url: None,
+                data_dir: None,
+            }),
+        )
+        .expect("全 None 的命令行层不该让解析失败");
+
+        assert_eq!(cfg.server_url, "ws://from-file:9700");
+        assert_eq!(cfg.data_dir, PathBuf::from("/from/file"));
+    }
+
+    /// 给了值就要盖住文件里的；没给的那项不受影响。
+    #[test]
+    fn 命令行给的值优先于配置文件() {
+        let f = TempToml::new("given", FILE_BODY);
+        let cfg = AgentConfig::load_with(
+            Some(&f.0),
+            Some(&Overrides {
+                server_url: Some("ws://from-cli:9700".into()),
+                data_dir: None,
+            }),
+        )
+        .expect("解析");
+
+        assert_eq!(cfg.server_url, "ws://from-cli:9700", "命令行该盖住文件");
+        assert_eq!(
+            cfg.data_dir,
+            PathBuf::from("/from/file"),
+            "没给的那项仍取文件里的"
+        );
+    }
 
     fn from_toml(toml: &str) -> anyhow::Result<AgentConfig> {
         let cfg: AgentConfig = Figment::from(Serialized::defaults(AgentConfig::default()))
