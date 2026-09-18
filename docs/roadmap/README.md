@@ -13,6 +13,7 @@
 | `09-ci-verification.md` | 把 07 能自动化的部分搬进 CI 的分期方案 | 06、07 | 中 |
 | `10-node-layer.md` | 抽出 `strixmaid-node`：把 server 里的业务逻辑变成可被两个宿主装载的 AgentCore。纯搬家，行为零变化 | 无 | 大 |
 | `11-multi-host.md` | 多主机：yamux 管道、`/nodes/<id>` 路由、SSH 远程推装、B 侧会话与审计 | 10 | 大 |
+| `12-workspace.md` | 工作区：终端与文件合成一块，cwd 双向联动；含一个必须先修的终端退出信号 bug。分 A–D 四期 | 无 | 大 |
 
 已完成并删除的方案（内容已落进代码与注释，需要考据走 git 历史）：`01-worker-execution`、`02-audit`、`04-files-and-ws-channels`、`05-agent`。其中 `05-agent` 描述的「Agent 只读」形态已被 `11-multi-host.md` 取代。
 
