@@ -16,9 +16,9 @@
             ├── install.ps1
             └── uninstall.ps1
 
-    发布物里【不含】strixmaid-agent.exe。Windows 侧的服务宿主（`service`
-    子命令族）只做在 strixmaid-server 里，agent 没有被 SCM 托管的入口，
-    装进来也只能手工前台运行——那不是可交付的形态。补上服务宿主之后再说。
+    不再有单独的 strixmaid-agent.exe：2026-09-17 起 Agent 与 Server 是同一个
+    二进制的两种模式（design.md §11）。`strixmaid agent` 即 Agent 模式，
+    `strixmaid service --mode agent install` 把它注册成 StrixMaidAgent 服务。
 
     为什么 config.example.toml 也进包：它是给人在安装【之前】读的，
     好知道装完会得到什么。install.ps1 不会用这一份，而是用装好的
@@ -83,7 +83,7 @@ if (-not (Test-Path (Join-Path $repoRoot 'web\dist\index.html'))) {
 Write-Host "构建 $Configuration（$target）..." -ForegroundColor Cyan
 Push-Location $repoRoot
 try {
-    $cargoArgs = @('build', '--target', $target, '-p', 'strixmaid-server', '-p', 'strixmaid-helper')
+    $cargoArgs = @('build', '--target', $target, '-p', 'strixmaid', '-p', 'strixmaid-helper')
     if ($Configuration -eq 'release') { $cargoArgs += '--release' }
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }

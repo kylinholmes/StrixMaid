@@ -1342,17 +1342,46 @@ mod tests {
             return;
         }
 
-        let page = p
-            .query(&LogQuery {
-                limit: Some(20),
-                since: Some(now_unix() - 120),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        // 统一日志约 250 行/秒，两分钟窗口不可能是空的。真空了说明读取路径
-        // 出了问题却被当成「没有日志」——那正是本实现最该防住的谎报。
-        assert!(!page.entries.is_empty(), "最近两分钟不可能没有日志");
+        // 逐级放宽窗口再断言。
+        //
+        // 原先只查两分钟并硬断言非空，理由是「统一日志约 250 行/秒」。那个前提在
+        // 开发机上成立，在 GitHub 的 macOS 临时 runner 上不成立——2026-09-18 红过
+        // 一次，原样重跑即过，是偶发。
+        //
+        // 但这条断言要防的东西不能丢：**读取路径出了问题却被当成「没有日志」**。
+        // 关键在于，读取路径坏掉时**每一个窗口都会是空的**，所以「存在一个非空的
+        // 窗口」与原断言防的是同一件事，只是不再假定机器一定忙。
+        //
+        // 只放宽到一小时，不再往上。`show()` 会把 `log show` 的**每一行**都读一遍、
+        // 只在尾缓冲里留最后 limit 条——`limit` 截的是结果，不是工作量。窗口多宽就
+        // 要读多少数据，而 QUERY_TIMEOUT 只有 30 秒。放宽到一天的话，「此刻安静、
+        // 一天下来很忙」的机器（闲置几分钟的开发笔记本就是）会去读一整天的统一
+        // 日志，很可能撞上超时——那会把清晰的「窗口为空」变成含糊的「log show 超时」，
+        // 比原来的偶发更难查。
+        //
+        // 一小时足够覆盖开机：CI 临时机起来才几分钟，但开机本身就会产生大量日志。
+        const WINDOWS: [(i64, &str); 2] = [(120, "两分钟"), (3600, "一小时")];
+        let mut found = None;
+        for (secs, label) in WINDOWS {
+            let page = p
+                .query(&LogQuery {
+                    limit: Some(20),
+                    since: Some(now_unix() - secs),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if !page.entries.is_empty() {
+                found = Some((page, label));
+                break;
+            }
+            eprintln!("{label}窗口为空，放宽重试");
+        }
+        let (page, window) = found.expect(
+            "两分钟与一小时的窗口都空：读取路径把失败当成了「没有日志」——\
+             开机本身就会产生大量统一日志，一小时内一条都没有不可能",
+        );
+
         assert!(page.entries.len() <= 20);
         // 由新到旧
         for w in page.entries.windows(2) {
@@ -1362,7 +1391,7 @@ mod tests {
             );
         }
         eprintln!(
-            "最近一条：{} {}",
+            "{window}窗口，最近一条：{} {}",
             page.entries[0].identifier.as_deref().unwrap_or("?"),
             page.entries[0].message.chars().take(60).collect::<String>()
         );

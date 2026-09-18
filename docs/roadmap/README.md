@@ -6,15 +6,15 @@
 
 | 文件 | 内容 | 前置 | 规模 |
 |---|---|---|---|
-| `01-worker-execution.md` | 请求经 worker 执行，闭合授权模型；流式 RPC；`scope=user` 跨用户；capability user 层实测 | 无 | 大 |
-| `02-audit.md` | 写操作与认证事件的审计写入、`GET /audit`、保留期 | 01 | 小 |
-| `03-terminal.md` | PTY 终端：创建、附着、会话保持、回看缓冲、调整尺寸、超时 | 01 | 大 |
-| `04-files-and-ws-channels.md` | `GET /files`、`GET /files/content`；`system.health` 与 `processes.live` 频道 | 01 | 中 |
-| `05-agent.md` | `strixmaid-agent`：本地采集与存储、向 Server 推送、断连补发、Server 端汇聚 | 无 | 中 |
-| `06-packaging.md` | musl 静态构建、helper 的 glibc 构建、`strixmaid.service`、pam.d 安装、`ui` feature、发布产物 | 无 | 中 |
+| `03-terminal.md` | PTY 终端：创建、附着、会话保持、回看缓冲、调整尺寸、超时 | 无 | 大 |
+| `06-packaging.md` | musl 静态构建、helper 的 glibc 构建、`strixmaid.service`、pam.d 安装、`ui` feature、发布产物；macOS 与 Windows 的补充 | 无 | 中 |
 | `07-verification.md` | root 环境、浏览器、长时间运行、release 性能的验证清单与预期结果 | 06 | — |
-| `08-metrics-and-panel.md` | 采集项从 58 种裁到 34 种（含新增 GPU）；按 Win10 任务管理器密度重做性能面板；资源组与聚合语义。配套可交互样稿 `08-metrics-and-panel.mockup.html` | 无 | 大 |
-| `09-ci-verification.md` | 把 07 能自动化的部分搬进 CI 的分期方案：P1 两发行版每次 PR（已实现）、P2 慢档定时、P3 长时运行、P4/P5 明确不进通用 CI | 06、07 | 中 |
+| `08-metrics-and-panel.md` | 采集项裁剪与性能面板重做；配套可交互样稿 `08-metrics-and-panel.mockup.html` | 无 | 大 |
+| `09-ci-verification.md` | 把 07 能自动化的部分搬进 CI 的分期方案 | 06、07 | 中 |
+| `10-node-layer.md` | 抽出 `strixmaid-node`：把 server 里的业务逻辑变成可被两个宿主装载的 AgentCore。纯搬家，行为零变化 | 无 | 大 |
+| `11-multi-host.md` | 多主机：yamux 管道、`/nodes/<id>` 路由、SSH 远程推装、B 侧会话与审计 | 10 | 大 |
+
+已完成并删除的方案（内容已落进代码与注释，需要考据走 git 历史）：`01-worker-execution`、`02-audit`、`04-files-and-ws-channels`、`05-agent`。其中 `05-agent` 描述的「Agent 只读」形态已被 `11-multi-host.md` 取代。
 
 ## 实施约定
 

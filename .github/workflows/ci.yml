@@ -20,7 +20,7 @@ jobs:
   # web/dist 不在 git 里（它是 web/src 的派生物，跟踪必然漂移——曾经发生过：
   # deb 装出来的 UI 停在几十个提交之前）。而 rust-embed 的 `folder` 在 **debug 下
   # 同样**于编译期求值，目录不存在就直接报 "folder does not exist"，所以凡是要编
-  # strixmaid-server 的 job 都得先有 web/dist，不只是出包那几个。原先每个这样的
+  # strixmaid 的 job 都得先有 web/dist，不只是出包那几个。原先每个这样的
   # job 各自构建一遍，同一份产物在一次 workflow 里被算了四次；现在集中在这里构建
   # 一次，下游用 artifact 取走。
   #
@@ -97,13 +97,23 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: clippy（无 UI 变体也必须干净）
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo clippy -p strixmaid-server --no-default-features --all-targets -- -D warnings
+        run: cargo clippy -p strixmaid --no-default-features --all-targets -- -D warnings
       # 先 build 再 test：有用例会 spawn 真实的 helper 与 worker 可执行文件，
       # 它们得先存在于 target 目录里。
       - name: build
         run: cargo build --workspace
       - name: test
         run: cargo test --workspace
+      # 结构性验收（scripts/acceptance.sh 的静态部分）。接进 CI 是 2026-09-17 补的：
+      # 此前它只在人手动跑时才执行，结果是——路径在 node 抽取后指着已经搬走的目录、
+      # 「路由不得持有 provider」那条在图标功能落地后就与设计不符，两件事都没人发现。
+      # 一个没人跑的检查比没有检查更糟：它提供的是假的保证。
+      #
+      # 只在 ubuntu 上跑：断言的是仓库结构，与平台无关，三个平台各跑一遍是浪费。
+      # 需要 token 的动态部分会自行跳过（报「未测」，不计失败）。
+      - name: 结构性验收
+        if: matrix.os == 'ubuntu-24.04'
+        run: bash scripts/acceptance.sh
       # 安装脚本必须在 Windows **自带**的 PowerShell 5.1 下可解析。
       # `shell: powershell` 就是 5.1（`pwsh` 才是 7），所以这一步同时钉住两件事：
       # 一是不用 7 才有的语法，二是文件编码——5.1 读没有 BOM 的 .ps1 时按系统
@@ -228,12 +238,12 @@ jobs:
           name: web-dist
           path: web/dist
       - name: 构建（release）
-        run: cargo build --release --target aarch64-apple-darwin -p strixmaid-server -p strixmaid-agent -p strixmaid-helper
+        run: cargo build --release --target aarch64-apple-darwin -p strixmaid -p strixmaid-helper
       - name: 断言只有 arm64（不做 universal，也不许混进 x86_64）
         # lipo -archs 对单架构二进制只输出一个词。哪天误开了 universal、或者误用了
         # x86_64 目标，这里立刻报出来，而不是等用户装完发现体积翻倍或者跑不起来。
         run: |
-          for bin in strixmaid strixmaid-agent strixmaid-helper; do
+          for bin in strixmaid strixmaid-helper; do
             f="target/aarch64-apple-darwin/release/$bin"
             archs=$(lipo -archs "$f")
             echo "$f: $archs"
@@ -244,7 +254,6 @@ jobs:
           name: strixmaid-macos-aarch64
           path: |
             target/aarch64-apple-darwin/release/strixmaid
-            target/aarch64-apple-darwin/release/strixmaid-agent
             target/aarch64-apple-darwin/release/strixmaid-helper
 
   # macOS 发布 tar.gz（scripts/package-macos.sh）。产物命名与布局与 Linux 侧的
@@ -310,13 +319,13 @@ jobs:
           name: web-dist
           path: web/dist
       - name: 静态构建
-        run: cargo build --release --target x86_64-unknown-linux-musl -p strixmaid-server -p strixmaid-agent
+        run: cargo build --release --target x86_64-unknown-linux-musl -p strixmaid
       - name: 断言静态链接
         # Rust 的 musl 目标默认产出 static-pie，file 对它的措辞是 "static-pie linked"
         # 而非 "statically linked"——两种都算静态。真正要挡的是 "dynamically linked"，
         # 所以正面匹配之外再显式否定一次，避免哪天措辞再变就悄悄放行。
         run: |
-          for bin in strixmaid strixmaid-agent; do
+          for bin in strixmaid; do
             f="target/x86_64-unknown-linux-musl/release/$bin"
             desc=$(file "$f")
             echo "$desc"
@@ -331,9 +340,8 @@ jobs:
           name: strixmaid-musl-x86_64
           path: |
             target/x86_64-unknown-linux-musl/release/strixmaid
-            target/x86_64-unknown-linux-musl/release/strixmaid-agent
 
-  # 本 job 不需要 web/dist：rust-embed 只在 strixmaid-server 里，helper 不嵌前端，
+  # 本 job 不需要 web/dist：rust-embed 只在 strixmaid 里，helper 不嵌前端，
   # 所以它也不依赖 frontend job。
   build-helper:
     runs-on: ubuntu-24.04
@@ -405,7 +413,6 @@ jobs:
           out="strixmaid-$version-x86_64"
           mkdir -p "$out/packaging/pam.d"
           install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid        "$out/"
-          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid-agent  "$out/"
           install -m 0755 artifacts/strixmaid-helper-gnu228/strixmaid-helper "$out/"
           install -m 0755 packaging/install.sh "$out/packaging/"
           install -m 0644 packaging/strixmaid.service packaging/strixmaid-agent.service "$out/packaging/"
@@ -416,7 +423,7 @@ jobs:
       - name: 自检发布物完整（缺一个文件 install.sh 就会半路失败）
         run: |
           out=$(ls -d strixmaid-*-x86_64)
-          for f in strixmaid strixmaid-agent strixmaid-helper \
+          for f in strixmaid strixmaid-helper \
                    packaging/install.sh packaging/strixmaid.service \
                    packaging/strixmaid-agent.service \
                    packaging/pam.d/strixmaid.debian packaging/pam.d/strixmaid.rhel; do
@@ -451,7 +458,6 @@ jobs:
           debver="${version}+git$(git rev-parse --short HEAD)"
           mkdir -p bins
           install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid          bins/
-          install -m 0755 artifacts/strixmaid-musl-x86_64/strixmaid-agent    bins/
           install -m 0755 artifacts/strixmaid-helper-gnu228/strixmaid-helper bins/
           scripts/package-deb.sh --bins bins --version "$debver" --out dist-deb
       - name: 包内容自检
@@ -491,7 +497,11 @@ jobs:
           strixmaid --version
           test -e /etc/strixmaid/config.toml || { echo "postinst 没生成配置"; exit 1; }
           test -e /etc/pam.d/strixmaid || { echo "缺 pam.d"; exit 1; }
-          dpkg -L strixmaid-agent | grep -q '/usr/bin/strixmaid-agent'
+          # agent 包不带二进制（与 server 是同一个可执行文件的两种模式），
+          # 它装的是 unit 与示例配置，二进制由 Depends 拉来的 strixmaid 提供。
+          dpkg -L strixmaid-agent | grep -q '/lib/systemd/system/strixmaid-agent.service'
+          dpkg -L strixmaid-agent | grep -q 'agent.toml.example'
+          test -x /usr/bin/strixmaid
       - name: agent 无配置时被条件拦下,不是崩溃循环
         # 用户实测踩过:没配 server_url 时 agent 每 2 秒崩一次刷日志。
         # 现在 unit 有 ConditionPathExists,start 应当直接跳过(inactive)。
@@ -566,5 +576,4 @@ jobs:
         run: |
           check() { s=$(stat -c%s "$1"); echo "$1: $s bytes"; [ "$s" -le "$2" ] || { echo "超出上限 $2"; exit 1; }; }
           check strixmaid-musl-x86_64/strixmaid            $((15 * 1024 * 1024))
-          check strixmaid-musl-x86_64/strixmaid-agent      $(( 8 * 1024 * 1024))
           check strixmaid-helper-gnu228/strixmaid-helper   $(( 1 * 1024 * 1024))

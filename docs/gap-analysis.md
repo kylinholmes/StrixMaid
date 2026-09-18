@@ -81,6 +81,10 @@ PAM 登录的用户重输密码即可获得 root worker。
 | ~~8~~ | ~~`scope=user` 跨用户~~ | **随 #1 一并解决**：worker 以登录用户身份运行，`scope=user` 连的就是它自己的 session bus，不需要额外机制 | `01-worker-execution.md` §4.2 |
 | ~~9~~ | ~~capability `user` 层的实测探测~~ | **已完成**：`caps.probe_user` 在 user worker 内实测，结果覆盖推导值，按「会话+提权状态」缓存 60 秒 | `01-worker-execution.md` §4.6 |
 
+> 「方案文件」一列里的 `01-worker-execution.md`、`02-audit.md`、`04-files-and-ws-channels.md`、`05-agent.md` 已于 2026-09-17 删除——它们描述的工作全部完成，落地形态与对方案的偏离都写在了代码注释里，要考据走 git 历史。此处保留引用是为了说明当时依据的是哪一份方案。
+>
+> 其中第 6 项（`strixmaid-agent`）的「只读」定位已被 `roadmap/11-multi-host.md` 推翻：Agent 将获得与 Server 等价的完整能力。
+
 ## 4. 已实现但未经验证的部分
 
 以下内容有代码、有单元测试，但从未在其目标环境中运行过。它们构成当前最大的风险面。

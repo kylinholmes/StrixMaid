@@ -93,7 +93,7 @@ RC1=$?
 
 echo; echo "======== agent-checks ========"
 docker exec \
-  -e BOB_PW="$BOB_PW" -e AGENT_BIN=/usr/bin/strixmaid-agent \
+  -e BOB_PW="$BOB_PW" -e AGENT_BIN=/usr/bin/strixmaid \
   "$NAME" bash /opt/verify/agent-checks.sh
 RC2=$?
 set -e

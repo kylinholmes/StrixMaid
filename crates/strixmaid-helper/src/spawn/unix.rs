@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn spawn_真实_worker_并完成_whoami() {
         let Some(exe) = find_strixmaid() else {
-            eprintln!("跳过：找不到 strixmaid 二进制（先 cargo build -p strixmaid-server）");
+            eprintln!("跳过：找不到 strixmaid 二进制（先 cargo build -p strixmaid）");
             return;
         };
         let me = nix::unistd::User::from_uid(getuid()).unwrap().unwrap();

@@ -138,7 +138,7 @@ fn windows_resource() {}
 /// 全部取值都是 ASCII。`rc.exe` 默认按系统 ANSI 代码页读文件，中文在
 /// 非中文 Windows 上会变成乱码，而这些字符串正是「属性」页显示的内容。
 ///
-/// 与 `crates/strixmaid-server/build.rs` 里的同名函数是同一份逻辑。构建脚本
+/// 与 `crates/strixmaid/build.rs` 里的同名函数是同一份逻辑。构建脚本
 /// 之间无法共享代码（除非为此单开一个 crate），两份各二十行的重复比多一个
 /// 只被 build.rs 用到的 crate 更划算。
 #[cfg(windows)]

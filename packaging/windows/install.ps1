@@ -58,7 +58,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 服务名。与 crates/strixmaid-server/src/service.rs 的 SERVICE_NAME 同一个值；
+# 服务名。与 crates/strixmaid/src/winsvc_app.rs 的 SERVER.name 同一个值；
 # uninstall.ps1 在 exe 已被删掉时要用它兜底。
 $ServiceName = 'StrixMaid'
 

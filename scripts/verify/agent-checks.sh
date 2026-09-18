@@ -2,7 +2,8 @@
 # 05-agent.md §5.2 的双进程验收：Agent 连 Server、补发、重连无空洞。
 #
 # 在 root 环境里运行（要能登录 + 提权登记节点）。Server 已在 $BASE 跑着。
-# 需要 strixmaid-agent 二进制在 PATH（或 $AGENT_BIN）。
+# 需要 strixmaid 二进制在 PATH（或 $AGENT_BIN）。2026-09-17 起 Agent 与 Server
+# 是同一个二进制的两种模式，所以这里跑的是 `strixmaid agent`。
 #
 # 与 §5.2 的偏离：原文「等 2 分钟」这里参数化为 $WAIT（默认 150s），
 # 并把「停 Server 3 分钟」压成一次重启（工装里 Server 由 systemd 管，
@@ -13,7 +14,7 @@ set -uo pipefail
 
 BASE="${BASE:-http://127.0.0.1:9700}"
 BOB="${BOB:-bob}"; BOB_PW="${BOB_PW:-bobpw}"
-AGENT_BIN="${AGENT_BIN:-$(command -v strixmaid-agent || echo /usr/bin/strixmaid-agent)}"
+AGENT_BIN="${AGENT_BIN:-$(command -v strixmaid || echo /usr/bin/strixmaid)}"
 NODE_ID="${NODE_ID:-test}"
 WAIT="${WAIT:-150}"
 DATA="${AGENT_DATA:-/var/lib/strixmaid-agent-verify}"
@@ -35,7 +36,7 @@ login()   { STRIX_PASSWORD="$2" "$HERE/login.sh" login "$BASE" "$1"; }
 elevate() { STRIX_PASSWORD="$2" "$HERE/login.sh" elevate "$BASE" "$1" ""; }
 
 command -v jq >/dev/null || { echo "缺少 jq" >&2; exit 2; }
-[ -x "$AGENT_BIN" ] || { echo "找不到 strixmaid-agent（$AGENT_BIN）" >&2; exit 2; }
+[ -x "$AGENT_BIN" ] || { echo "找不到 strixmaid（$AGENT_BIN）" >&2; exit 2; }
 
 # ---- 登记节点（需提权）----
 BTOK="$(login "$BOB" "$BOB_PW")" || { bad "bob 登录失败"; exit 1; }
@@ -72,7 +73,7 @@ sync_interval_secs = 5
 interval_secs = 2
 EOF
 
-"$AGENT_BIN" --config "$CFG" >"$DATA/agent.log" 2>&1 &
+"$AGENT_BIN" agent --config "$CFG" >"$DATA/agent.log" 2>&1 &
 AGENT_PID=$!
 trap 'kill "$AGENT_PID" 2>/dev/null || true; code DELETE "/api/v1/nodes/$NODE_ID" -H "Authorization: Bearer $ETOK" >/dev/null 2>&1 || true' EXIT
 

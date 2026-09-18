@@ -5,7 +5,7 @@
 #   scripts/verify/run-in-podman.sh --dist <解压后的发布目录> [--distro ubuntu|rocky] [--long]
 #
 # <发布目录> 是 scripts/package.sh 产出的 tar.gz 解压后的那层，含：
-#   strixmaid  strixmaid-agent  strixmaid-helper  packaging/{*.service,install.sh,pam.d/*}
+#   strixmaid  strixmaid-helper  packaging/{*.service,install.sh,pam.d/*}
 # 静态 musl 二进制在任何发行版容器里都能跑，这正是它的用处。
 #
 # 前置：rootless podman、cgroup v2、能访问镜像与软件源。
@@ -75,7 +75,7 @@ RC1=$?
 
 echo; echo "======== agent-checks ========"
 podman exec \
-  -e BOB_PW="$BOB_PW" -e AGENT_BIN=/usr/bin/strixmaid-agent \
+  -e BOB_PW="$BOB_PW" -e AGENT_BIN=/usr/bin/strixmaid \
   "$NAME" bash /opt/verify/agent-checks.sh
 RC2=$?
 set -e
