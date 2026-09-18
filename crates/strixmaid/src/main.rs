@@ -42,8 +42,7 @@ use clap::Parser as _;
 use strixmaid_core::config::{Config, cli_layer};
 use tracing_subscriber::EnvFilter;
 
-use strixmaid_node::state::AppState;
-use strixmaid_node::{NoReporter, ShutdownKind, StartupReporter, routes, ws};
+use strixmaid_node::{NoReporter, ShutdownKind, StartupReporter};
 
 use crate::cli::{Cli, Command, ConfigAction, GlobalArgs, WorkerArgs};
 
@@ -158,27 +157,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     serve_with(config, Arc::new(NoReporter), shutdown_signal()).await
 }
 
-/// 启动 HTTP 服务：打开存储 → 会话管理 → 指标引擎 → provider 探测 → 路由。
+/// 起一台主机的运行时（`strixmaid_node::Node`），再把它的 Router 摆到一个 TCP
+/// 端口上。**只有后半句是 Server 独有的**——前半句 Agent 模式也要做，所以它在 node。
 ///
 /// `reporter` 在启动的各个阶段被回调（服务模式下折算成 SCM 的
 /// `SERVICE_START_PENDING` 上报）；`shutdown` 一旦解析出 [`ShutdownKind`]
 /// 就进入关停，档位决定后面还等多久。
+///
+/// 监听失败时直接 `?` 返回，**不**走 `node.shutdown()`：这与搬家前的行为一致
+/// （端口被占时留下未干净关闭的 SQLite，下次启动做一次 WAL 恢复）。要改的话
+/// 见 `docs/roadmap/10-node-layer.md` §7。
 pub(crate) async fn serve_with(
     config: Config,
     reporter: Arc<dyn StartupReporter>,
     shutdown: impl Future<Output = ShutdownKind> + Send + 'static,
 ) -> anyhow::Result<()> {
-    use strixmaid_core::capability::CapabilityRegistry;
-    use strixmaid_core::metrics::MetricsEngine;
-    use strixmaid_core::providers::log::pick_log_provider;
-    use strixmaid_core::providers::process::ProcProvider;
-    use strixmaid_core::providers::service::icon::ServiceIcons;
-    use strixmaid_core::providers::service::pick_service_provider;
-    use strixmaid_core::providers::system::HostProvider;
-    use strixmaid_core::session::SessionManager;
-    use strixmaid_core::terminal::TerminalRegistry;
-    use strixmaid_core::store::Store;
-
     let listen = config.listen_addr().context("监听地址不合法")?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -187,170 +180,34 @@ pub(crate) async fn serve_with(
         "StrixMaid 启动中"
     );
 
-    // ---- 存储 ----
-    reporter.stage("打开数据库");
-    tokio::fs::create_dir_all(&config.data_dir)
-        .await
-        .with_context(|| format!("创建数据目录失败: {}", config.data_dir.display()))?;
-    let store = Store::open_with(&config.db_path(), config.metrics.retention)
-        .await
-        .context("打开数据库失败")?;
-
-    // ---- 会话（PAM helper）----
-    reporter.stage("会话管理");
-    let sessions = SessionManager::with_process_helper(store.clone(), &config)
-        .await
-        .context("初始化会话管理失败")?;
-    let sweeper = sessions.spawn_sweeper(std::time::Duration::from_secs(5));
-    let auth = strixmaid_node::auth::AuthState::new(sessions.clone(), config.trusted_proxies.clone());
-
-    // ---- 终端注册表（roadmap/03 §4.3）----
+    // ---- Agent 汇聚 ----
     //
-    // 装进 SessionManager：登出与空闲超时都要连带关掉该会话的终端，否则会留下
-    // 一个没有主人的登录 shell。装在这里而不是构造时传入，是因为两者互不依赖。
-    let terminals = TerminalRegistry::new(config.terminal.clone());
-    sessions.set_terminal_registry(terminals.clone());
-    // 非 REST 的关闭（空闲、shell 自退、登出）经观察者写审计（roadmap/03 §7）。
-    terminals.set_observer(Arc::new(strixmaid_node::auth::audit::TerminalAudit::new(
-        store.clone(),
-        strixmaid_core::session::LOCAL_NODE_ID,
-    )));
-    // 空闲终端回收。周期取 30 秒：空闲上限默认 30 分钟，这个粒度足够，
-    // 又不至于让一个开着 root shell 的终端在超时后还多活很久。
-    let terminal_sweeper = {
-        let reg = terminals.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
-            loop {
-                ticker.tick().await;
-                let n = reg.sweep_idle().await;
-                if n > 0 {
-                    tracing::info!(count = n, "回收空闲终端");
-                }
-            }
-        })
-    };
-
-    // ---- 审计保留期清理（roadmap/02 §4.4）----
-    let audit_pruner =
-        routes::audit::spawn_prune_task(store.clone(), config.audit.retention_secs());
-
-    // ---- 指标引擎（常驻采集，与登录无关，§2.2）----
-    reporter.stage("指标引擎");
-    let engine = MetricsEngine::start(&config.metrics, Some(store.clone()));
-
-    // ---- provider 选择与能力探测 ----
-    //
-    // 请求**不再**经过这里的 provider（`roadmap/01` §4.3：一律走 worker）。
-    // 主进程仍然构造它们，只为四件与登录用户无关的事：启动期的 system 层能力探测、
-    // `services.changed` 的事件源、后续 `system.health` 频道的定时检查，
-    // 以及进程图标的缓存与预热（见下面的 `icon_warmer`）。
-    reporter.stage("能力探测");
-    let svc = pick_service_provider().await;
-    let log = pick_log_provider().await;
-    let proc = ProcProvider::new();
-    let mut registry = CapabilityRegistry::from_config(&config);
-    registry
-        .register(Box::new(HostProvider::new()))
-        .register(Box::new(proc.clone()));
-    if let Some(p) = &svc {
-        registry.register(Box::new(Arc::clone(p)));
-    }
-    if let Some(p) = &log {
-        registry.register(Box::new(Arc::clone(p)));
-    }
-    let report = registry.probe_all().await;
-    for probe in &report.providers {
-        tracing::info!(provider = probe.id, probe = ?probe.probe, "能力探测");
-    }
-    tracing::info!(caps = ?report.system, "system 能力");
-
-    // ---- Agent 汇聚（roadmap/05）----
+    // Server 独有。node 只认识本机这一个节点，「别的节点」的概念由宿主经
+    // `strixmaid_node::RemoteSnapshots` 注入（依赖倒置）。
+    // 这条 WS 在 `docs/roadmap/11-multi-host.md` 里会长成多路复用的管道。
     let agents = crate::ws_agent::AgentRegistry::new();
 
-    // ---- WS 控制面 ----
-    let hub = Arc::new(ws::Hub::new());
-    hub.register(Arc::new(
-        ws::channels::MetricsLive::new(engine.clone()).with_agents(agents.clone()),
-    ));
-    if let Some(p) = &svc {
-        hub.register(Arc::new(ws::channels::ServicesChanged::new(Arc::clone(p))));
-    }
-    // logs.follow 按会话取 worker，不用主进程的 log provider——**日志的可见范围
-    // 必须随用户**（roadmap/01 §4.4）。这里刻意不加 `if let Some(log)`：
-    // 频道可不可用取决于**那个用户的 worker** 里有没有日志后端，
-    // 主进程自己的探测结果对它没有决定权。
-    hub.register(Arc::new(ws::channels::LogsFollow::new(auth.clone())));
-    // `system.health`：健康是全局事实，主进程每 30 秒重算一次并把 failed units
-    // 并入（roadmap/04 §B.2）。变更才广播，任务随进程关停一起收。
-    let (system_health, health_task) = ws::channels::SystemHealth::start(
-        HostProvider::new(),
-        svc.clone(),
-        std::time::Duration::from_secs(30),
-    );
-    hub.register(Arc::new(system_health));
-    // `processes.live`：按会话投递到 user worker——CPU% 的差分基线在那里，
-    // 与 REST 的 `GET /processes` 共享（roadmap/04 §B.3）。
-    hub.register(Arc::new(ws::channels::ProcessesLive::new(auth.clone())));
-
-    // 未认证可见的主机身份（登录页展示 + 发行版主题色）。取不到不算致命：
-    // 登录页仍能工作，只是身份区退化为空、主题色回落中性灰。
-    let host_identity = match HostProvider::new().system_info().await {
-        Ok(info) => strixmaid_types::capability::HostIdentity {
-            hostname: info.hostname,
-            os_id: info.os.id,
-            os_name: info.os.pretty_name,
-            kernel: info.kernel,
-        },
-        Err(e) => {
-            tracing::warn!(error = %e.message, "主机身份获取失败，登录页身份区将为空");
-            strixmaid_types::capability::HostIdentity::default()
-        }
-    };
-
-    // ---- 进程图标预热（见 `strixmaid_core::providers::process::icon`）----
+    // ---- 这台主机的运行时 ----
     //
-    // **在后台跑，绝不阻塞启动**：`spawn` 之后立刻往下走，服务照常开始接受请求。
-    // 第一轮预热在任务内部完成，之后每 2 分半钟补热一轮（TTL 的一半）。
-    // 本平台不提供图标时（Linux / macOS 的空实现）返回 `None`，一个任务也不起。
-    let icon_warmer = proc.spawn_icon_warmer();
+    // 开库、会话管理、终端注册表、指标引擎、能力探测、WS 频道与五个周期任务，
+    // 起的顺序与关的顺序全在 node 里（`strixmaid_node::Node`）。本函数只负责
+    // 「把它的 Router 摆到一个 TCP 端口上」这件 Server 独有的事。
+    let node = strixmaid_node::Node::start(config, reporter.as_ref(), Some(agents.clone())).await?;
 
     // ---- 路由 ----
     reporter.stage("装配路由");
-    let states = routes::ApiStates {
-        app: AppState::new(),
-        auth: auth.clone(),
-        proc,
-        service_icons: ServiceIcons::new(),
-        capabilities: Arc::new(routes::capabilities::CapabilityState::new(
-            report.system,
-            host_identity,
-            config.session.elevate_groups.clone(),
-            auth.clone(),
-        )),
-        metrics: Arc::new(
-            routes::metrics::MetricsState::new(engine.clone()).with_agents(agents.clone()),
-        ),
-        audit: Arc::new(routes::audit::AuditState::new(store.clone())),
-        terminals: routes::terminals::TerminalState::new(
-            terminals.clone(),
-            auth.clone(),
-            store.clone(),
-        ),
-        files: routes::files::FilesState::new(auth.clone(), &config.files.allowed_roots),
-        // `/nodes` 是 Server 独有的：node 只认识本机这一个节点。经 `extra_protected`
-        // 挂进去，与其余受保护路由同批套鉴权（见 `routes::ApiStates` 的字段说明）。
-        extra_protected: Some(crate::routes_nodes::router(
-            crate::routes_nodes::NodesState::new(store.clone(), agents.clone(), auth.clone()),
-        )),
-    };
+    // `/nodes` 是 Server 独有的：node 只认识本机这一个节点。经 `extra_protected`
+    // 挂进去，与其余受保护路由同批套鉴权（见 `routes::ApiStates` 的字段说明）。
+    let nodes = crate::routes_nodes::router(crate::routes_nodes::NodesState::new(
+        node.store().clone(),
+        agents.clone(),
+        node.auth().clone(),
+    ));
     let router = app::build(
-        states,
-        hub,
-        auth,
+        node.router(Some(nodes)),
         crate::ws_agent::AgentSocketState {
-            store: store.clone(),
-            registry: agents.clone(),
+            store: node.store().clone(),
+            registry: agents,
         },
     );
 
@@ -417,42 +274,8 @@ pub(crate) async fn serve_with(
 
     // ---- 收尾 ----
     //
-    // 周期任务一律直接 abort：它们只是定时器，没有需要落盘的状态。
-    sweeper.abort();
-    terminal_sweeper.abort();
-    health_task.abort();
-    audit_pruner.abort();
-    if let Some(warmer) = icon_warmer {
-        warmer.abort();
-    }
-
-    match kind {
-        ShutdownKind::Graceful => {
-            // 落盘未满分钟、逐个关 worker/helper、关库。
-            engine.stop().await;
-            sessions.shutdown().await;
-            store.close().await;
-            tracing::info!("已优雅退出");
-        }
-        ShutdownKind::Urgent => {
-            // 只保数据：`sessions.shutdown()` 要逐个等 worker 进程退出，
-            // 在只有几秒的时限里既做不完也没必要——进程一退，IPC 端点关闭，
-            // worker 读到 EOF 自行结束。
-            let done = tokio::time::timeout(strixmaid_node::URGENT_CLEANUP, async {
-                engine.stop().await;
-                store.close().await;
-            })
-            .await;
-            if done.is_err() {
-                tracing::error!(
-                    budget = ?strixmaid_node::URGENT_CLEANUP,
-                    "紧急关停：落盘与关库未在时限内完成，可能丢失最后一分钟的指标"
-                );
-            } else {
-                tracing::info!("已紧急退出（未等待 worker 收尾）");
-            }
-        }
-    }
+    // 周期任务、落盘、关 worker、关库，按档位做多做少，全在 node 里。
+    node.shutdown(kind).await;
     Ok(())
 }
 
