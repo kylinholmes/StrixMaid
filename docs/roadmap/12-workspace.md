@@ -87,7 +87,8 @@
 | **C** | cwd 双向联动（OSC 7 + 兜底）+ macOS `cwd` | 「cd 到哪文件就到哪」成立 |
 | **D** | 平铺图标视图 + 系统图标 + 缩略图 + 分页与虚拟滚动 | 图片目录能看了；大目录不卡 |
 
-`files.watch`（§8 未决 7）不在任何一期里，取决于实施时对代价的评估。
+目录变化的刷新（焦点刷新 + 手动按钮，§4.8）随 B 期一起做——它只是前端两个事件
+监听，不占单独一期。
 
 **A 必须最先做**，它是其余三期的地基：退出信号不可信的话，B 里的标签页不知道
 什么时候该标成「已退出」，只能猜。
@@ -179,6 +180,10 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 **Windows 驱动器根的 `name` 就是完整路径 `C:\`，不许与父路径拼接**——`/debug` 原型
 正是栽在这里。路径拼接统一走一个平台感知的工具函数，不在组件里手写。
 
+**刷新：焦点 + 手动两条，不做推送**（见 §4.8）。窗口重新获得焦点时自动重取当前目录；
+另有一个位置固定的手动刷新按钮。刷新时**保住滚动位置与选中项**——目录内容大多没变，
+每次刷新都跳回顶部比不刷新更烦人。
+
 ### 4.6 新增的后端端点
 
 | 端点 | 用途 |
@@ -216,9 +221,11 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 **缓存与预热复用现成的。** `providers/process/icon/` 那套已有 TTL、**负缓存**、
 **single-flight 并发合并**、后台预热与补热。照搬，不另发明一套。
 
-### 4.8 为什么请求/响应留在 REST
+### 4.8 文件侧全部走 REST，不开 WS
 
-考虑过把文件操作整体搬到一条 WS 上。结论是**只把推送搬过去**，请求/响应留 REST：
+考虑过把文件操作搬到一条 WS 上。结论是**一条都不搬**。
+
+**请求/响应留 REST，因为 WS 在这里只会更慢：**
 
 - **图标是按类型取，不是按文件取。** 300 个文件的目录大概 8 种类型 → 8 个请求，
   之后长期缓存。不构成问题。
@@ -233,11 +240,20 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 真要提速，正路是反代上开 HTTP/2，或加一个批量端点——**两者都是加法**，现在不必
 把架构定死。
 
-**WS 真正能买到、REST 买不到的只有推送**：别人在终端里 `mkdir`，右侧列表自己刷新。
-做成 `/ws` 控制面的一个新频道 `files.watch`，顺着现成的频道机制走
-（`metrics.live` / `logs.follow` / `services.changed` / `system.health` / `processes.live`）。
+**推送也不做。** WS 唯一能买到而 REST 买不到的是「别人改了目录，列表自己刷新」，
+但那要 inotify / `ReadDirectoryChangesW` / FSEvents 三套实现，代价与收益不匹配。
+改用两条更朴素的路（2026-09-18 定）：
 
-这与 `cockpit-feature-inventory.md` A3「REST + SSE 为主，WS 仅用于终端与文件传输」
+1. **窗口重新获得焦点时自动刷新当前目录**（`visibilitychange` / `focus`）。人从
+   终端切回来、从别的标签页切回来，看到的就是新的。
+2. **一个手动刷新按钮**，位置固定、随时可点。
+
+这两条覆盖了绝大多数真实场景——目录变化通常正是**使用者自己**在下面那个终端里
+造成的，而他做完就会看向文件区。代价是别人在另一台机器上改了目录时不会自动更新，
+可以接受。
+
+于是文件侧**没有任何 WS**，`/ws` 控制面不新增频道。这与
+`cockpit-feature-inventory.md` A3「REST + SSE 为主，WS 仅用于终端与文件传输」
 不矛盾：那里说的「文件传输」指大文件上传下载，属于写操作那一轮。
 
 ### 4.9 必须修的：退出信号
@@ -259,7 +275,7 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 ## 5. 涉及文件
 
 **新增（后端）**：`routes/files.rs` 的新端点与分页；`providers/fs/` 的图标与原始字节；
-`platform/{windows,macos}/` 的文件类型图标；`ws/channels/files_watch.rs`。
+`platform/{windows,macos}/` 的文件类型图标。**不新增 WS 频道。**
 
 **新增（前端）**：`web/src/workspace/`（整个目录）；`web/src/lib/termsocket.ts`。
 
@@ -287,6 +303,7 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 1. §6 六项全部满足。
 2. 终端：多标签、退出与断线分开显示、到达 8 个上限时 `+` 禁用。
 3. 文件：两种视图、虚拟滚动、快速访问含挂载点、卡死挂载显示为「无响应」而非消失。
+   在终端里 `mkdir` 后切走窗口再切回来，新目录出现且**滚动位置未跳回顶部**。
 4. cwd 双向联动在 cmd / bash / zsh 上成立；PowerShell 在有 OSC 7 时成立，无则不联动
    且有说明。
 5. `cargo clippy --workspace --all-targets` 零 warning；`cargo test --workspace` 全绿。
@@ -312,6 +329,7 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 
 6. **下载。** 只读、且 `/files/raw` 已经存在，但它是新的用户可见功能，归写操作那一轮。
 
-7. **`files.watch` 的实现代价。** Linux 有 inotify、Windows 有
-   `ReadDirectoryChangesW`、macOS 有 FSEvents，三套都要写。若代价过大，本轮可先不做
-   推送，由前端在窗口重新获得焦点时刷新——**这是一条可接受的退路**，应在实施时评估。
+7. ~~**`files.watch` 的实现代价。**~~ **已定（2026-09-18）：不做推送。** 改为
+   「窗口获得焦点时刷新 + 手动刷新按钮」，见 §4.8。理由是三平台各一套实现
+   （inotify / `ReadDirectoryChangesW` / FSEvents）与收益不匹配，而目录变化通常正是
+   使用者自己在下面那个终端里造成的。
