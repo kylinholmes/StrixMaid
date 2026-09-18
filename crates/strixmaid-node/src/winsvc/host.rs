@@ -344,9 +344,9 @@ fn run_service(control: &'static ServiceControl) -> anyhow::Result<()> {
         .expect("run() 在把主线程交给 SCM 之前已经写入服务实现");
     let id = app.identity();
 
-    // 读配置并把日志落到文件。日志必须在这一步就位：往后的任何输出都只能进文件，
-    // 服务进程没有 stderr。两件事都由宿主做——配置的来源与日志的落点都是它的知识。
-    let (config, log_path) = app.prepare()?;
+    // 把日志落到文件。必须在这一步就位：往后的任何输出都只能进文件，
+    // 服务进程没有 stderr。落点由宿主算——日志目录来自它自己那份配置。
+    let log_path = app.prepare()?;
     tracing::info!(
         service = id.name,
         log = %log_path.display(),
@@ -365,7 +365,7 @@ fn run_service(control: &'static ServiceControl) -> anyhow::Result<()> {
 
     let reporter = Arc::new(ScmReporter { control });
     let shutdown = Box::pin(wait_shutdown(control.shutdown.subscribe()));
-    let result = runtime.block_on(app.serve(config, reporter, shutdown));
+    let result = runtime.block_on(app.serve(reporter, shutdown));
 
     // 先落运行时再报 STOPPED：SCM 一看到 STOPPED 就可能立刻按恢复策略重启服务，
     // 那时本进程最好已经没有仍在跑的线程，否则两代进程会抢同一个监听端口与

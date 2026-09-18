@@ -64,8 +64,8 @@ impl ShutdownKind {
 /// 前台运行时没人关心进度，所以默认实现全是空的。Windows 服务模式下不一样：
 /// SCM 要求进程在 `SERVICE_START_PENDING` 期间持续上报**递增的**
 /// `dwCheckPoint`，否则会在 `dwWaitHint` 到期后判定服务启动失败并把进程杀掉。
-/// 启动里最慢的几步（开库、起 helper、探测能力）都埋在 [`serve_with`] 内部，
-/// 与其让宿主在外面猜时间，不如把上报点做成回调交给它。
+/// 启动里最慢的几步（开库、起 helper、探测能力）都埋在 [`crate::Node::start`]
+/// 内部，与其让宿主在外面猜时间，不如把上报点做成回调交给它。
 pub trait StartupReporter: Send + Sync {
     /// 进入下一个启动阶段。
     fn stage(&self, _name: &str) {}

@@ -68,29 +68,44 @@ pub fn router(node: Arc<Node>) -> axum::Router;
 
 将来若要「浏览器直连 B」，也只是把同一个 `Router` 绑到 B 的 `TcpListener` 上，业务代码一行不改。这是选 `Router` 作为单位的主要收益。
 
-### 3.3 `Node` 的构造与生命周期（**本次未做**，见 §7 未决 4）
+### 3.3 `Node` 的构造与生命周期
 
-> **实施偏离（2026-09-18）**：这一节没有做。`serve_with` 的启动编排仍留在 `strixmaid`。
-> 它与监听器、agent 注册表绑得紧，抽它要连关停路径一起动，与本方案「纯搬家、
-> 行为零变化」的性质不符——那会让 OpenAPI diff 这个硬门槛失去意义（门槛证明的是
-> 「搬对了」，一旦同时改了编排，diff 为空就只能证明「端点没变」）。
-> 移入 node 的只有 `ShutdownKind` / `StartupReporter` 两个接口，SCM 托管要用。
-> 下面这段是原计划，留作后续的依据。
+> **分两次做（2026-09-18）**：第一次只搬路由与状态，`serve_with` 的启动编排留在
+> `strixmaid`——它与监听器、agent 注册表绑得紧，抽它要连关停路径一起动，而那会让
+> OpenAPI diff 这个硬门槛失去意义（门槛证明的是「搬对了」，一旦同时改了编排，
+> diff 为空就只能证明「端点没变」）。第二次（本节）在搬家已被证明正确之后才动编排，
+> 门槛因此仍然有效：改完 OpenAPI 依旧逐字节相同。
 
-今天 `serve_with` 里按顺序做的事——开库、起 metrics engine、探测能力、起 helper 会话管理器、装终端注册表、接审计观察者——应当全部搬进：
+原先 `serve_with` 里按顺序做的事——开库、起 helper 会话管理器、装终端注册表、
+接审计观察者、起 metrics engine、探测能力、注册 WS 频道——全部搬进：
 
 ```rust
 impl Node {
-    pub async fn start(cfg: &NodeConfig, reporter: Arc<dyn StartupReporter>) -> Result<Arc<Node>>;
+    pub async fn start(
+        config: Config,
+        reporter: &dyn StartupReporter,
+        remotes: Option<Arc<dyn RemoteSnapshots>>,
+    ) -> Result<Node>;
+    pub fn router(&self, extra_protected: Option<OpenApiRouter<()>>) -> axum::Router;
     pub async fn shutdown(&self, kind: ShutdownKind);
 }
 ```
 
+三个签名上的决定，都是被实现逼出来的：
+
+- **`router` 与 `start` 分开。** `/nodes` 的状态要用 node 自己的 store 与 auth，
+  而那两样在 `start` 里才诞生。宿主追加的路由因此只能在 `start` 之后给。
+- **`router` 取 `&self`。** Router 里的状态全是句柄的克隆，同一个 `Node` 要能给出
+  多份 Router——`11-multi-host.md` 的 `/` 与 `/nodes/local` 就是两份。
+- **`start` 不调 `reporter.ready()`。** 「就绪」的判据是传输能收请求了，而传输是
+  宿主的事。node 自己报就是撒谎，SCM 会据此认为服务已经可用。
+
+`serve_with` 因此从 290 行缩到 110 行，剩下的全是 Server 独有的：绑端口、挂
+`/ws/agent` 与前端、axum 的两段式关停。
+
 `StartupReporter` 与 `ShutdownKind` 一并从 `strixmaid-server/src/main.rs`（现为 `pub(crate)`）移入 node 并转为 `pub`。它们本来就是为 SCM 的递增 checkpoint 设计的接口，而 SCM 托管也要搬到 node——两者必须在同一个 crate 里才不用互相 re-export。
 
-`NodeConfig` 是今天 `Config` 中与 HTTP 无关的那部分。`listen`、`tls`、前端相关项留在 server 的 `Config` 里。**配置文件格式不变**：拆的是 Rust 结构，不是 TOML 的形状。
-
-（实际实现里连 `NodeConfig` 都没拆——`Config` 本来就在 `strixmaid-core`，node 直接用它。拆分留到真正做 `Node::start` 时再评估是否必要。）
+原计划里还要拆一个 `NodeConfig`（`Config` 中与 HTTP 无关的那部分，`listen`/`tls`/前端项留给 server）。**没拆，也不打算拆**：`Config` 本来就在 `strixmaid-core`，node 直接用它；`Node` 只读自己关心的字段，多出来的 `listen` 它根本不看。拆开只是多一个结构、多一次转换，换不来编译器守住任何东西——真正守住边界的是依赖表（core 里没有 axum）。
 
 ### 3.4 SCM 托管归 node
 
@@ -108,17 +123,23 @@ agent 的服务身份用 `StrixMaidAgent`，默认账户 `NT AUTHORITY\LocalServ
 
 ### 3.5 server 剩下什么
 
+原计划（含 `ws/tests.rs` 留下的部分）把验收定在 2,500 行。实际（2026-09-18，两次提交之后）：
+
 ```
-strixmaid-server  2,092 行
-├─ embed.rs / assets.rs     358   前端资源与 SPA 回退
-├─ routes/nodes.rs          295   节点目录
-├─ ws/agent.rs              594   B 拨进来的那条 WS
-└─ main.rs / cli.rs         845   子命令、进程入口、装配
+crates/strixmaid/src   3,492 行
+├─ main.rs              453   进程入口、绑端口、axum 两段式关停
+├─ cli.rs               498   子命令与全局参数
+├─ embed.rs             238   前端资源与 SPA 回退
+├─ app.rs                40   把 node 的 Router 与前端、/ws/agent merge 起来
+├─ routes_nodes.rs      295   节点目录
+├─ ws_agent.rs          616   Agent 拨进来的那条 WS
+├─ winsvc_app.rs        258   两种服务身份（Windows）
+└─ agent/             1,094   Agent 模式：配置、拨号客户端、主循环
 ```
 
-外加 `ws/tests.rs` 里留下的那部分（见 §7 未决 2），所以验收定在 2,500 行。
+比 2,500 多出来的近一千行是 `agent/`——本方案立项时它还是**另一个 crate**（`strixmaid-agent`），2026-09-17 的二进制合并把它并了进来。除去这部分是 2,398 行，在线内。
 
-`app.rs::build` 从「组装全部东西」缩成「把 node 的 `Router` 与前端、节点目录 merge 起来」。
+`app.rs::build` 从「组装全部东西」缩成 40 行：node 的 `Router` 进来，merge 上 `/ws/agent` 与前端回退，套两层。
 
 ### 3.6 不做
 
@@ -159,8 +180,12 @@ strixmaid-server  2,092 行
 
 1. **agent 体积。** 11 号方案让 agent 装载完整 node 之后，原 `05-agent.md`（已删，见 git 历史）定的「Agent 静态二进制 < 8 MiB」必然破。新的上限在 11 号方案里定，本方案不涉及。
 2. **`ws/tests.rs` 怎么拆。** 641 行里既有 hub 的单测也有 agent 协议的单测，实施时按被测对象分，拆不开的留在 server 并在报告里说明。
-3. **`Node::start` / `Node::shutdown` 未抽取**（§3.3 的实施偏离）。这是 Agent 装载完整 node 的前提，也是 `11-multi-host.md` 的地基之一，得在 11 号动工前补上。
+3. ~~**`Node::start` / `Node::shutdown` 未抽取**（§3.3 的实施偏离）。~~ **已做（2026-09-18，第二次提交）**，见 §3.3。`11-multi-host.md` 的这块地基铺好了。
 
-4. **`ServiceApp::prepare` 的返回类型绑死在 `Config` 上。** Agent 模式读的是 `agent.toml`，形状与 `Config` 不同，现在的做法是构造一个**只填了 `data_dir`、仅供定位日志落点**的 `Config`，真实配置在 `serve` 里再读一次（见 `crates/strixmaid/src/winsvc_app.rs`）。能跑但别扭，干净的做法是让 `prepare` 返回一个宿主自定义的关联类型。
+4. ~~**监听失败时不走 `node.shutdown()`。**~~ **已修（2026-09-18，第三次提交）。** `bind` 失败时先 `node.shutdown(Graceful)` 再返回。回归测试断言的是 `-wal` 不残留——那是「有没有干净关库」唯一在外部看得见的痕迹。
 
-5. **`debug/` 的归属。** 它渲染的是 node 的内部状态，按理归 node；但它同时依赖前端资源的存在与否。倾向归 node，实施时若发现耦合到 `embed` 则留在 server。
+5. ~~**`ServiceApp::prepare` 的返回类型绑死在 `Config` 上。**~~ **已修（同上）。** 根因不在 `prepare`，在 `winsvc::logging` 上：它要一整个 `Config`，却只用 `data_dir` 与日志级别两样。把 `logging::init` 改成收 `(&Path, EnvFilter)` 之后，`prepare` 只需返回日志路径，`serve` 各读各的配置，伪造的 `Config` 随之消失。
+
+   顺带查出一个**真 bug**：原先 `log_target()` 不分模式，一律去读 server 的配置。于是 `service install --mode agent --config agent.toml` 打印的「日志去哪了」是 `C:\ProgramData\StrixMaid\logs`——把 agent.toml 当 server 配置解析失败后静默回落的默认值，连命令行上的 `--data-dir` 都一并吞掉。照着那个路径去看，看到的是空目录。已用变异验证：把 `log_target` 换回旧写法，新加的两条测试立刻转红。
+
+6. ~~**`debug/` 的归属。**~~ **已定**：归 node（`crates/strixmaid-node/src/debug/`）。担心的「耦合到 `embed`」没有发生——它渲染的全是 node 自己的状态。
