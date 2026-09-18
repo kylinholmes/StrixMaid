@@ -68,9 +68,16 @@ pub fn router(node: Arc<Node>) -> axum::Router;
 
 将来若要「浏览器直连 B」，也只是把同一个 `Router` 绑到 B 的 `TcpListener` 上，业务代码一行不改。这是选 `Router` 作为单位的主要收益。
 
-### 3.3 `Node` 的构造与生命周期
+### 3.3 `Node` 的构造与生命周期（**本次未做**，见 §7 未决 4）
 
-今天 `serve_with` 里按顺序做的事——开库、起 metrics engine、探测能力、起 helper 会话管理器、装终端注册表、接审计观察者——全部搬进：
+> **实施偏离（2026-09-18）**：这一节没有做。`serve_with` 的启动编排仍留在 `strixmaid`。
+> 它与监听器、agent 注册表绑得紧，抽它要连关停路径一起动，与本方案「纯搬家、
+> 行为零变化」的性质不符——那会让 OpenAPI diff 这个硬门槛失去意义（门槛证明的是
+> 「搬对了」，一旦同时改了编排，diff 为空就只能证明「端点没变」）。
+> 移入 node 的只有 `ShutdownKind` / `StartupReporter` 两个接口，SCM 托管要用。
+> 下面这段是原计划，留作后续的依据。
+
+今天 `serve_with` 里按顺序做的事——开库、起 metrics engine、探测能力、起 helper 会话管理器、装终端注册表、接审计观察者——应当全部搬进：
 
 ```rust
 impl Node {
@@ -82,6 +89,8 @@ impl Node {
 `StartupReporter` 与 `ShutdownKind` 一并从 `strixmaid-server/src/main.rs`（现为 `pub(crate)`）移入 node 并转为 `pub`。它们本来就是为 SCM 的递增 checkpoint 设计的接口，而 SCM 托管也要搬到 node——两者必须在同一个 crate 里才不用互相 re-export。
 
 `NodeConfig` 是今天 `Config` 中与 HTTP 无关的那部分。`listen`、`tls`、前端相关项留在 server 的 `Config` 里。**配置文件格式不变**：拆的是 Rust 结构，不是 TOML 的形状。
+
+（实际实现里连 `NodeConfig` 都没拆——`Config` 本来就在 `strixmaid-core`，node 直接用它。拆分留到真正做 `Node::start` 时再评估是否必要。）
 
 ### 3.4 SCM 托管归 node
 
@@ -150,4 +159,8 @@ strixmaid-server  2,092 行
 
 1. **agent 体积。** 11 号方案让 agent 装载完整 node 之后，原 `05-agent.md`（已删，见 git 历史）定的「Agent 静态二进制 < 8 MiB」必然破。新的上限在 11 号方案里定，本方案不涉及。
 2. **`ws/tests.rs` 怎么拆。** 641 行里既有 hub 的单测也有 agent 协议的单测，实施时按被测对象分，拆不开的留在 server 并在报告里说明。
-3. **`debug/` 的归属。** 它渲染的是 node 的内部状态，按理归 node；但它同时依赖前端资源的存在与否。倾向归 node，实施时若发现耦合到 `embed` 则留在 server。
+3. **`Node::start` / `Node::shutdown` 未抽取**（§3.3 的实施偏离）。这是 Agent 装载完整 node 的前提，也是 `11-multi-host.md` 的地基之一，得在 11 号动工前补上。
+
+4. **`ServiceApp::prepare` 的返回类型绑死在 `Config` 上。** Agent 模式读的是 `agent.toml`，形状与 `Config` 不同，现在的做法是构造一个**只填了 `data_dir`、仅供定位日志落点**的 `Config`，真实配置在 `serve` 里再读一次（见 `crates/strixmaid/src/winsvc_app.rs`）。能跑但别扭，干净的做法是让 `prepare` 返回一个宿主自定义的关联类型。
+
+5. **`debug/` 的归属。** 它渲染的是 node 的内部状态，按理归 node；但它同时依赖前端资源的存在与否。倾向归 node，实施时若发现耦合到 `embed` 则留在 server。

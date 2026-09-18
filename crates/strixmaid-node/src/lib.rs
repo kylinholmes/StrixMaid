@@ -10,11 +10,11 @@
 //! |---|---|---|
 //! | `strixmaid-core` | 能力库：providers、worker、session、metrics、store、platform | 不知道 |
 //! | `strixmaid-node` | 把能力做成 API：Router、认证与会话、审计、WS 频道、服务托管 | 知道 |
-//! | `strixmaid`（server） | node + 前端 + 节点目录 + 转发 | —— |
-//! | `strixmaid-agent` | node + 向 Server 拨号 | —— |
+//! | `strixmaid` | node + 前端 + 节点目录 + 转发 + 拨号回上级 | —— |
 //!
-//! 两个宿主装载**同一份** node，因此它们提供逐字节相同的 API。这条边界由依赖表
-//! 守着：core 的 `Cargo.toml` 里没有 axum，想 `use` 也 `use` 不到。
+//! `strixmaid` 的两种模式（`serve` / `agent`）装载**同一份** node，因此它们提供
+//! 逐字节相同的 API。core 与 node 之间那条边界由依赖表守着：core 的 `Cargo.toml`
+//! 里没有 axum，想 `use` 也 `use` 不到。
 //!
 //! # API 的单位是 `Router`，不是「一堆 handler」
 //!
@@ -35,7 +35,7 @@
 //!
 //! - [`RemoteSnapshots`]：别的节点的实时快照来源。server 用它的 agent 注册表实现，
 //!   agent 传 `None`。
-//! - [`ApiStates::extra_protected`]：宿主追加的受保护路由。server 用它挂 `/nodes`。
+//! - [`ApiStates::extra_protected`]：宿主追加的受保护路由。`serve` 模式用它挂 `/nodes`。
 //!
 //! 这是依赖倒置：node 定义缝，宿主填。node 的依赖表里因此没有任何「多节点」的东西。
 
@@ -51,7 +51,8 @@ pub mod ws;
 #[cfg(any(debug_assertions, feature = "apidoc"))]
 pub mod debug;
 
-/// Windows 服务（SCM）托管。两个宿主共用，各自给一份 [`winsvc::ServiceIdentity`]。
+/// Windows 服务（SCM）托管。两种模式共用，各自给一份 [`winsvc::ServiceIdentity`]
+/// （服务名不同，因此可以装在同一台机器上）。
 #[cfg(windows)]
 pub mod winsvc;
 

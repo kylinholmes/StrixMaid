@@ -167,3 +167,92 @@ impl ServiceApp for Service {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    /// 从一条真实命令行解析出 `GlobalArgs`，再看它会往注册表里写什么。
+    ///
+    /// 走 clap 解析而不是手工构造结构体：`run_args` 要复刻的正是「用户当初怎么
+    /// 调用的」，从命令行进来才是真实路径。
+    fn args_of(mode: ServiceMode, argv: &[&str]) -> Vec<String> {
+        let cli = crate::cli::Cli::try_parse_from(argv).expect("命令行应当解析成功");
+        Service {
+            mode,
+            global: cli.global,
+        }
+        .run_args()
+    }
+
+    /// `--mode` 必须写进注册表那条命令行。
+    ///
+    /// 这是**合并成一个二进制之后新增的失败模式**：`service run` 被 SCM 拉起时，
+    /// 除了这条命令行没有任何地方能告诉它该跑 server 还是 agent。漏了它，
+    /// 「装了 agent 服务、起来却是 server」——而且一路上不会报错。
+    #[test]
+    fn 模式一定写进注册表的命令行() {
+        let a = args_of(ServiceMode::Agent, &["strixmaid"]);
+        assert_eq!(a, vec!["--mode".to_owned(), "agent".to_owned()]);
+
+        let s = args_of(ServiceMode::Server, &["strixmaid"]);
+        assert_eq!(s, vec!["--mode".to_owned(), "server".to_owned()]);
+    }
+
+    #[test]
+    fn 全局参数逐项透传() {
+        let a = args_of(
+            ServiceMode::Server,
+            &[
+                "strixmaid",
+                "--config",
+                r"C:\ProgramData\StrixMaid\config.toml",
+                "--data-dir",
+                r"D:\data",
+                "--log-level",
+                "debug",
+                "--listen",
+                "0.0.0.0:9700",
+            ],
+        );
+        assert_eq!(
+            a,
+            vec![
+                "--mode",
+                "server",
+                "--config",
+                r"C:\ProgramData\StrixMaid\config.toml",
+                "--data-dir",
+                r"D:\data",
+                "--log-level",
+                "debug",
+                "--listen",
+                "0.0.0.0:9700",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    /// `--listen` 只对 server 有意义。agent 模式下 `agent::run` 会拒绝它，
+    /// 所以注册时就不该写进去——否则装出来的服务每次启动都直接失败。
+    #[test]
+    fn agent_模式不带_listen() {
+        let a = args_of(
+            ServiceMode::Agent,
+            &["strixmaid", "--listen", "0.0.0.0:9700", "--config", "a.toml"],
+        );
+        assert!(!a.contains(&"--listen".to_owned()), "{a:?}");
+        assert!(a.contains(&"--config".to_owned()), "其余参数仍要带上：{a:?}");
+    }
+
+    /// 两种模式的服务名必须不同，否则同一台机器上装不了两个。
+    #[test]
+    fn 两种身份的服务名不冲突且都合法() {
+        assert_ne!(SERVER.name, AGENT.name);
+        SERVER.validate().expect("Server 身份应当合法");
+        AGENT.validate().expect("Agent 身份应当合法");
+    }
+}

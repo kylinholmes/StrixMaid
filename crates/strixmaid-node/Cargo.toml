@@ -10,7 +10,7 @@ license.workspace      = true
 #
 # core 是「能力库」——providers、worker、session、metrics、store，每一项都不知道
 # HTTP 的存在。本 crate 是「把能力做成 API」：axum Router、认证与会话、审计、
-# WS 频道、Windows 服务托管。两个宿主（`strixmaid` 与 `strixmaid-agent`）装载
+# WS 频道、Windows 服务托管。`strixmaid` 的两种模式（`serve` / `agent`）装载
 # 同一份，因此它们提供逐字节相同的 API。
 #
 # 这条边界由**依赖表**守着：core 的 Cargo.toml 里没有 axum，想 use 也 use 不到。

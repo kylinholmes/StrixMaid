@@ -1,15 +1,14 @@
-//! 两个宿主共用的命令行片段。
+//! 与宿主无关的命令行片段。
 //!
 //! # 什么该放这里，什么不该
 //!
-//! `strixmaid` 与 `strixmaid-agent` 的全局参数**不是同一套**：环境变量前缀不同
-//! （`STRIXMAID_` / `STRIXMAID_AGENT_`）、缺省路径不同、server 有 `--listen` 而
-//! agent 有自己的 `--server-url`。clap 的 `env = "..."` 是写死在 derive 里的字面量，
-//! 没法参数化，所以硬凑一个共用的 `GlobalArgs` 只会让两边的帮助信息都说错话。
+//! 2026-09-18 之前这里的设想是「两个二进制各有一套全局参数」；合并之后只剩一个
+//! `strixmaid`，全局参数也只有一套（在 `strixmaid::cli`），两种模式共用。
 //!
-//! 因此这里只放**真正与宿主无关**的东西：值解析器，以及服务子命令的形状
-//! （那个在 [`crate::winsvc`]，与实现放在一起）。各自的 `GlobalArgs` 留在各自的
-//! crate 里，那是它们该有的差异。
+//! 那这里还剩什么：**值解析器**。`LogLevel` 定义在 `strixmaid-core`，而 core 不
+//! 依赖 clap（那条边界由依赖表守着），所以「把级别名解析成 `LogLevel`」这件事
+//! 既不能放 core、也不该在每个用到的地方各抄一遍——级别名是配置契约的一部分，
+//! 认的字面量必须一致。服务子命令的形状同理，放在 [`crate::winsvc`]，与实现一起。
 
 use strixmaid_core::config::LogLevel;
 
@@ -18,7 +17,8 @@ use strixmaid_core::config::LogLevel;
 /// core 的 `LogLevel` 不派生 `clap::ValueEnum`（types / core 不依赖 clap），
 /// 所以在这里手工列出候选，让 clap 给出可读的报错而不是等到 figment 反序列化才失败。
 ///
-/// 两个宿主共用一份：级别名是配置契约的一部分，两边认的字面量必须一致。
+/// 只此一份：级别名是配置契约的一部分，配置文件、环境变量、命令行认的字面量
+/// 必须一致，各处各抄一遍迟早会漂。
 pub fn parse_log_level(raw: &str) -> Result<LogLevel, String> {
     LogLevel::ALL
         .iter()
