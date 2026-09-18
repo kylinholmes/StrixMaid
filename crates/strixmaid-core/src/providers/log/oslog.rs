@@ -1342,17 +1342,40 @@ mod tests {
             return;
         }
 
-        let page = p
-            .query(&LogQuery {
-                limit: Some(20),
-                since: Some(now_unix() - 120),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        // 统一日志约 250 行/秒，两分钟窗口不可能是空的。真空了说明读取路径
-        // 出了问题却被当成「没有日志」——那正是本实现最该防住的谎报。
-        assert!(!page.entries.is_empty(), "最近两分钟不可能没有日志");
+        // 逐级放宽窗口再断言。
+        //
+        // 原先只查两分钟并硬断言非空，理由是「统一日志约 250 行/秒」。那个前提在
+        // 开发机上成立，在 GitHub 的 macOS 临时 runner 上不成立——2026-09-18 实测
+        // 红过一次，重跑即过，是偶发。
+        //
+        // 但这条断言要防的东西不能丢：**读取路径出了问题却被当成「没有日志」**。
+        // 关键在于，读取路径坏掉时**每一个窗口都会是空的**，所以「存在一个非空的
+        // 窗口」与原断言防的是同一件事，只是不再假定机器一定忙。
+        //
+        // 三档到一天为止：一台开机超过一天、统一日志一条都没有的 macOS 不存在，
+        // 真出现那就是读取坏了，正该失败。
+        const WINDOWS: [(i64, &str); 3] = [(120, "两分钟"), (3600, "一小时"), (86_400, "一天")];
+        let mut found = None;
+        for (secs, label) in WINDOWS {
+            let page = p
+                .query(&LogQuery {
+                    limit: Some(20),
+                    since: Some(now_unix() - secs),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if !page.entries.is_empty() {
+                found = Some((page, label));
+                break;
+            }
+            eprintln!("{label}窗口为空，放宽重试");
+        }
+        let (page, window) = found.expect(
+            "三个窗口全空：读取路径把失败当成了「没有日志」——\
+             一台开机超过一天的 macOS 不可能一条统一日志都没有",
+        );
+
         assert!(page.entries.len() <= 20);
         // 由新到旧
         for w in page.entries.windows(2) {
@@ -1362,7 +1385,7 @@ mod tests {
             );
         }
         eprintln!(
-            "最近一条：{} {}",
+            "{window}窗口，最近一条：{} {}",
             page.entries[0].identifier.as_deref().unwrap_or("?"),
             page.entries[0].message.chars().take(60).collect::<String>()
         );
