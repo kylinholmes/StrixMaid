@@ -70,11 +70,13 @@ use tracing_subscriber::EnvFilter;
 
 pub use lifecycle::{NoReporter, ShutdownKind, StartupReporter, URGENT_CLEANUP};
 pub use node::Node;
+pub use stream::serve_connection;
 pub use remote::RemoteSnapshots;
 
 mod lifecycle;
 mod node;
 mod remote;
+mod stream;
 
 /// `/api/v1` 与 `/ws` 的全部路由，不含前端资源与节点前缀。
 ///
