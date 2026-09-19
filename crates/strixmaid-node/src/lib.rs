@@ -18,7 +18,7 @@
 //!
 //! # API 的单位是 `Router`，不是「一堆 handler」
 //!
-//! [`router`] 返回完整的 `/api/v1` 与 `/ws`，不带节点前缀、不含前端资源。
+//! [`Node::router`] 返回完整的 `/api/v1` 与 `/ws`，不带节点前缀、不含前端资源。
 //! 于是同一份 API 可以被摆在三种地方：
 //!
 //! | 摆在哪 | 谁这么用 |
@@ -28,6 +28,12 @@
 //! | 进程内直调 | server 的 `/nodes/local` |
 //!
 //! 详见 `docs/roadmap/10-node-layer.md`。
+//!
+//! # Router 背后要有个活的东西
+//!
+//! [`Node`] 是那台主机的运行时：开库、会话管理、指标引擎、能力探测、周期任务，
+//! 起的顺序与关的顺序都在里面。宿主拿到 `Node` 之后调 [`Node::router`] 取 API，
+//! 再决定把它摆到哪个传输上——TCP、多路复用流、还是进程内直调。
 //!
 //! # 宿主要提供的两处东西
 //!
@@ -63,16 +69,22 @@ use strixmaid_core::config::Config;
 use tracing_subscriber::EnvFilter;
 
 pub use lifecycle::{NoReporter, ShutdownKind, StartupReporter, URGENT_CLEANUP};
+pub use node::Node;
 pub use remote::RemoteSnapshots;
 
 mod lifecycle;
+mod node;
 mod remote;
 
 /// `/api/v1` 与 `/ws` 的全部路由，不含前端资源与节点前缀。
 ///
 /// 层（压缩、trace、CORS）与 fallback 由宿主加——它们是「这个进程怎么对外服务」
 /// 的事，不是「这台主机提供什么 API」的事。
-pub fn router(states: routes::ApiStates, hub: Arc<ws::Hub>, auth: Arc<auth::AuthState>) -> axum::Router {
+///
+/// **对外只有 [`Node::router`] 一个入口**：这个函数要 `ApiStates` 里每一项都填对，
+/// 而那些状态背后是一整套活的东西（库、会话、引擎），手搓一份等于绕开 [`Node`]
+/// 的编排。宿主拿不到它，也就没法搭出一个「路由在、后面没起来」的组合。
+fn router(states: routes::ApiStates, hub: Arc<ws::Hub>, auth: Arc<auth::AuthState>) -> axum::Router {
     app::build(states, hub, auth)
 }
 

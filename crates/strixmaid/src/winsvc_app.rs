@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use strixmaid_core::config::Config;
 use strixmaid_node::winsvc::{ServiceApp, ServiceIdentity};
 use strixmaid_node::{ShutdownKind, StartupReporter};
 
@@ -121,49 +120,68 @@ impl ServiceApp for Service {
         // 读不出来就按默认位置显示——宁可报一个「默认位置」，也不猜一个不存在的路径。
         //
         // 两种模式的日志落在同一个目录（`%ProgramData%\StrixMaid\logs`），文件名由
-        // `winsvc::logging` 决定；Agent 模式暂时与 Server 共用同一份，见 §未决。
-        let config = crate::load_config(&self.global).ok();
-        strixmaid_node::winsvc::logging::describe_target(config.as_ref())
+        // `winsvc::logging` 决定；Agent 模式暂时与 Server 共用同一份。
+        strixmaid_node::winsvc::logging::describe_target(self.data_dir().ok().as_deref())
     }
 
-    fn prepare(&self) -> anyhow::Result<(Config, PathBuf)> {
-        // Agent 模式读的是 agent.toml，形状与 `Config` 不同，没法从这里返回。
-        // 但 `winsvc::logging::init` 只用到 `data_dir` 与 `log`，所以这里返回一个
-        // **仅用于日志落点**的 `Config`：Agent 的真实配置在 `serve` 里自己再读一次。
-        //
-        // 这是本次合并留下的一处别扭，记在 `docs/roadmap/11-multi-host.md` 的未决里：
-        // 干净的做法是让 `ServiceApp::prepare` 返回一个宿主自定义的类型。
-        let config = match self.mode {
-            ServiceMode::Server => crate::load_config(&self.global)?,
-            ServiceMode::Agent => {
-                let agent = crate::agent::load(&self.global, &AgentArgs { server_url: None })?;
-                Config {
-                    data_dir: agent.data_dir.clone(),
-                    ..Config::default()
-                }
-            }
-        };
-        let log_path =
-            strixmaid_node::winsvc::logging::init(&config, self.global.log_level.is_some())?;
-        Ok((config, log_path))
+    fn prepare(&self) -> anyhow::Result<PathBuf> {
+        // 两种模式的配置形状不同，但**日志只要 data_dir 与一个过滤器**，
+        // 这两样两边都拿得出来。所以这里不必伪造一个谁都不用的 `Config`。
+        strixmaid_node::winsvc::logging::init(&self.data_dir()?, self.log_filter()?)
     }
 
     fn serve(
         &self,
-        config: Config,
         reporter: Arc<dyn StartupReporter>,
         shutdown: Pin<Box<dyn Future<Output = ShutdownKind> + Send>>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+        // 配置在这里才读第二遍。`prepare` 只为定日志落点，往后的报错要能进日志，
+        // 所以真正的加载放在日志就位之后——顺序反了的话，配置读不出来那一次的
+        // 报错就没有地方可去（服务进程没有 stderr）。
+        let global = self.global.clone();
         match self.mode {
-            ServiceMode::Server => Box::pin(crate::serve_with(config, reporter, shutdown)),
+            ServiceMode::Server => Box::pin(async move {
+                let config = crate::load_config(&global)?;
+                crate::serve_with(config, reporter, shutdown).await
+            }),
+            ServiceMode::Agent => Box::pin(async move {
+                let cfg = crate::agent::load(&global, &AgentArgs { server_url: None })?;
+                crate::agent::run_with(cfg, reporter, shutdown).await
+            }),
+        }
+    }
+}
+
+impl Service {
+    /// 这个模式的数据目录——日志目录由它推出来（`logging::log_dir_for`）。
+    ///
+    /// 两种模式读不同的配置文件，但都答得出这一个问题。
+    fn data_dir(&self) -> anyhow::Result<PathBuf> {
+        Ok(match self.mode {
+            ServiceMode::Server => crate::load_config(&self.global)?.data_dir,
             ServiceMode::Agent => {
-                // `prepare` 那份 Config 只为定日志落点，Agent 的真实配置在这里读。
-                let global = self.global.clone();
-                Box::pin(async move {
-                    let cfg = crate::agent::load(&global, &AgentArgs { server_url: None })?;
-                    crate::agent::run_with(cfg, reporter, shutdown).await
-                })
+                crate::agent::load(&self.global, &AgentArgs { server_url: None })?.data_dir
             }
+        })
+    }
+
+    /// 服务模式的日志过滤器。
+    ///
+    /// Server 认配置里的 `log.level`（那是它的配置契约的一部分）；Agent 的
+    /// `agent.toml` 里没有这一项，级别只能来自命令行或 `RUST_LOG`——与
+    /// `agent::init_tracing` 前台那条路口径一致。
+    fn log_filter(&self) -> anyhow::Result<tracing_subscriber::EnvFilter> {
+        match self.mode {
+            ServiceMode::Server => {
+                let config = crate::load_config(&self.global)?;
+                crate::log_filter(&config, self.global.log_level.is_some())
+            }
+            ServiceMode::Agent => Ok(tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(
+                        self.global.log_level.map_or("info", |l| l.as_str()),
+                    )
+                })),
         }
     }
 }
@@ -248,6 +266,91 @@ mod tests {
         assert!(a.contains(&"--config".to_owned()), "其余参数仍要带上：{a:?}");
     }
 
+
+    /// 临时配置文件，用完即删。
+    struct TempToml(std::path::PathBuf);
+
+    impl TempToml {
+        fn new(tag: &str, body: &str) -> TempToml {
+            let p = std::env::temp_dir()
+                .join(format!("strixmaid-winsvc-{}-{tag}.toml", std::process::id()));
+            std::fs::write(&p, body).expect("写临时配置");
+            TempToml(p)
+        }
+        fn arg(&self) -> String {
+            self.0.display().to_string()
+        }
+    }
+
+    impl Drop for TempToml {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn service(mode: ServiceMode, argv: &[&str]) -> Service {
+        let cli = crate::cli::Cli::try_parse_from(argv).expect("命令行应当解析成功");
+        Service {
+            mode,
+            global: cli.global,
+        }
+    }
+
+    /// 两种模式各读各的配置文件，日志落点跟着各自的 `data_dir` 走。
+    ///
+    /// 2026-09-18 之前 `log_target()` 不分模式，一律去读 **server** 的配置：
+    /// `service install --mode agent --config agent.toml` 会把 agent.toml 当成
+    /// server 配置来解析，失败后静默回落到默认目录——于是 `install` 打印的
+    /// 「日志去哪了」指向一个 agent 根本不会写的路径。装服务的人照着去看，
+    /// 看到的是一个空目录。
+    #[test]
+    fn 两种模式的日志落点各按各的配置() {
+        let agent_toml = TempToml::new(
+            "agent",
+            "server_url = \"ws://up:9700\"\ntoken = \"t\"\ndata_dir = \"D:\\\\agentdata\\\\data\"\n",
+        );
+        let a = service(
+            ServiceMode::Agent,
+            &["strixmaid", "--config", &agent_toml.arg()],
+        )
+        .log_target();
+        assert!(
+            a.starts_with(r"D:\agentdata\logs"),
+            "agent 的日志该跟着 agent.toml 的 data_dir 走，实际 {a}"
+        );
+
+        let server_toml = TempToml::new("server", "data_dir = \"D:\\\\srvdata\\\\data\"\n");
+        let s = service(
+            ServiceMode::Server,
+            &["strixmaid", "--config", &server_toml.arg()],
+        )
+        .log_target();
+        assert!(
+            s.starts_with(r"D:\srvdata\logs"),
+            "server 的日志该跟着 server 配置的 data_dir 走，实际 {s}"
+        );
+    }
+
+    /// `--data-dir` 是全局参数，两种模式都该认，且优先级高于配置文件。
+    #[test]
+    fn 命令行的数据目录压过配置文件() {
+        let agent_toml = TempToml::new(
+            "override",
+            "server_url = \"ws://up:9700\"\ntoken = \"t\"\ndata_dir = \"D:\\\\fromfile\\\\data\"\n",
+        );
+        let a = service(
+            ServiceMode::Agent,
+            &[
+                "strixmaid",
+                "--config",
+                &agent_toml.arg(),
+                "--data-dir",
+                r"D:\fromcli\data",
+            ],
+        )
+        .log_target();
+        assert!(a.starts_with(r"D:\fromcli\logs"), "实际 {a}");
+    }
     /// 两种模式的服务名必须不同，否则同一台机器上装不了两个。
     #[test]
     fn 两种身份的服务名不冲突且都合法() {
