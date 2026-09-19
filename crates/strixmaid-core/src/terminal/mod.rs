@@ -1852,6 +1852,108 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------ 真 PTY 端到端
+
+    /// 起一个进程内的**真** worker：RPC 分发、附件传递、双泵、PTY 全是真实现，
+    /// 只是 worker 逻辑跑在本进程里而不是另一个进程。
+    async fn start_real_worker() -> WorkerHandle {
+        let mut d = Dispatcher::new();
+        let _table = crate::worker::terminal::register(&mut d);
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
+        tokio::spawn(async move {
+            let _ = worker::serve(worker_side, Arc::new(d)).await;
+        });
+        WorkerHandle::connect(main_side, -1, None)
+            .await
+            .expect("真 worker 握手失败")
+    }
+
+    /// A 期回归（`roadmap/12-workspace.md` §4.9）：**真 PTY** 下 shell 自行退出后，
+    /// 附着方必须在几秒内收到带真实退出码的关闭事件，终端同时从列表消失。
+    ///
+    /// 必须用真 PTY 而不是上面的假 worker：这个 bug 的藏身处正是
+    /// 「registry ⇄ 通道 ⇄ worker 双泵 ⇄ PTY」这段从没被端到端跑过的链路——
+    /// Windows 上 shell 退出并不会让 ConPTY 关闭输出管道，EOF 要等有人关掉
+    /// 伪控制台才出现，而假 worker（drop 即 EOF）天生测不到这件事。
+    #[tokio::test]
+    async fn 真_pty_里_shell_退出后立刻收到退出码且终端出表() {
+        let _serial = IN_PROCESS_WORKER.lock().await;
+        let w = start_real_worker().await;
+        let reg = registry(4, 1800);
+
+        // Unix 上固定用 /bin/sh（理由同 `worker::terminal::unix` 的测试：
+        // 不跟开发者的 rc 文件绑定）；Windows 上用默认 shell（%COMSPEC%，即 cmd.exe）。
+        #[cfg(unix)]
+        let shell = Some("/bin/sh".to_string());
+        #[cfg(windows)]
+        let shell = None;
+        let info = match reg
+            .open(
+                "s1",
+                owner(),
+                &w,
+                TermOpenParams {
+                    shell,
+                    user: None,
+                    cols: 80,
+                    rows: 24,
+                },
+            )
+            .await
+        {
+            Ok(i) => i,
+            // ConPTY 需要 Windows 10 1809+，与 worker 侧测试一样跳过而不是失败。
+            Err(e) => {
+                eprintln!("跳过：本机开不出真终端（{}）", e.message);
+                return;
+            }
+        };
+        let mut att = reg.attach("s1", &info.id).unwrap();
+
+        // 等 shell 打出第一个字节（横幅或提示符），确认它真的起来了——
+        // 在 shell 就绪之前发 exit，测的就不是「运行中的 shell 退出」这条路径。
+        let deadline = Instant::now() + Duration::from_secs(15);
+        match tokio::time::timeout_at(deadline, att.next()).await {
+            Ok(Some(AttachEvent::Data(_))) => {}
+            Ok(other) => panic!("shell 输出之前附着就结束了: {other:?}"),
+            Err(_) => panic!("15 秒内没等到 shell 的任何输出"),
+        }
+
+        att.write(if cfg!(windows) {
+            b"exit 42\r\n" as &[u8]
+        } else {
+            b"exit 42\n"
+        })
+        .await
+        .unwrap();
+
+        // 核心断言：几秒内（远小于 worker 侧 30 秒的兜底清理）收到 Exited + 42。
+        // 超时即 `roadmap/12-workspace.md` §2.1 实测到的退出信号 bug。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (reason, exit) = loop {
+            match tokio::time::timeout_at(deadline, att.next()).await {
+                // exit 命令的回显等尾巴输出，读掉继续等。
+                Ok(Some(AttachEvent::Data(_))) => continue,
+                Ok(Some(AttachEvent::Closed { reason, exit })) => break (reason, exit),
+                Ok(None) => panic!("附着结束却没有收到 Closed 事件"),
+                Err(_) => {
+                    panic!("shell 已退出，但 10 秒内附着方没有收到关闭事件——退出信号丢了")
+                }
+            }
+        };
+        assert_eq!(reason, CloseReason::Exited, "原因必须是 exited");
+        assert_eq!(
+            exit,
+            Some(TermExit {
+                code: Some(42),
+                signal: None
+            }),
+            "必须带上 shell 真实的退出码 42"
+        );
+        assert_eq!(att.next().await, None);
+        wait_until(|| reg.list_for("s1").is_empty(), "终端从列表消失").await;
+    }
+
     // -------------------------------------------------------------- 观察者
 
     #[derive(Default)]
