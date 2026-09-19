@@ -716,6 +716,7 @@ impl TerminalRegistry {
             shell: result.shell,
             user: result.user,
             uid: result.uid,
+            pid: result.pid,
             cols,
             rows,
             created_ts: now,
@@ -1019,6 +1020,10 @@ async fn pump(
             Ok(n) => forward(&term, &buf[..n]).await,
             // 就绪只是提示，假唤醒要接着等。
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            // Windows 的命名管道在对端消失时报 ERROR_BROKEN_PIPE 而不是 0 字节，
+            // 协议层上与 EOF 是同一件事（`session/channel.rs` 有同样的判定）。
+            // 当成 Failed 会把每一次正常的 shell 退出都记成故障进审计。
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => break CloseReason::Exited,
             Err(e) => {
                 tracing::warn!(id = %term.id, pid = term.pid, error = %e, "终端读取失败");
                 break CloseReason::Failed;
@@ -1908,6 +1913,10 @@ mod tests {
                 return;
             }
         };
+        // `TerminalInfo.pid`（A 期一并加的）必须就是 worker 里 shell 的 pid——
+        // C 期的 cwd 兜底轮询要拿它查 `/api/v1/processes/{pid}`。
+        assert!(info.pid > 0);
+        assert_eq!(info.pid, reg.get("s1", &info.id).unwrap().pid());
         let mut att = reg.attach("s1", &info.id).unwrap();
 
         // 等 shell 打出第一个字节（横幅或提示符），确认它真的起来了——
