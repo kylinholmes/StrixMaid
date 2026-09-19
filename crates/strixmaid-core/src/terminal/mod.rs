@@ -956,10 +956,21 @@ async fn shutdown(
             exit
         }
         Err(e) => {
-            tracing::debug!(
-                id = %term.id, pid = term.pid, %reason, error = %e,
-                "向 worker 发送 term.close 失败"
-            );
+            // 登出路径上 worker 与终端一起拆，close 打不到是常态，不值得告警；
+            // 其余路径上 close 失败意味着**退出码丢了**，必须在默认日志级别下
+            // 看得见——12 号方案 §2.1 那个 bug 能活到实测，一半原因是这条日志
+            // 原先走 debug，排查时全程无声。
+            if matches!(reason, CloseReason::Logout) {
+                tracing::debug!(
+                    id = %term.id, pid = term.pid, %reason, error = %e,
+                    "向 worker 发送 term.close 失败"
+                );
+            } else {
+                tracing::warn!(
+                    id = %term.id, pid = term.pid, %reason, error = %e,
+                    "向 worker 发送 term.close 失败，退出状态无法取回"
+                );
+            }
             None
         }
     };
