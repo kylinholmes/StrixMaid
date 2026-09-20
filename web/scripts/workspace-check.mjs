@@ -1,0 +1,293 @@
+// 运行：先 `bun run dev`，再 `node scripts/workspace-check.mjs`（需要本机有 Edge）。
+// SHOT=<目录> 时输出两张截图。CI 不跑它——它要真浏览器。
+// 工作区 B 期的真浏览器验证（roadmap/12 §6 的可离线子集）。
+// 网络层全部 mock：REST 走 route 拦截，终端 WS 走 routeWebSocket 模拟 PTY 回显。
+// 用 Edge（项目记忆：Playwright 用 channel "msedge"）。
+import { chromium } from "playwright";
+
+const BASE = "http://localhost:5173";
+const results = [];
+const check = (name, ok, detail = "") => {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
+};
+
+/** 收到的 /api/v1/files 请求 path 参数，按序记录——§6 第 5 条要断言它。 */
+const filesRequests = [];
+
+function makeEntries(n, prefix = "f") {
+  return Array.from({ length: n }, (_, i) => ({
+    name: `${prefix}${String(i).padStart(4, "0")}.txt`,
+    kind: "file",
+    size_bytes: 100 + i,
+    mode: 0o644,
+    uid: 1000,
+    gid: 1000,
+    user: "kylin",
+    mtime_ts: 1_758_300_000,
+  }));
+}
+
+const dir = (name) => ({
+  name,
+  kind: "dir",
+  size_bytes: 0,
+  mode: 0o755,
+  uid: 1000,
+  gid: 1000,
+  user: "kylin",
+  mtime_ts: 1_758_300_000,
+});
+
+/** 每个平台一套目录树 mock。 */
+function listings(platform, big) {
+  if (platform === "windows") {
+    return {
+      "\\": { entries: [{ ...dir("C:\\") }, { ...dir("D:\\") }], skipped: 0 },
+      "C:\\": { entries: [dir("Users"), dir("Windows")], skipped: 0 },
+      "C:\\Users": { entries: [dir("kylin")], skipped: 0 },
+      "C:\\Users\\kylin": { entries: [dir("Desktop"), ...makeEntries(3)], skipped: 0 },
+    };
+  }
+  return {
+    "/home/kylin": {
+      entries: [dir("proj"), dir("docs"), ...makeEntries(4)],
+      skipped: 0,
+    },
+    "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
+    "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
+  };
+}
+
+async function mockApi(page, { platform, osId }) {
+  const maps = listings(platform, true);
+  let terminalSeq = 0;
+  const liveTerminals = new Map();
+
+  await page.route("**/api/v1/**", async (route) => {
+    const url = new URL(route.request().url());
+    const p = url.pathname;
+    const method = route.request().method();
+    const json = (body, status = 200) =>
+      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+
+    if (p.endsWith("/capabilities")) {
+      return json({
+        system: { systemd: true, journal: true, helper: true, polkit: true, user_units: true, podman: false },
+        identity: { hostname: "mock", os_id: osId, os_name: "Mock OS", kernel: "0.0" },
+      });
+    }
+    if (p.endsWith("/auth/session")) {
+      return json({
+        node: "local", uid: 1000, username: "kylin", groups: ["staff"],
+        elevated: false, session_opened: true, authed_ts: 0, created_ts: 0, last_active_ts: 0,
+      });
+    }
+    if (p.endsWith("/system/info")) {
+      return json({
+        filesystems: [
+          { mount_point: platform === "windows" ? "C:\\" : "/", device: "sda1", fs_type: "ext4",
+            total_bytes: 1000, used_bytes: 400, available_bytes: 600, read_only: false },
+          { mount_point: platform === "windows" ? "D:\\" : "/mnt/nas", device: "nas", fs_type: "nfs",
+            total_bytes: 2000, used_bytes: 1000, available_bytes: 1000, read_only: false },
+        ],
+      });
+    }
+    if (p.endsWith("/files")) {
+      const q = url.searchParams.get("path");
+      filesRequests.push(q);
+      const found = maps[q];
+      return found
+        ? json({ path: q, ...found })
+        : json({ code: "not_found", message: `没有 ${q}` }, 404);
+    }
+    if (p.endsWith("/terminals") && method === "POST") {
+      const id = `term${++terminalSeq}`;
+      liveTerminals.set(id, { shell: "/bin/zsh" });
+      return json({ id }, 201);
+    }
+    if (p.endsWith("/terminals") && method === "GET") {
+      return json(
+        [...liveTerminals.entries()].map(([id, t]) => ({
+          id, shell: t.shell, user: "kylin", uid: 1000, pid: 4242,
+          cols: 80, rows: 24, created_ts: 0, last_active_ts: 0, attached: false,
+        })),
+      );
+    }
+    if (/\/terminals\/[^/]+$/.test(p) && method === "DELETE") {
+      liveTerminals.delete(p.split("/").pop());
+      return route.fulfill({ status: 204, body: "" });
+    }
+    if (p.endsWith("/metrics/current") || p.endsWith("/system/health")) return json({});
+    return json({ code: "not_found", message: p }, 404);
+  });
+
+  // 终端 WS：回显打字；`exit 42` 回车 → 发 exit 帧并关闭。控制面 /ws 直接晾着。
+  await page.routeWebSocket(/\/ws\/terminal\//, (ws) => {
+    let lineBuf = "";
+    ws.onMessage((msg) => {
+      if (typeof msg === "string") return; // resize 帧
+      const text = Buffer.from(msg).toString();
+      lineBuf += text;
+      ws.send(Buffer.from(text.replace(/\r/g, "\r\n"))); // 极简回显
+      if (lineBuf.includes("exit 42\r")) {
+        ws.send(JSON.stringify({ t: "exit", reason: "exited", code: 42 }));
+        ws.close();
+      }
+    });
+    // 附着即回放一个横幅，模拟 shell 提示符。
+    ws.send(Buffer.from("mock-shell $ "));
+  });
+  await page.routeWebSocket(/\/ws$/, () => {});
+}
+
+async function unixFlow(browser) {
+  const page = await browser.newPage();
+  page.on("pageerror", (e) => check("页面无未捕获异常", false, String(e)));
+  await mockApi(page, { platform: "unix", osId: "ubuntu" });
+  await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
+
+  // 从「文件」入口进：面板应收起。
+  await page.goto(`${BASE}/files`);
+  await page.waitForSelector("text=名称");
+  check("文件列表渲染（主目录）", await page.isVisible("text=proj"));
+  check("从文件入口进入时终端面板收起", !(await page.isVisible("text=还没有终端")));
+
+  // 进大目录：500 行渲染上限 + 「显示全部」。
+  await page.click("text=proj");
+  await page.waitForSelector("text=已显示前 500 项");
+  const rows = await page.locator("tbody tr").count();
+  check("大目录默认只渲染 500 行", rows === 500, `实际 ${rows}`);
+  check("skipped 提示", await page.isVisible("text=1 个条目因无权限或已消失被跳过"));
+  await page.click("text=显示全部");
+  await page.waitForFunction(() => document.querySelectorAll("tbody tr").length === 800);
+  check("显示全部后 800 行", true);
+
+  // 后退 → 主目录；前进 → 又回来。
+  await page.click('[aria-label="后退"]');
+  await page.waitForSelector("text=docs");
+  check("后退回主目录", true);
+  await page.click('[aria-label="前进"]');
+  await page.waitForSelector("text=p0000.txt");
+  check("前进回大目录", true);
+
+  // 焦点刷新（§4.8）：改 mock 数据 → 触发 visibilitychange → 新条目出现。
+  await page.click('[aria-label="后退"]');
+  await page.waitForSelector("text=docs");
+  await page.route("**/api/v1/files?*", async (route) => {
+    const q = new URL(route.request().url()).searchParams.get("path");
+    // 只演「主目录里多了个 t1」这一幕，别的目录交回原 mock。
+    if (q !== "/home/kylin") return route.fallback();
+    filesRequests.push(q);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        path: q,
+        entries: [dir("proj"), dir("docs"), dir("t1"), ...makeEntries(4)],
+        skipped: 0,
+      }),
+    });
+  });
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.waitForSelector("text=t1", { timeout: 5000 });
+  check("焦点刷新后新目录出现", true);
+
+  // 终端：开标签 → 打字回显 → exit 42 → 「已退出 (code 42)」且内容保留。
+  await page.click('[aria-label="展开终端面板"]');
+  await page.click("text=开一个");
+  await page.waitForSelector(".xterm", { timeout: 8000 });
+  check("终端标签建立（xterm 挂载）", true);
+  await page.waitForSelector("text=mock-shell", { timeout: 5000 }).catch(() => {});
+  await page.click(".xterm");
+  await page.keyboard.type("echo hi");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
+  check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
+
+  // 第二个标签 + 切换。
+  await page.click('[aria-label="新建终端"]');
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 2);
+  check("第二个标签，两个 xterm 实例并存（切走不卸载）", true);
+
+  // 在第二个标签里 exit 42。
+  await page.click(".xterm >> nth=1");
+  await page.keyboard.type("exit 42");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("text=已退出 (code 42)", { timeout: 5000 });
+  check("退出显示带退出码，且与断线区分", true);
+  check("退出后内容保留（xterm 未销毁）",
+    (await page.locator(".xterm").count()) === 2);
+
+  if (process.env.SHOT) {
+    await page.screenshot({ path: `${process.env.SHOT}/workspace-terminal.png` });
+  }
+
+  // 开到 8 个：`+` 必须禁用（§7-2），UI 自己算、后端从未回 409。
+  while ((await page.locator(".xterm").count()) < 8) {
+    await page.click('[aria-label="新建终端"]');
+    await page.waitForTimeout(120);
+  }
+  check("到 8 个上限时 + 禁用", await page.locator('[aria-label="新建终端"]').isDisabled());
+
+  // 刷新保住滚动位置（§7-3）：进大目录、滚下去、焦点刷新、位置不动。
+  await page.click('[aria-label="折叠终端面板"]');
+  await page.click("text=proj");
+  await page.waitForSelector("text=已显示前 500 项");
+  const scroller = page.locator(".fileScroll, [class*=fileScroll]").first();
+  await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForTimeout(500);
+  const top = await scroller.evaluate((el) => el.scrollTop);
+  check("焦点刷新后滚动位置未跳顶", top === 1500, `scrollTop=${top}`);
+
+  if (process.env.SHOT) {
+    await page.click('[aria-label="后退"]');
+    await page.waitForSelector("text=t1");
+    await page.screenshot({ path: `${process.env.SHOT}/workspace-files.png` });
+  }
+
+  await page.close();
+}
+
+async function windowsFlow(browser) {
+  const page = await browser.newPage();
+  await mockApi(page, { platform: "windows", osId: "windows" });
+  await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
+  filesRequests.length = 0;
+
+  await page.goto(`${BASE}/files`);
+  // 主目录猜成 C:\Users\kylin。
+  await page.waitForSelector("text=Desktop");
+  check("Windows 主目录启发式生效", filesRequests.includes("C:\\Users\\kylin"));
+
+  // 全部驱动器 → 点 C:\ → 请求必须是 C:\，绝不能是 \C:\（§6 第 5 条）。
+  await page.click("text=全部驱动器");
+  await page.waitForSelector("tbody >> text=C:\\");
+  await page.click("tbody >> text=C:\\");
+  await page.waitForSelector("text=Windows");
+  const bad = filesRequests.filter((q) => q?.includes("\\C:"));
+  check("驱动器根不与父路径拼接", bad.length === 0, bad.join(","));
+  check("确实请求了 C:\\", filesRequests.includes("C:\\"));
+
+  // 上一级：C:\ → 虚拟根 \。
+  await page.click('[aria-label="上一级"]');
+  await page.waitForSelector("tbody >> text=D:\\");
+  check("盘根的上一级是全部驱动器", filesRequests.includes("\\"));
+  await page.close();
+}
+
+const browser = await chromium.launch({ channel: "msedge", headless: true });
+try {
+  await unixFlow(browser);
+  await windowsFlow(browser);
+} finally {
+  await browser.close();
+}
+
+const failed = results.filter((r) => !r.ok);
+console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
+process.exit(failed.length === 0 ? 0 : 1);

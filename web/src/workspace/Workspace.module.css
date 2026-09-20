@@ -126,8 +126,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl; /* 长路径优先露出结尾——那才是「我在哪」 */
-  text-align: left;
+  /* 不用 direction:rtl 的「尾部优先」技巧：它会把 /home 显示成 home/。
+     长路径截尾部，完整路径在 title 里。 */
   min-width: 0;
   flex: 1;
 }
