@@ -57,12 +57,20 @@ export function Workspace({ initial }: WorkspaceProps) {
   // 来龙去脉。终端驱动的跟随不进历史（cd 十次不该产生十个后退步）。
   const past = useRef<string[]>([]);
   const future = useRef<string[]>([]);
+  /**
+   * 反向 cd 之后，终端在追赶期间报出的还是**旧**目录（轮询最长滞后 2s）。
+   * 把这种迟到的旧值当「shell 又 cd 回去了」会把文件区拽回上一个目录——
+   * 表现为开着终端时每次进目录都来回弹、显得很慢。导航时记下旧目录，
+   * 短窗口内与它相同的报告一律忽略；报告是目标或第三个目录则立即跟随。
+   */
+  const staleGuard = useRef<{ prev: string | null; until: number }>({ prev: null, until: 0 });
   const navigate = useCallback(
     (path: string) => {
       const cur = useWorkspace.getState().cwd;
       if (cur === path) return;
       if (cur !== null) past.current.push(cur);
       future.current = [];
+      staleGuard.current = { prev: cur, until: Date.now() + 4_000 };
       setCwd(path);
       // 反向联动（§4.4）：给当前终端标签发一条 cd。只发给活着的、且不已在
       // 该目录的；shell 回报 OSC 7 / 轮询后 follow 判定同路径，不会回环。
@@ -78,22 +86,32 @@ export function Workspace({ initial }: WorkspaceProps) {
   // 正向联动：活动终端报出新 cwd，文件区跟过去（§4.4「cd 到哪文件就到哪」）。
   const activeTabCwd = useWorkspace((st) => st.tabs.find((t) => t.id === st.activeId)?.cwd);
   useEffect(() => {
-    if (activeTabCwd !== undefined && activeTabCwd !== cwd) setCwd(activeTabCwd);
+    if (activeTabCwd === undefined || activeTabCwd === cwd) return;
+    const g = staleGuard.current;
+    if (activeTabCwd === g.prev && Date.now() < g.until) return; // 迟到的旧值，见上
+    setCwd(activeTabCwd);
   }, [activeTabCwd, cwd, setCwd]);
+  const jump = useCallback(
+    (target: string, pushTo: React.MutableRefObject<string[]>) => {
+      const st = useWorkspace.getState();
+      if (st.cwd !== null) pushTo.current.push(st.cwd);
+      staleGuard.current = { prev: st.cwd, until: Date.now() + 4_000 };
+      setCwd(target);
+      const tab = st.tabs.find((t) => t.id === st.activeId);
+      if (tab?.status === "live" && tab.cwd !== target) {
+        termSockets.get(tab.id)?.send(buildCdBytes(target, tab.shell));
+      }
+    },
+    [setCwd],
+  );
   const goBack = useCallback(() => {
     const prev = past.current.pop();
-    if (prev === undefined) return;
-    const cur = useWorkspace.getState().cwd;
-    if (cur !== null) future.current.push(cur);
-    setCwd(prev);
-  }, [setCwd]);
+    if (prev !== undefined) jump(prev, future);
+  }, [jump]);
   const goForward = useCallback(() => {
     const next = future.current.pop();
-    if (next === undefined) return;
-    const cur = useWorkspace.getState().cwd;
-    if (cur !== null) past.current.push(cur);
-    setCwd(next);
-  }, [setCwd]);
+    if (next !== undefined) jump(next, past);
+  }, [jump]);
 
   return (
     <div className={s.workspace}>

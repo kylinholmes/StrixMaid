@@ -162,7 +162,9 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
         .catch(() => ({ data: undefined }));
       if (stopped) return;
       const cwd = data?.cwd;
-      if (cwd) setTabCwd(id, cwd, false);
+      // 没变化就不写 store：每 2s 搅动一次订阅者毫无意义。
+      const cur = useWorkspace.getState().tabs.find((t) => t.id === id)?.cwd;
+      if (cwd && cwd !== cur) setTabCwd(id, cwd, false);
     };
     void tick();
     const timer = setInterval(() => void tick(), 2_000);
