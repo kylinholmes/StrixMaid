@@ -1,6 +1,7 @@
 import { File, Folder, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cx } from "@/lib/cx";
+import { fileIconUrl, folderIconUrl } from "./icons";
 import { fetchThumb, thumbEligible } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -46,14 +47,21 @@ function Tile({
   onSelect: () => void;
 }) {
   const { ref, url } = useLazyThumb(path, thumbEligible(entry));
-  const icon =
-    entry.kind === "dir" ? (
-      <Folder size={30} strokeWidth={1.2} className={s.kindDir} />
-    ) : entry.kind === "symlink" ? (
-      <Link2 size={30} strokeWidth={1.2} />
-    ) : (
-      <File size={30} strokeWidth={1.2} className={s.kindFile} />
-    );
+  const builtin =
+    entry.kind === "dir"
+      ? folderIconUrl(entry.name)
+      : entry.kind === "file"
+        ? fileIconUrl(entry.name)
+        : null;
+  const icon = builtin ? (
+    <img src={builtin} width={44} height={44} alt="" />
+  ) : entry.kind === "dir" ? (
+    <Folder size={30} strokeWidth={1.2} className={s.kindDir} />
+  ) : entry.kind === "symlink" ? (
+    <Link2 size={30} strokeWidth={1.2} />
+  ) : (
+    <File size={30} strokeWidth={1.2} className={s.kindFile} />
+  );
 
   return (
     <button

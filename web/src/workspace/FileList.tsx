@@ -23,6 +23,7 @@ import {
   ToolbarSpacer,
 } from "@/components";
 import { fmtBytes } from "@/lib/fmt";
+import { fileIconUrl, folderIconUrl } from "./icons";
 import { joinPath, type Platform, parentPath } from "./path";
 import { useWorkspace } from "./store";
 import { TileGrid } from "./TileGrid";
@@ -52,10 +53,22 @@ function fmtMtime(ts: number): string {
   return sameYear ? md : `${d.getFullYear()}-${md}`;
 }
 
-function KindIcon({ kind }: { kind: DirEntry["kind"] }) {
-  if (kind === "dir")
+function KindIcon({ entry }: { entry: DirEntry }) {
+  if (entry.kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
+  // 内置图标集（§4.7）：文件夹总有图标，文件认不出时回落到通用形状。
+  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name);
+  if (src)
+    return (
+      <img
+        src={src}
+        width={16}
+        height={16}
+        alt={entry.kind === "dir" ? "目录" : ""}
+        aria-hidden={entry.kind !== "dir"}
+      />
+    );
+  if (entry.kind === "dir")
     return <Folder size={14} strokeWidth={1.5} className={s.kindDir} aria-label="目录" />;
-  if (kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
   return <File size={14} strokeWidth={1.5} className={s.kindFile} aria-hidden="true" />;
 }
 
@@ -182,7 +195,7 @@ export function FileList({
       mono: true,
       render: (e) => (
         <span className={s.nameCell}>
-          <KindIcon kind={e.kind} />
+          <KindIcon entry={e} />
           <span>{e.name}</span>
           {e.target && <span className={s.linkTarget}>→ {e.target}</span>}
         </span>

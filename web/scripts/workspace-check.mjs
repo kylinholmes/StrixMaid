@@ -348,7 +348,7 @@ async function unixFlow(browser) {
   // 平铺视图 + 缩略图：logo.png 出图，目录出图标。
   await page.getByRole("button", { name: "平铺", exact: true }).click();
   await page.waitForSelector('[class*=tileGrid]');
-  await page.waitForSelector('[class*=tileIcon] img', { timeout: 5000 });
+  await page.waitForSelector('[class*=tileIcon] img[src^="blob:"]', { timeout: 5000 });
   check("平铺视图的图片条目出缩略图", true);
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await page.waitForSelector("text=d0000.txt");
