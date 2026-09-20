@@ -32,7 +32,7 @@ pub enum FileKind {
     Unknown,
 }
 
-/// `GET /api/v1/files` 与 `GET /api/v1/files/content` 的查询参数。
+/// `GET /api/v1/files/content` 与 `GET /api/v1/files/raw` 的查询参数。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct FilePathQuery {
@@ -40,6 +40,44 @@ pub struct FilePathQuery {
     /// 不合法返回 [`crate::ErrorCode::InvalidRequest`]。
     #[param(example = "/etc")]
     pub path: String,
+}
+
+/// 目录列表的排序键（`roadmap/12-workspace.md` §4.5）。**目录永远排在前面**，
+/// 键只决定目录组内与文件组内的顺序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSortKey {
+    /// 按名称（字节序）。
+    #[default]
+    Name,
+    /// 按大小。
+    Size,
+    /// 按修改时间。
+    Mtime,
+}
+
+/// `GET /api/v1/files` 的查询参数：路径 + 可选的分页与排序。
+///
+/// 全部可选项缺省即旧行为（全量返回、目录在前按名称）——`WinSxS` 那种
+/// 一万四千条的目录才需要分页，普通目录不必付这份复杂度。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct FileListQuery {
+    /// 见 [`FilePathQuery::path`]。
+    #[param(example = "/etc")]
+    pub path: String,
+    /// 最多返回多少条。缺省不分页。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// 跳过前多少条（排序之后生效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// 排序键，缺省按名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<FileSortKey>,
+    /// 排序方向，缺省升序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<crate::process::SortOrder>,
 }
 
 /// 目录项。
@@ -86,6 +124,10 @@ pub struct DirListing {
     /// 为 0 表示全部列出。
     #[serde(default)]
     pub skipped: u32,
+    /// 排序后、分页前的条目总数。分页 UI 据此显示「共 N 项」。
+    /// 老服务端没有这个字段（`None` = 没分页，`entries` 即全部）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
 }
 
 /// `GET /api/v1/files/content` 的响应体。
