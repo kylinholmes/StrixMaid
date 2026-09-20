@@ -7,7 +7,7 @@ import { fileIconUrl, folderIconUrl } from "./icons";
 import { OverlayScrollbar } from "./OverlayScrollbar";
 import { joinPath, type Platform } from "./path";
 import { useWorkspace } from "./store";
-import { sysIconKeys, usePathIcon, useSysIcon } from "./sysicons";
+import { entrySubject, useEntryIcon } from "./sysicons";
 import { TileGrid } from "./TileGrid";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -46,11 +46,8 @@ function KindIcon({
 }) {
   // 系统真图标全面接管（负责人 2026-09-20 定：Win/Mac 的图标都从系统读，
   // 文件夹也是）：bundle/链接按路径取真身 > 按类型取 > 内置集 > 通用形状。
-  // 两个 hook 都无条件调用，早退在其后。
-  const { pathKey, typeKey } = sysIconKeys(entry.kind, entry.name, fullPath, platform);
-  const pathIcon = usePathIcon(pathKey);
-  const typeIcon = useSysIcon(typeKey);
-  const sys = pathIcon ?? typeIcon;
+  // 主体→图标源的判定在 sysicons.ts 的 iconKeysOf 里编译期穷尽，这里只组主体。
+  const sys = useEntryIcon(entrySubject(entry, fullPath), platform);
   if (entry.kind === "symlink" && sys === null)
     return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
   const src = sys ?? (entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name));

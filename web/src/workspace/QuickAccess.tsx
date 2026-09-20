@@ -7,7 +7,8 @@ import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
 import { useSession } from "@/session/useSession";
 import { folderIconUrl } from "./icons";
-import { guessHome, joinPath, platformOf } from "./path";
+import { guessHome, joinPath, type Platform, platformOf } from "./path";
+import { type IconSubject, useEntryIcon } from "./sysicons";
 import s from "./Workspace.module.css";
 
 type FilesystemInfo = components["schemas"]["FilesystemInfo"];
@@ -71,6 +72,27 @@ function mountLabel(f: FilesystemInfo): string {
  * 消失」——恰是这条需求要防的事。
  */
 const seenMounts = new Map<string, FilesystemInfo>();
+
+/**
+ * 左栏条目的图标：系统真身优先（mac 上主目录/桌面/下载有带徽标的专属图标、
+ * 挂载点是磁盘的样子），取不到回落调用方给的形状。判定统一走
+ * `sysicons.ts` 的 [`iconKeysOf`]（经 [`useEntryIcon`]），本组件不自设条件。
+ *
+ * **不给无响应的挂载点用**：按路径取图标会真的碰那个路径，对卡死的挂载
+ * 就是又一次挂起的调用——stale 条目由调用方直接给形状，不进这里。
+ */
+function RailIcon({
+  subject,
+  platform,
+  fallback,
+}: {
+  subject: IconSubject;
+  platform: Platform;
+  fallback: React.ReactNode;
+}) {
+  const sys = useEntryIcon(subject, platform);
+  return sys ? <img src={sys} width={14} height={14} alt="" /> : fallback;
+}
 
 export interface QuickAccessProps {
   current: string | null;
@@ -169,18 +191,37 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
     <nav className={s.rail} aria-label="快速访问">
       <div className={s.railGroup}>
         <span className={s.railLabel}>位置</span>
-        {home && item(home, "主目录", <Home size={14} strokeWidth={1.5} />)}
+        {home &&
+          item(
+            home,
+            "主目录",
+            <RailIcon
+              subject={{ kind: "home", fullPath: home }}
+              platform={platform}
+              fallback={<Home size={14} strokeWidth={1.5} />}
+            />,
+          )}
         {knownFolders.map((kf) =>
           item(
             kf.path,
             kf.label,
-            <img src={folderIconUrl(kf.name)} width={14} height={14} alt="" />,
+            <RailIcon
+              subject={{ kind: "known-folder", fullPath: kf.path }}
+              platform={platform}
+              fallback={<img src={folderIconUrl(kf.name)} width={14} height={14} alt="" />}
+            />,
           ),
         )}
         {item(
           root,
           platform === "windows" ? "全部驱动器" : "根目录",
-          <Slash size={14} strokeWidth={1.5} />,
+          // Windows 的 `\` 是虚拟根不是路径，RailIcon 的 pathKey 在
+          // windows 平台本来就为 null，回落 Slash。
+          <RailIcon
+            subject={{ kind: "mount", fullPath: root }}
+            platform={platform}
+            fallback={<Slash size={14} strokeWidth={1.5} />}
+          />,
         )}
       </div>
       <div className={s.railGroup}>
@@ -193,7 +234,17 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
               onClick={() => onGo(f.mount_point)}
               title={f.mount_point}
             >
-              <HardDrive size={14} strokeWidth={1.5} />
+              {/* 网络盘不按路径取图标：那是一次真实的路径访问，NAS 抖一下
+                  就挂起一个后端阻塞线程；statvfs 活着不代表图标读得动。 */}
+              {isNetworkFs(f.fs_type) ? (
+                <HardDrive size={14} strokeWidth={1.5} />
+              ) : (
+                <RailIcon
+                  subject={{ kind: "mount", fullPath: f.mount_point }}
+                  platform={platform}
+                  fallback={<HardDrive size={14} strokeWidth={1.5} />}
+                />
+              )}
               <span className={s.mountLines}>
                 <span className={s.railItemName}>
                   {mountLabel(f)}

@@ -193,26 +193,102 @@ export function usePathIcon(path: string | null): string | null {
   return useIconUrl(path, pathCache, fetchPathIcon);
 }
 
+// ===========================================================================
+// 图标源判定：一处定义、编译期穷尽（负责人 2026-09-21 要求）
+// ===========================================================================
+
 /**
- * 一个目录项该用哪两把钥匙取系统图标（列表与平铺共用这份判定）：
+ * 会出现在界面上、需要一枚图标的**主体**。可辨识联合：每种主体是一个
+ * 显式的 `kind`，[`iconKeysOf`] 对它做**穷尽** switch——新增一种主体而
+ * 忘了写它该用哪个图标源，是 tsc 编译错误，不是运行时读错。
  *
- * - `pathKey`：按路径取（优先）。只给 unix 平台上的「带扩展名的目录」
- *   （macOS bundle：`.app`、`.framework`……）与符号链接——探测通过 + unix
- *   平台 ⇒ 后端是 macOS，`iconForFile:` 给的是这个条目的真身。
- * - `typeKey`：按类型取（回落 / 常规）。目录 → [`DIR_KEY`]，文件 → 扩展名
- *   或 [`GENERIC_FILE_KEY`]；符号链接没有类型 key（回落到链条形状）。
+ * 列表（ListPane）、平铺（TileGrid）与左侧快速访问栏（QuickAccess）都
+ * 只经这一个判定拿钥匙，任何一处不许自己拼 URL 或散写条件。
  */
-export function sysIconKeys(
-  kind: string,
-  name: string,
-  fullPath: string | null,
+export type IconSubject =
+  /** 目录项：普通文件夹，或 macOS 的 bundle（带扩展名的目录，如 `.app`）。 */
+  | { kind: "dir"; name: string; fullPath: string | null }
+  /** 文件：按扩展名归类，无扩展名走通用文件。 */
+  | { kind: "file"; name: string }
+  /** 符号链接：mac 上按路径解析到目标，其余回落链条形状。 */
+  | { kind: "symlink"; name: string; fullPath: string | null }
+  /** 左栏的已知文件夹（桌面/下载……）：mac 有带徽标的专属图标（按路径）。 */
+  | { kind: "known-folder"; fullPath: string }
+  /** 左栏的主目录。 */
+  | { kind: "home"; fullPath: string }
+  /** 左栏的挂载点/根：mac 按路径给磁盘/卷的真图标。 */
+  | { kind: "mount"; fullPath: string };
+
+/** 穷尽性哨兵：switch 漏了一种 `kind`，这里的参数类型就对不上，tsc 报错。 */
+function assertNever(x: never): never {
+  throw new Error(`未覆盖的图标主体：${JSON.stringify(x)}`);
+}
+
+/**
+ * 主体 → 两把钥匙：
+ *
+ * - `pathKey`：按路径取（优先）。只在 unix 平台上给——探测通过 + unix ⇒
+ *   后端是 macOS（Windows 后端按路径恒 404，白发请求；Linux 探测就拦了），
+ *   `iconForFile:` 给的是这个条目的真身（`.app` 的应用图标、下载文件夹的
+ *   徽标、磁盘的样子）。
+ * - `typeKey`：按类型取（回落 / 常规）。
+ *
+ * 左栏主体（known-folder / home / mount）**没有** typeKey：Windows 上
+ * `$dir` 会把 桌面/下载/磁盘 全画成同一只黄色文件夹，反而丢信息——
+ * 那里的回落是各自的内置图标（QuickAccess 自己传），mac 上则全是系统真身。
+ */
+export function iconKeysOf(
+  subject: IconSubject,
   platform: Platform,
 ): { pathKey: string | null; typeKey: string | null } {
-  const bundleLike = kind === "symlink" || (kind === "dir" && extOf(name) !== null);
-  return {
-    pathKey: platform === "unix" && bundleLike ? fullPath : null,
-    typeKey: kind === "dir" ? DIR_KEY : kind === "file" ? (extOf(name) ?? GENERIC_FILE_KEY) : null,
-  };
+  const unix = platform === "unix";
+  switch (subject.kind) {
+    case "dir":
+      return {
+        // 带扩展名的目录 = macOS bundle，按路径取应用/框架自己的图标。
+        pathKey: unix && extOf(subject.name) !== null ? subject.fullPath : null,
+        typeKey: DIR_KEY,
+      };
+    case "file":
+      return { pathKey: null, typeKey: extOf(subject.name) ?? GENERIC_FILE_KEY };
+    case "symlink":
+      return { pathKey: unix ? subject.fullPath : null, typeKey: null };
+    case "known-folder":
+    case "home":
+    case "mount":
+      return { pathKey: unix ? subject.fullPath : null, typeKey: null };
+    default:
+      return assertNever(subject);
+  }
+}
+
+/**
+ * 目录项 → 主体。`FileKind` 有八种，图标只分三路：目录、符号链接，
+ * 其余（普通文件、设备、fifo、socket……）都按文件归类。
+ */
+export function entrySubject(
+  e: { kind: string; name: string },
+  fullPath: string | null,
+): IconSubject {
+  switch (e.kind) {
+    case "dir":
+      return { kind: "dir", name: e.name, fullPath };
+    case "symlink":
+      return { kind: "symlink", name: e.name, fullPath };
+    default:
+      return { kind: "file", name: e.name };
+  }
+}
+
+/**
+ * React 侧的唯一入口：主体 → 已解析的系统图标 URL（`null` = 系统给不出，
+ * 调用方按主体自己的口味回落——内置集、lucide 形状）。
+ */
+export function useEntryIcon(subject: IconSubject, platform: Platform): string | null {
+  const { pathKey, typeKey } = iconKeysOf(subject, platform);
+  const pathIcon = usePathIcon(pathKey);
+  const typeIcon = useSysIcon(typeKey);
+  return pathIcon ?? typeIcon;
 }
 
 /** 测试用：清掉模块级状态（缓存与探测结论都是会话级单例）。 */

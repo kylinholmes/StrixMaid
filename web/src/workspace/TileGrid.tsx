@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { cx } from "@/lib/cx";
 import { fileIconUrl, folderIconUrl } from "./icons";
 import type { Platform } from "./path";
-import { sysIconKeys, usePathIcon, useSysIcon } from "./sysicons";
+import { entrySubject, useEntryIcon } from "./sysicons";
 import { fetchThumb, thumbEligible } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -51,14 +51,11 @@ function Tile({
   onSelect: () => void;
 }) {
   const { ref, url } = useLazyThumb(path, thumbEligible(entry));
-  // 优先级：缩略图 > 按路径的系统真身 > 按类型的系统图标 > 内置集 > 通用形状
-  // （判定与 ListPane 的 KindIcon 共用 sysIconKeys）。
-  const { pathKey, typeKey } = sysIconKeys(entry.kind, entry.name, path, platform);
-  const pathIcon = usePathIcon(pathKey);
-  const typeIcon = useSysIcon(typeKey);
+  // 优先级：缩略图 > 系统真图标（按路径/按类型，判定在 iconKeysOf 里编译期
+  // 穷尽）> 内置集 > 通用形状，与 ListPane 的 KindIcon 完全一致。
+  const sys = useEntryIcon(entrySubject(entry, path), platform);
   const src =
-    pathIcon ??
-    typeIcon ??
+    sys ??
     (entry.kind === "dir"
       ? folderIconUrl(entry.name)
       : entry.kind === "file"

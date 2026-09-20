@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setAuthToken } from "@/api/client";
-import { extOf, fetchTypeIcon, resetForTest } from "./sysicons";
+import {
+  DIR_KEY,
+  entrySubject,
+  extOf,
+  fetchTypeIcon,
+  GENERIC_FILE_KEY,
+  iconKeysOf,
+  resetForTest,
+} from "./sysicons";
 
 describe("extOf", () => {
   it("常规扩展名取出并小写", () => {
@@ -15,6 +23,65 @@ describe("extOf", () => {
     expect(extOf("name.")).toBe(null); // 尾点
     expect(extOf("a.b c")).toBe(null); // 空白（后端会 400，不该发请求）
     expect(extOf(`x.${"a".repeat(33)}`)).toBe(null); // 超长
+  });
+});
+
+describe("iconKeysOf（主体→图标源的编译期穷尽判定）", () => {
+  it("目录：unix 上带扩展名的是 bundle，按路径；普通目录只按类型", () => {
+    expect(
+      iconKeysOf({ kind: "dir", name: "Zed.app", fullPath: "/Applications/Zed.app" }, "unix"),
+    ).toEqual({ pathKey: "/Applications/Zed.app", typeKey: DIR_KEY });
+    expect(iconKeysOf({ kind: "dir", name: "docs", fullPath: "/home/k/docs" }, "unix")).toEqual({
+      pathKey: null,
+      typeKey: DIR_KEY,
+    });
+  });
+
+  it("windows 平台永远没有 pathKey（后端按路径恒 404）", () => {
+    for (const subject of [
+      { kind: "dir", name: "Zed.app", fullPath: "C:\\Zed.app" },
+      { kind: "symlink", name: "x", fullPath: "C:\\x" },
+      { kind: "known-folder", fullPath: "C:\\Users\\k\\Desktop" },
+      { kind: "home", fullPath: "C:\\Users\\k" },
+      { kind: "mount", fullPath: "C:\\" },
+    ] as const) {
+      expect(iconKeysOf(subject, "windows").pathKey).toBe(null);
+    }
+  });
+
+  it("文件按扩展名，无扩展名走 $file", () => {
+    expect(iconKeysOf({ kind: "file", name: "a.PDF" }, "unix")).toEqual({
+      pathKey: null,
+      typeKey: "pdf",
+    });
+    expect(iconKeysOf({ kind: "file", name: "Makefile" }, "windows")).toEqual({
+      pathKey: null,
+      typeKey: GENERIC_FILE_KEY,
+    });
+  });
+
+  it("左栏主体只按路径、没有 typeKey（Windows 上 $dir 会抹平桌面/下载的区分）", () => {
+    for (const kind of ["known-folder", "home", "mount"] as const) {
+      const keys = iconKeysOf({ kind, fullPath: "/x" }, "unix");
+      expect(keys).toEqual({ pathKey: "/x", typeKey: null });
+    }
+  });
+
+  it("entrySubject 把设备/fifo/socket 都归为文件", () => {
+    expect(entrySubject({ kind: "block_device", name: "sda" }, "/dev/sda")).toEqual({
+      kind: "file",
+      name: "sda",
+    });
+    expect(entrySubject({ kind: "dir", name: "d" }, "/d")).toEqual({
+      kind: "dir",
+      name: "d",
+      fullPath: "/d",
+    });
+    expect(entrySubject({ kind: "symlink", name: "l" }, null)).toEqual({
+      kind: "symlink",
+      name: "l",
+      fullPath: null,
+    });
   });
 });
 
