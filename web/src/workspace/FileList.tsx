@@ -310,8 +310,10 @@ export function FileList({
         <span className={s.pathWrap}>
           <input
             className={s.pathBar}
+            role="combobox"
             aria-label="路径，回车跳转"
             aria-expanded={sugs.length > 0}
+            aria-controls="path-sugs"
             title={path ?? ""}
             value={editing ?? path ?? ""}
             onChange={(e) => setEditing(e.target.value)}
@@ -357,25 +359,24 @@ export function FileList({
             spellCheck={false}
           />
           {editing !== null && sugs.length > 0 && (
-            <ul className={s.pathSugs} role="listbox" aria-label="路径补全">
+            <div id="path-sugs" className={s.pathSugs} role="listbox" aria-label="路径补全">
               {sugs.map((p2, i) => (
-                <li key={p2}>
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={i === sugIdx}
-                    className={cx(s.pathSug, i === sugIdx && s.pathSugActive)}
-                    // mousedown 抢在 input 失焦之前，click 就来不及了
-                    onMouseDown={(ev) => {
-                      ev.preventDefault();
-                      acceptSuggestion(p2);
-                    }}
-                  >
-                    {p2}
-                  </button>
-                </li>
+                <button
+                  key={p2}
+                  type="button"
+                  role="option"
+                  aria-selected={i === sugIdx}
+                  className={cx(s.pathSug, i === sugIdx && s.pathSugActive)}
+                  // mousedown 抢在 input 失焦之前，click 就来不及了
+                  onMouseDown={(ev) => {
+                    ev.preventDefault();
+                    acceptSuggestion(p2);
+                  }}
+                >
+                  {p2}
+                </button>
               ))}
-            </ul>
+            </div>
           )}
         </span>
         <ToolbarSpacer />

@@ -193,7 +193,6 @@
   z-index: 20;
   margin: 2px 0 0;
   padding: 2px;
-  list-style: none;
   background: var(--surface);
   border: 1px solid var(--stroke);
   border-radius: var(--radius-md);
