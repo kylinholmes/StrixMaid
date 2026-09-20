@@ -31,6 +31,8 @@
 //! [`Terminal::closed`] 这一个原子的 `swap` 裁决，输的一方直接返回——既不会 panic，
 //! 也不会向 worker 发第二次 `term.close`（那会打到一个已经被别人复用的 pid 上）。
 
+pub mod shells;
+
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

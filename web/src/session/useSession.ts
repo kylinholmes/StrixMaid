@@ -28,7 +28,7 @@ interface SessionState {
   lock: () => Promise<void>;
 }
 
-const TOKEN_KEY = "strixmaid.session.token";
+import { SESSION_TOKEN_KEY as TOKEN_KEY } from "./token";
 
 export const useSession = create<SessionState>((set) => ({
   status: "boot",

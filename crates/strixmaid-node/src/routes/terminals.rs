@@ -40,7 +40,7 @@ use strixmaid_core::session::Session;
 use strixmaid_core::store::{AuditOutcome, Store};
 use strixmaid_core::terminal::{CloseReason, TerminalRegistry};
 use strixmaid_types::rpc::TermOpenParams;
-use strixmaid_types::terminal::{CreateTerminalReq, CreateTerminalResp, ResizeReq, TerminalInfo};
+use strixmaid_types::terminal::{CreateTerminalReq, CreateTerminalResp, ResizeReq, ShellInfo, TerminalInfo};
 use strixmaid_types::{ApiError, ErrorCode};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -85,6 +85,7 @@ pub fn router(state: TerminalState) -> OpenApiRouter<()> {
     OpenApiRouter::new()
         .routes(routes!(create_terminal))
         .routes(routes!(list_terminals))
+        .routes(routes!(list_shells))
         .routes(routes!(delete_terminal))
         .routes(routes!(resize_terminal))
         .with_state(state)
@@ -171,6 +172,32 @@ pub async fn list_terminals(
     Extension(session): Extension<Session>,
 ) -> ApiResult<Json<Vec<TerminalInfo>>> {
     Ok(Json(st.registry.list_for(&session.token_hash)))
+}
+
+/// 可用 shell 列表
+///
+/// 新建终端下拉用。默认项（会话用户的登录 shell / `%COMSPEC%`）排最前。
+/// 这只是展示清单，不是准入判定——开终端时 worker 仍按自己的白名单复核。
+#[utoipa::path(
+    get,
+    path = "/terminals/shells",
+    tag = "terminals",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "可用 shell，默认项在最前", body = Vec<ShellInfo>),
+        (status = 401, description = "未认证", body = ApiError),
+    ),
+)]
+pub async fn list_shells(
+    Extension(session): Extension<Session>,
+) -> ApiResult<Json<Vec<ShellInfo>>> {
+    // passwd/NSS 查询可能碰磁盘或网络（LDAP），不占 runtime 线程。
+    let username = session.user.username.clone();
+    let shells =
+        tokio::task::spawn_blocking(move || strixmaid_core::terminal::shells::available_shells(&username))
+            .await
+            .map_err(|e| ApiError::internal("列 shell 的任务异常").with_detail(e.to_string()))?;
+    Ok(Json(shells))
 }
 
 /// 关闭终端
