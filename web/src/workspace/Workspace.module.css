@@ -73,7 +73,7 @@
 /* 挂载点占用条：细、不抢眼。 */
 .railUsage {
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
   overflow: hidden;
   margin: 0 var(--sp-2) var(--sp-2);
@@ -152,6 +152,12 @@
   font-size: var(--fs-300);
 }
 
+.showAllRow {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3);
+}
+
 .skippedNote {
   color: var(--ink-3);
   font-size: var(--fs-300);
@@ -205,16 +211,24 @@
 .tab {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border: none;
-  background: none;
+  gap: 2px;
+  padding-right: var(--sp-2);
   color: var(--ink-2);
-  font: inherit;
   font-size: var(--fs-300);
-  cursor: pointer;
   border-bottom: 2px solid transparent;
   white-space: nowrap;
+}
+
+.tabSelect {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
 .tabActive {
@@ -245,6 +259,11 @@
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+/* 折叠：藏起来但不卸载——卸载会断掉每个标签的 WS。 */
+.terminalsHidden {
+  display: none;
 }
 
 .termHost {

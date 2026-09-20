@@ -19,6 +19,9 @@ import s from "./Workspace.module.css";
 
 type DirEntry = components["schemas"]["DirEntryInfo"];
 
+/** 默认渲染的行数上限；普通目录远小于它，只有 WinSxS 这类目录会碰到。 */
+const RENDER_CAP = 500;
+
 /** `0o644` → `rw-r--r--`。Windows 上是合成值（`providers/fs/windows.rs`），照样能读。 */
 export function fmtMode(mode: number): string {
   const bits = "rwx";
@@ -53,6 +56,8 @@ export interface FileListProps {
   canForward: boolean;
   onBack: () => void;
   onForward: () => void;
+  /** 工具栏最左侧的附加内容（工作区放快速访问栏的开关）。 */
+  leading?: React.ReactNode;
 }
 
 /**
@@ -69,9 +74,11 @@ export function FileList({
   canForward,
   onBack,
   onForward,
+  leading,
 }: FileListProps) {
   const { data, error, isPending, isFetching, refresh } = useDirListing(path);
   const [selected, setSelected] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // 换目录回到顶部并清选中；刷新（同 path 重取）不走这里，滚动与选中原地保留。
@@ -79,9 +86,16 @@ export function FileList({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
     setSelected(null);
+    setShowAll(false);
   }, [path]);
 
   const up = path === null ? null : parentPath(path, platform);
+
+  // 大目录兜底（D 期的分页 + 虚拟滚动到位前）：一次渲染上万行会把页面卡死，
+  // 默认只渲染前 RENDER_CAP 行，其余点「显示全部」明确换取。
+  const allRows = data?.entries ?? [];
+  const capped = !showAll && allRows.length > RENDER_CAP;
+  const visibleRows = capped ? allRows.slice(0, RENDER_CAP) : allRows;
 
   const enter = (entry: DirEntry) => {
     if (path === null) return;
@@ -136,6 +150,7 @@ export function FileList({
   return (
     <div className={s.fileArea}>
       <Toolbar>
+        {leading}
         <Button iconOnly size="sm" aria-label="后退" disabled={!canBack} onClick={onBack}>
           <ArrowLeft size={14} />
         </Button>
@@ -170,18 +185,27 @@ export function FileList({
             onRetry={refresh}
           />
         ) : (
-          <Table
-            caption={`目录 ${path} 的内容`}
-            columns={columns}
-            rows={data?.entries ?? []}
-            rowKey={(e) => e.name}
-            selectedKey={selected}
-            onSelect={(e) => {
-              setSelected(e.name);
-              enter(e);
-            }}
-            empty={<EmptyState title="这个目录是空的" />}
-          />
+          <>
+            <Table
+              caption={`目录 ${path} 的内容`}
+              columns={columns}
+              rows={visibleRows}
+              rowKey={(e) => e.name}
+              selectedKey={selected}
+              onSelect={(e) => {
+                setSelected(e.name);
+                enter(e);
+              }}
+              empty={<EmptyState title="这个目录是空的" />}
+            />
+            {capped && (
+              <div className={s.showAllRow}>
+                <Button size="sm" onClick={() => setShowAll(true)}>
+                  共 {allRows.length} 项，已显示前 {RENDER_CAP} 项——显示全部
+                </Button>
+              </div>
+            )}
+          </>
         )}
         {data && (data.skipped ?? 0) > 0 && (
           <p className={s.skippedNote}>{data.skipped} 个条目因无权限或已消失被跳过</p>
