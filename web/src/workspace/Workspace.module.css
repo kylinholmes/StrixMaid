@@ -317,6 +317,19 @@
   color: var(--ink-2);
 }
 
+.snippet {
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--sp-2);
+  overflow-x: auto;
+  white-space: nowrap;
+  max-width: 60%;
+  user-select: all; /* 一点全选，复制进 $PROFILE */
+}
+
 .panelEmpty {
   display: flex;
   align-items: center;

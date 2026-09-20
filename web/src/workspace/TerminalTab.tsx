@@ -1,11 +1,13 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useRef } from "react";
+import { api } from "@/api/client";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
 import "@xterm/xterm/css/xterm.css";
+import { isPowerShell, POWERSHELL_OSC7_SNIPPET, parseOsc7, pollable } from "./cwd";
 import { useWorkspace } from "./store";
-import { type ExitFrame, TermSocket } from "./termsocket";
+import { type ExitFrame, TermSocket, termSockets } from "./termsocket";
 import s from "./Workspace.module.css";
 
 function exitLabel(f: ExitFrame): string {
@@ -36,9 +38,13 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
 
   const status = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.status);
   const label = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.exitLabel);
+  const shell = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.shell);
+  const pid = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.pid);
+  const osc7 = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.osc7);
   const markExited = useWorkspace((st) => st.markExited);
   const markDisconnected = useWorkspace((st) => st.markDisconnected);
   const markLive = useWorkspace((st) => st.markLive);
+  const setTabCwd = useWorkspace((st) => st.setTabCwd);
 
   const lastDims = useRef<{ cols: number; rows: number } | null>(null);
   const fitPending = useRef(false);
@@ -68,7 +74,7 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
 
   const connect = useCallback(() => {
     sockRef.current?.close();
-    sockRef.current = new TermSocket(id, {
+    const sock = new TermSocket(id, {
       onData: (bytes) => termRef.current?.write(bytes),
       onExit: (frame) => markExited(id, exitLabel(frame)),
       onStatus: (up) => {
@@ -81,6 +87,9 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
         }
       },
     });
+    sockRef.current = sock;
+    // 登记给反向联动用（文件区进目录 → 发 cd）。
+    termSockets.set(id, sock);
   }, [id, markExited, markDisconnected, markLive, fitAndReport]);
 
   // xterm 与 WS 的生命周期各一次，与 React 渲染解耦。
@@ -100,6 +109,13 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
 
     const encoder = new TextEncoder();
     const input = term.onData((data) => sockRef.current?.send(encoder.encode(data)));
+    // cwd 联动主路径（§4.4）：shell 用 OSC 7 报出自己的 cwd，这里接住。
+    // 返回 true = 已消费，xterm 不再往下传。
+    const osc = term.parser.registerOscHandler(7, (data) => {
+      const p = parseOsc7(data);
+      if (p) setTabCwd(id, p, true);
+      return true;
+    });
     connect();
 
     const ro = new ResizeObserver(() => {
@@ -115,13 +131,15 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
     return () => {
       ro.disconnect();
       input.dispose();
+      osc.dispose();
+      termSockets.delete(id);
       sockRef.current?.close();
       sockRef.current = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [connect, scheduleFit]);
+  }, [connect, scheduleFit, id, setTabCwd]);
 
   // 活动状态给 RO 回调用（RO 的闭包建于挂载时，直接读 prop 是旧值）。
   const activeRef = useRef(active);
@@ -131,6 +149,28 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
   useEffect(() => {
     if (active) requestAnimationFrame(fitAndReport);
   }, [active, fitAndReport]);
+
+  // cwd 兜底轮询（§4.4）：没有 OSC 7 时按 pid 问进程的 cwd。只轮活动的、
+  // 活着的、且 shell 值得信的（PowerShell 会静默给旧目录——宁可不知道，
+  // 不可指错）。OSC 7 一旦出现，轮询永久让位。
+  useEffect(() => {
+    if (!active || status !== "live" || osc7 || pid === undefined || !pollable(shell)) return;
+    let stopped = false;
+    const tick = async () => {
+      const { data } = await api
+        .GET("/api/v1/processes/{pid}", { params: { path: { pid } } })
+        .catch(() => ({ data: undefined }));
+      if (stopped) return;
+      const cwd = data?.cwd;
+      if (cwd) setTabCwd(id, cwd, false);
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 2_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [active, status, osc7, pid, shell, id, setTabCwd]);
 
   const reconnect = () => {
     termRef.current?.reset();
@@ -144,6 +184,15 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
         <div className={s.termBanner} role="status">
           <span>{label ?? "已退出"}</span>
           <span>输出已保留，关闭标签即清除。</span>
+        </div>
+      )}
+      {status === "live" && isPowerShell(shell) && !osc7 && (
+        <div className={s.termBanner} role="note">
+          <span>
+            PowerShell 不跟随目录（`Set-Location` 不改进程 cwd，轮询会给出错的旧值）。
+            要启用联动，把这段加进 <code>$PROFILE</code>：
+          </span>
+          <code className={s.snippet}>{POWERSHELL_OSC7_SNIPPET}</code>
         </div>
       )}
       {status === "disconnected" && (

@@ -22,9 +22,11 @@
 //! | 字段 | 原因 |
 //! |---|---|
 //! | `cgroup` / `unit` | macOS 没有 cgroup；launchd 的归属关系不在进程属性里 |
-//! | `cwd` | 需要 `PROC_PIDVNODEPATHINFO`，`libc` 未声明其结构体 |
 //! | `fds` | 需要 `PROC_PIDLISTFDS` 再对每个 fd 单独取路径，代价与联调收益不匹配 |
 //! | `tty` | `e_tdev` 是设备号，映射回名字要扫 `/dev` |
+//!
+//! `cwd` 曾在此列（`libc` 未声明 `proc_vnodepathinfo`），12 号方案 C 期需要它做
+//! 终端 cwd 的兜底轮询，改为自带结构体声明取之（见 [`cwd_path`]）。
 //!
 //! # 磁盘 IO
 //!
@@ -151,8 +153,7 @@ impl Backend {
             summary,
             cmdline_args: args.as_ref().map(|a| a.argv.clone()).unwrap_or_default(),
             exe: exe_path(raw_pid).or_else(|| args.as_ref().map(|a| a.exec_path.clone())),
-            // 见模块文档「拿不到的字段」
-            cwd: None,
+            cwd: cwd_path(raw_pid),
             euid: Some(info.pbsd.pbi_uid),
             gid: Some(info.pbsd.pbi_gid),
             tty: None,
@@ -389,6 +390,86 @@ fn task_all_info(pid: u32) -> Option<libc::proc_taskallinfo> {
     Some(unsafe { info.assume_init() })
 }
 
+// ---------------------------------------------------------------- cwd
+
+/// `proc_pidinfo` 的 `PROC_PIDVNODEPATHINFO` flavor（XNU `sys/proc_info.h`）。
+const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+
+/// 下面三个结构体是 XNU `sys/proc_info.h` 的逐字段复刻——`libc` crate 没有声明
+/// 它们。**布局是内核 ABI**（`proc_pidinfo` 按 `sizeof` 校验调用方缓冲区，错一个
+/// 字段整个调用返回 0），字段名保持与头文件一致以便对照。
+#[repr(C)]
+struct VinfoStat {
+    vst_dev: u32,
+    vst_mode: u16,
+    vst_nlink: u16,
+    vst_ino: u64,
+    vst_uid: libc::uid_t,
+    vst_gid: libc::gid_t,
+    vst_atime: i64,
+    vst_atimensec: i64,
+    vst_mtime: i64,
+    vst_mtimensec: i64,
+    vst_ctime: i64,
+    vst_ctimensec: i64,
+    vst_birthtime: i64,
+    vst_birthtimensec: i64,
+    vst_size: libc::off_t,
+    vst_blocks: i64,
+    vst_blksize: i32,
+    vst_flags: u32,
+    vst_gen: u32,
+    vst_rdev: u32,
+    vst_qspare: [i64; 2],
+}
+
+/// 见 [`VinfoStat`]。
+#[repr(C)]
+struct VnodeInfoPath {
+    vip_stat: VinfoStat,
+    vip_type: libc::c_int,
+    vip_pad: libc::c_int,
+    vip_fsid: [i32; 2],
+    vip_path: [u8; libc::PATH_MAX as usize],
+}
+
+/// 见 [`VinfoStat`]。`pvi_cdir` 是当前目录，`pvi_rdir` 是 chroot 根（通常为空）。
+#[repr(C)]
+struct ProcVnodePathInfo {
+    pvi_cdir: VnodeInfoPath,
+    pvi_rdir: VnodeInfoPath,
+}
+
+/// 进程的当前工作目录（`PROC_PIDVNODEPATHINFO`）。
+///
+/// 拿不到（进程不存在、无权限——只对同 uid 或特权进程可见）返回 `None`。
+/// 12 号方案 §4.4 的兜底轮询靠它：终端标签在没有 OSC 7 时按 `TerminalInfo.pid`
+/// 轮询这个字段跟随 `cd`。
+fn cwd_path(pid: i32) -> Option<String> {
+    // SAFETY: 全是整数与字节数组，全零是合法初值。
+    let mut info: ProcVnodePathInfo = unsafe { std::mem::zeroed() };
+    let want = std::mem::size_of::<ProcVnodePathInfo>() as libc::c_int;
+    // SAFETY: 缓冲区大小如实给出；内核只在返回值 == want 时保证填满。
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast::<libc::c_void>(),
+            want,
+        )
+    };
+    if got != want {
+        return None;
+    }
+    let path = &info.pvi_cdir.vip_path;
+    let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if len == 0 {
+        return None;
+    }
+    String::from_utf8(path[..len].to_vec()).ok()
+}
+
 /// 进程的可执行文件绝对路径。
 fn exe_path(pid: i32) -> Option<String> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -517,6 +598,22 @@ impl ProcArgs {
 mod tests {
     use super::*;
     use crate::providers::process::ProcProvider;
+
+    /// 结构体布局对不对，唯一可信的裁判是内核自己：对本进程取 cwd，
+    /// 必须与 `std::env::current_dir` 一致。布局错一个字段，`proc_pidinfo`
+    /// 返回 0（测试转红）或路径字段错位（比对失败）。
+    #[test]
+    fn cwd_与_current_dir_一致() {
+        let real = std::env::current_dir().unwrap();
+        let got = cwd_path(std::process::id() as i32).expect("本进程的 cwd 必然可取");
+        assert_eq!(std::path::PathBuf::from(got), real);
+    }
+
+    #[test]
+    fn 不存在的进程取不到_cwd() {
+        // pid 0 是内核，普通进程无权限；负 pid 直接非法。
+        assert_eq!(cwd_path(-1), None);
+    }
 
     #[test]
     fn 状态映射() {

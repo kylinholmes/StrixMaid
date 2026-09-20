@@ -6,11 +6,13 @@ import { capabilitiesQuery } from "@/app/queries";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
 import { useSession } from "@/session/useSession";
+import { buildCdBytes } from "./cwd";
 import { FileList } from "./FileList";
 import { guessHome, platformOf } from "./path";
 import { QuickAccess } from "./QuickAccess";
 import { useWorkspace } from "./store";
 import { TerminalPanel } from "./TerminalPanel";
+import { termSockets } from "./termsocket";
 import s from "./Workspace.module.css";
 
 export interface WorkspaceProps {
@@ -51,7 +53,8 @@ export function Workspace({ initial }: WorkspaceProps) {
     }
   }, [cwd, user, caps.data, osId, setCwd]);
 
-  // 导航历史：所有改 cwd 的路都过 navigate，后退/前进才知道来龙去脉。
+  // 导航历史：所有**用户在文件区发起**的导航都过 navigate，后退/前进才知道
+  // 来龙去脉。终端驱动的跟随不进历史（cd 十次不该产生十个后退步）。
   const past = useRef<string[]>([]);
   const future = useRef<string[]>([]);
   const navigate = useCallback(
@@ -61,9 +64,22 @@ export function Workspace({ initial }: WorkspaceProps) {
       if (cur !== null) past.current.push(cur);
       future.current = [];
       setCwd(path);
+      // 反向联动（§4.4）：给当前终端标签发一条 cd。只发给活着的、且不已在
+      // 该目录的；shell 回报 OSC 7 / 轮询后 follow 判定同路径，不会回环。
+      const st = useWorkspace.getState();
+      const tab = st.tabs.find((t) => t.id === st.activeId);
+      if (tab?.status === "live" && tab.cwd !== path) {
+        termSockets.get(tab.id)?.send(buildCdBytes(path, tab.shell));
+      }
     },
     [setCwd],
   );
+
+  // 正向联动：活动终端报出新 cwd，文件区跟过去（§4.4「cd 到哪文件就到哪」）。
+  const activeTabCwd = useWorkspace((st) => st.tabs.find((t) => t.id === st.activeId)?.cwd);
+  useEffect(() => {
+    if (activeTabCwd !== undefined && activeTabCwd !== cwd) setCwd(activeTabCwd);
+  }, [activeTabCwd, cwd, setCwd]);
   const goBack = useCallback(() => {
     const prev = past.current.pop();
     if (prev === undefined) return;

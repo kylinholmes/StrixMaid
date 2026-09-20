@@ -354,8 +354,11 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
 4. ~~**Linux 图标覆盖不全时的表现。**~~ **不存在了**：实测 Papirus + vscode-icons
    对 54 项是**零缺口**，且两套都内置、三平台一致，不再有「Linux 缺一半」的情形。
 
-5. **OSC 7 注入怎么落地。** 改用户的 shell 启动配置是侵入性的。候选：只在我们起的
-   shell 的环境里注入（不碰用户的 rc 文件）、或提供一段让用户自己加的片段。未定。
+5. ~~**OSC 7 注入怎么落地。**~~ **已定（C 期实现时）：只走环境变量，不碰任何
+   用户文件。** bash 从环境继承 `PROMPT_COMMAND`（worker 在起 shell 时注入，
+   用户 bashrc 覆盖即失效、回落轮询）；fish 原生发 OSC 7；zsh/dash 无环境注入点，
+   走 pid 轮询兜底（Linux/macOS 的进程 cwd 都跟得上，macOS 的 cwd 已在 C 期补上）；
+   PowerShell 两条路都不可靠，界面上说明原因并给出一段可复制的 `$PROFILE` 片段。
 
 6. **下载。** 只读、且 `/files/raw` 已经存在，但它是新的用户可见功能，归写操作那一轮。
 

@@ -77,4 +77,25 @@ describe("workspace store", () => {
     expect(atTabLimit(useWorkspace.getState())).toBe(false);
     expect(useWorkspace.getState().tabs).toHaveLength(MAX_TABS);
   });
+
+  it("setTabCwd 记录 cwd，OSC7 置位后不被轮询来源清掉", () => {
+    useWorkspace.getState().addTab({ id: "a", title: "sh", status: "live" });
+    useWorkspace.getState().setTabCwd("a", "/tmp", false);
+    expect(useWorkspace.getState().tabs[0]?.cwd).toBe("/tmp");
+    expect(useWorkspace.getState().tabs[0]?.osc7).toBeFalsy();
+    useWorkspace.getState().setTabCwd("a", "/etc", true);
+    const t = useWorkspace.getState().tabs[0];
+    expect(t?.cwd).toBe("/etc");
+    expect(t?.osc7).toBe(true);
+    // 之后轮询来源仍可更新 cwd，但 osc7 标记不消失（TerminalTab 据它停轮询）。
+    useWorkspace.getState().setTabCwd("a", "/var", false);
+    expect(useWorkspace.getState().tabs[0]?.osc7).toBe(true);
+  });
+
+  it("已退出的标签不再更新 cwd", () => {
+    useWorkspace.getState().addTab({ id: "a", title: "sh", status: "live" });
+    useWorkspace.getState().markExited("a", "已退出 (code 0)");
+    useWorkspace.getState().setTabCwd("a", "/tmp", true);
+    expect(useWorkspace.getState().tabs[0]?.cwd).toBeUndefined();
+  });
 });
