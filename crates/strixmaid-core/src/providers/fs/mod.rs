@@ -46,9 +46,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-// `DirEntryInfo` 只在 Unix 侧的 `EntryMapper` 里构造；Windows 侧在
-// [`windows::EntryMapper`] 里，那边自己 use。
-#[cfg(unix)]
 use strixmaid_types::file::DirEntryInfo;
 use strixmaid_types::file::{DirListing, FileContent, FileKind, FileSortKey};
 use strixmaid_types::process::SortOrder;
