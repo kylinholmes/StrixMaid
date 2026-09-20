@@ -76,17 +76,8 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
   const dirSort = useWorkspace((st) => st.dirSort);
   const setDirSort = useWorkspace((st) => st.setDirSort);
 
-  const {
-    entries,
-    total,
-    skipped,
-    error,
-    isPending,
-    hasNextPage,
-    isFetchingNextPage,
-    fetchNextPage,
-    refresh,
-  } = useDirListing(path, dirSort);
+  const { entries, error, isPending, hasNextPage, isFetchingNextPage, fetchNextPage, refresh } =
+    useDirListing(path, dirSort);
 
   const [selected, setSelected] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -114,7 +105,6 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
 
   // 隐藏文件按 dotfile 约定过滤（在已加载的页内做；后端分页不知道这条约定）。
   const visible = hideHidden ? entries.filter((e) => !e.name.startsWith(".")) : entries;
-  const hiddenCount = hideHidden ? entries.length - visible.length : 0;
 
   const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
   const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
@@ -234,14 +224,6 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
               }
             />
           </div>
-        )}
-        {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
-        {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
-        {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
-        {total > 0 && (
-          <p className={s.skippedNote}>
-            共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
-          </p>
         )}
       </div>
       <OverlayScrollbar target={scrollRef} />

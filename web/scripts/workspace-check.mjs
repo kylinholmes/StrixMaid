@@ -242,8 +242,10 @@ async function unixFlow(browser) {
   // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
   check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
   await page.click('[aria-label="隐藏隐藏文件"]');
-  await page.waitForSelector("text=2 个隐藏条目未显示");
-  check("开关后 dotfile 不再显示", !(await page.isVisible("text=.bashrc")));
+  await page.waitForFunction(
+    () => !document.querySelector('[data-pane="top"]')?.textContent?.includes(".bashrc"),
+  );
+  check("开关后 dotfile 不再显示", true);
   await page.click('[aria-label="显示隐藏文件"]');
   await page.waitForSelector("text=.bashrc");
   check("再开回来 dotfile 恢复显示", true);
@@ -259,7 +261,7 @@ async function unixFlow(browser) {
   await page.waitForSelector('[role="option"]:has-text("/home/kylin/proj")', { timeout: 4000 });
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await page.waitForSelector("text=共 800 项");
+  await page.waitForSelector('[data-pane="top"] >> text=p0000.txt');
   check(
     "地址栏补全可选中并跳转",
     (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
@@ -269,15 +271,20 @@ async function unixFlow(browser) {
 
   // 进大目录：服务端分页（首页 500）+ 虚拟滚动（DOM 里只有视口附近的行）。
   await page.click("text=proj");
-  await page.waitForSelector("text=共 800 项，已加载 500");
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('[data-pane="top"] [class*=fileScroll]')?.scrollHeight ?? 0) >
+      10000,
+  );
   const rows = await page.locator("tbody tr").count();
   check("虚拟滚动只渲染视口附近的行（含常驻垫层）", rows < 140, `DOM 行数 ${rows}`);
-  check("skipped 提示", await page.isVisible("text=1 个条目因无权限或已消失被跳过"));
   // 滚到已加载末尾触发下一页，直到 800 全部加载。
   const bigScroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await bigScroller.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
   await page.waitForFunction(
-    () => document.body.textContent?.includes("共 800 项") && !document.body.textContent?.includes("已加载"),
+    () =>
+      (document.querySelector('[data-pane="top"] [class*=fileScroll]')?.scrollHeight ?? 0) >
+      18000,
     undefined,
     { timeout: 8000 },
   );
@@ -405,7 +412,7 @@ async function unixFlow(browser) {
   await page.click("text=主目录");
   await page.waitForSelector('tbody >> text=proj');
   await page.click('tbody >> text=proj');
-  await page.waitForSelector("text=共 800 项");
+  await page.waitForSelector('[data-pane="top"] >> text=p0000.txt');
   const scroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
