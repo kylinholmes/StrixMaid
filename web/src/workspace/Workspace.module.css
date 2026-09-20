@@ -70,6 +70,24 @@
   flex: 1;
 }
 
+/* 挂载条目两行：标签 + 「可用 · 类型」小字。 */
+.mountLines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+  text-align: left;
+}
+
+.mountSub {
+  font-size: var(--fs-300);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 挂载点占用条：细、不抢眼。 */
 .railUsage {
   height: 3px;
@@ -133,6 +151,111 @@
   inset: 0;
   overflow: auto;
   scrollbar-width: none;
+}
+
+/* 地址栏盒子：与 SearchBox 同一套形（负责人定：要像自家控件）。
+   ——此前一次宽正则替换把本节 9 个类整段吞掉、地址栏裸奔浏览器默认样式，
+   此处恢复并升级；教训同 scrollWrap 事故：宽匹配的编辑必须事后 grep 验证。 */
+.pathWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  height: var(--row-sm);
+  padding: 0 var(--sp-3);
+  transition: border-color var(--t-color) var(--ease);
+}
+
+.pathWrap:focus-within {
+  border-color: var(--accent);
+}
+
+/* 盒内输入：本体无边无底，一切外观由 pathWrap 承担。 */
+.pathBar {
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 不用 direction:rtl 的「尾部优先」技巧：它会把 /home 显示成 home/。
+     长路径截尾部，完整路径在 title 里。 */
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: none;
+  appearance: none;
+  padding: 0;
+}
+
+.pathBar:focus {
+  color: var(--ink);
+}
+
+.pathSugs {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: calc(-1 * var(--stroke));
+  right: calc(-1 * var(--stroke));
+  z-index: 20;
+  margin: 0;
+  padding: 2px;
+  background: var(--surface);
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 14%);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.pathSug {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+  color: var(--ink-2);
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pathSug:hover {
+  background: var(--surface-2);
+}
+
+.pathSugActive {
+  background: var(--sel);
+  color: var(--ink);
+}
+
+.nameCell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.kindDir {
+  color: var(--ink-2);
+}
+
+.kindFile {
+  color: var(--ink-3);
+}
+
+.linkTarget {
+  color: var(--ink-3);
+  font-size: var(--fs-300);
 }
 
 /* ------------------------- 层叠导航（常驻两层，macOS 手感） ------------------------- */

@@ -6,7 +6,8 @@ import { capabilitiesQuery } from "@/app/queries";
 import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
 import { useSession } from "@/session/useSession";
-import { guessHome, platformOf } from "./path";
+import { folderIconUrl } from "./icons";
+import { guessHome, joinPath, platformOf } from "./path";
 import s from "./Workspace.module.css";
 
 type FilesystemInfo = components["schemas"]["FilesystemInfo"];
@@ -31,6 +32,37 @@ function filesystemsQuery() {
   } as const;
 }
 
+/** 网络文件系统：无论挂在哪都值得展示。 */
+function isNetworkFs(fsType: string): boolean {
+  return ["nfs", "nfs4", "cifs", "smbfs", "smb3", "afpfs", "webdav"].includes(fsType.toLowerCase());
+}
+
+/**
+ * 这个挂载点值不值得占快速访问一行（负责人反馈：mac 上一屏
+ * /System/Volumes/* 根本看不懂）。根永远要；网络盘永远要；外置/可移动
+ * 介质的常见挂载区要；系统自身的簿记卷全部藏掉。
+ */
+function mountWorthShowing(f: FilesystemInfo): boolean {
+  const mp = f.mount_point;
+  if (mp === "/" || /^[A-Za-z]:\\$/.test(mp)) return true;
+  if (isNetworkFs(f.fs_type)) return true;
+  const good = ["/Volumes/", "/mnt/", "/media/", "/run/media/"];
+  if (good.some((p) => mp.startsWith(p))) return true;
+  return false;
+}
+
+/** 挂载点的展示名：根叫系统盘，其余取末段。完整路径在 title 里。 */
+function mountLabel(f: FilesystemInfo): string {
+  const mp = f.mount_point;
+  if (mp === "/") return "系统盘";
+  if (/^[A-Za-z]:\\$/.test(mp)) return mp;
+  const seg = mp
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
+    .pop();
+  return seg || mp;
+}
+
 /**
  * 会话生命周期内见过的挂载点（§4.2 的「无响应」判定基线）。
  *
@@ -52,13 +84,31 @@ export interface QuickAccessProps {
  * （实测结论，§2.3）。这里对「上一次见过、这一次没了」的挂载点保留一条灰显条目
  * 并标「无响应」——消失会让人以为挂载被卸载了。
  */
+/** 已知文件夹候选：物理目录名 → 展示名（中文物理名的系统直接同名命中）。 */
+const KNOWN_FOLDERS: readonly (readonly [string, string])[] = [
+  ["Desktop", "桌面"],
+  ["桌面", "桌面"],
+  ["Documents", "文稿"],
+  ["文档", "文档"],
+  ["Downloads", "下载"],
+  ["下载", "下载"],
+  ["Pictures", "图片"],
+  ["图片", "图片"],
+  ["Music", "音乐"],
+  ["音乐", "音乐"],
+  ["Movies", "影片"],
+  ["Videos", "视频"],
+  ["视频", "视频"],
+  ["Public", "公共"],
+];
+
 export function QuickAccess({ current, onGo }: QuickAccessProps) {
   const caps = useQuery(capabilitiesQuery());
   const user = useSession((st) => st.user);
   const fs = useQuery(filesystemsQuery());
 
   for (const f of fs.data ?? []) seenMounts.set(f.mount_point, f);
-  const liveMounts = fs.data ?? [];
+  const liveMounts = (fs.data ?? []).filter((f) => mountWorthShowing(f));
   const liveKeys = new Set(liveMounts.map((f) => f.mount_point));
   // 只有在**拿到过一次成功结果**之后，缺席才有意义；请求失败时不判缺席。
   const staleMounts =
@@ -70,6 +120,30 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
   const platform = platformOf(osId);
   const home = user ? guessHome(osId, user.username, user.uid) : null;
   const root = platform === "windows" ? "\\" : "/";
+
+  // 已知文件夹按主目录**实际存在的**列（探测而不是硬编码：mac 是英文物理名、
+  // 中文 Linux 常是中文物理名，列出来的一定点得进去）。与地址栏补全共用缓存键。
+  const homeList = useQuery({
+    queryKey: ["complete", home],
+    enabled: home !== null,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/v1/files", {
+        params: { query: { path: home as string, limit: 200, sort: "name", order: "asc" } },
+      });
+      if (error) throw error;
+      return data;
+    },
+  });
+  const knownFolders =
+    home === null
+      ? []
+      : KNOWN_FOLDERS.flatMap(([name, label]) => {
+          const hit = (homeList.data?.entries ?? []).find(
+            (e) => e.kind === "dir" && e.name === name,
+          );
+          return hit ? [{ path: joinPath(home, name, platform), name, label }] : [];
+        });
 
   const item = (
     path: string,
@@ -96,6 +170,13 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
       <div className={s.railGroup}>
         <span className={s.railLabel}>位置</span>
         {home && item(home, "主目录", <Home size={14} strokeWidth={1.5} />)}
+        {knownFolders.map((kf) =>
+          item(
+            kf.path,
+            kf.label,
+            <img src={folderIconUrl(kf.name)} width={14} height={14} alt="" />,
+          ),
+        )}
         {item(
           root,
           platform === "windows" ? "全部驱动器" : "根目录",
@@ -106,12 +187,23 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
         <span className={s.railLabel}>{platform === "windows" ? "驱动器" : "挂载点"}</span>
         {liveMounts.map((f) => (
           <div key={f.mount_point}>
-            {item(
-              f.mount_point,
-              f.mount_point,
-              <HardDrive size={14} strokeWidth={1.5} />,
-              <span className={s.staleTag}>{fmtBytes(f.available_bytes)} 可用</span>,
-            )}
+            <button
+              type="button"
+              className={cx(s.railItem, current === f.mount_point && s.railItemActive)}
+              onClick={() => onGo(f.mount_point)}
+              title={f.mount_point}
+            >
+              <HardDrive size={14} strokeWidth={1.5} />
+              <span className={s.mountLines}>
+                <span className={s.railItemName}>
+                  {mountLabel(f)}
+                  {isNetworkFs(f.fs_type) && <span className={s.staleTag}>（网络）</span>}
+                </span>
+                <span className={s.mountSub}>
+                  {fmtBytes(f.available_bytes)} 可用 · {f.fs_type}
+                </span>
+              </span>
+            </button>
             <div className={s.railUsage} aria-hidden="true">
               <i
                 style={{
@@ -121,15 +213,17 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
             </div>
           </div>
         ))}
-        {staleMounts.map((f) =>
-          item(
-            f.mount_point,
-            f.mount_point,
-            <HardDrive size={14} strokeWidth={1.5} />,
-            <span className={s.staleTag}>无响应</span>,
-            true,
-          ),
-        )}
+        {staleMounts
+          .filter(mountWorthShowing)
+          .map((f) =>
+            item(
+              f.mount_point,
+              mountLabel(f),
+              <HardDrive size={14} strokeWidth={1.5} />,
+              <span className={s.staleTag}>无响应</span>,
+              true,
+            ),
+          )}
       </div>
     </nav>
   );
