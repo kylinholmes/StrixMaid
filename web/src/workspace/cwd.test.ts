@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCdBytes, isPowerShell, parseOsc7, pollable } from "./cwd";
+import { buildCdBytes, isPowerShell, isZsh, parseOsc7 } from "./cwd";
 
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -20,17 +20,14 @@ describe("parseOsc7", () => {
 });
 
 describe("shell 判定", () => {
-  it("powershell 不可轮询——Set-Location 不改进程 cwd，轮询给的是静默旧值", () => {
+  it("powershell 与 zsh 各自可识别（说明条选片段用）", () => {
     expect(isPowerShell("C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")).toBe(
       true,
     );
     expect(isPowerShell("/usr/local/bin/pwsh")).toBe(true);
-    expect(pollable("C:\\Program Files\\PowerShell\\7\\pwsh.exe")).toBe(false);
-  });
-  it("其余 shell 可轮询", () => {
-    expect(pollable("/bin/zsh")).toBe(true);
-    expect(pollable("C:\\Windows\\System32\\cmd.exe")).toBe(true);
-    expect(pollable(undefined)).toBe(true);
+    expect(isZsh("/bin/zsh")).toBe(true);
+    expect(isZsh("/bin/bash")).toBe(false);
+    expect(isPowerShell("/bin/zsh")).toBe(false);
   });
 });
 

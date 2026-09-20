@@ -230,6 +230,14 @@ async function unixFlow(browser) {
   await page.waitForTimeout(200);
   check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
 
+  // ⌃` 切换终端面板（VSCode 同款）。
+  await page.keyboard.press("Control+Backquote");
+  await page.waitForSelector("text=还没有终端");
+  check("Ctrl+` 展开终端面板", true);
+  await page.keyboard.press("Control+Backquote");
+  await page.waitForTimeout(150);
+  check("Ctrl+` 再按折叠面板", !(await page.isVisible("text=还没有终端")));
+
   // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
   check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
   await page.click('[aria-label="隐藏隐藏文件"]');
@@ -356,8 +364,11 @@ async function unixFlow(browser) {
   // PowerShell 退化路径：无 OSC 7 → 不联动 + 界面说明（绝不轮询旧值）。
   await page.click('[aria-label="选择 shell 新建终端"]');
   await page.getByRole("button", { name: "pwsh", exact: true }).click();
-  await page.waitForSelector("text=PowerShell 不跟随目录", { timeout: 5000 });
-  check("PowerShell 无 OSC 7 时显示说明", true);
+  await page.waitForSelector("text=PowerShell 未报告工作目录", { timeout: 6000 });
+  check("PowerShell 无 OSC 7 时显示可关闭说明", true);
+  await page.click('[aria-label="关闭提示"]');
+  await page.waitForTimeout(150);
+  check("说明条可关闭", !(await page.isVisible("text=PowerShell 未报告工作目录")));
   check(
     "PowerShell 的 cwd 未被轮询采信（文件区不动）",
     (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/docs",

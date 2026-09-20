@@ -1,11 +1,11 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { useCallback, useEffect, useRef } from "react";
-import { api } from "@/api/client";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
 import "@xterm/xterm/css/xterm.css";
-import { isPowerShell, POWERSHELL_OSC7_SNIPPET, parseOsc7, pollable } from "./cwd";
+import { isPowerShell, isZsh, POWERSHELL_OSC7_SNIPPET, parseOsc7, ZSH_OSC7_SNIPPET } from "./cwd";
 import { useWorkspace } from "./store";
 import { type ExitFrame, TermSocket, termSockets } from "./termsocket";
 import s from "./Workspace.module.css";
@@ -39,7 +39,6 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
   const status = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.status);
   const label = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.exitLabel);
   const shell = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.shell);
-  const pid = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.pid);
   const osc7 = useWorkspace((st) => st.tabs.find((t) => t.id === id)?.osc7);
   const markExited = useWorkspace((st) => st.markExited);
   const markDisconnected = useWorkspace((st) => st.markDisconnected);
@@ -150,29 +149,25 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
     if (active) requestAnimationFrame(fitAndReport);
   }, [active, fitAndReport]);
 
-  // cwd 兜底轮询（§4.4）：没有 OSC 7 时按 pid 问进程的 cwd。只轮活动的、
-  // 活着的、且 shell 值得信的（PowerShell 会静默给旧目录——宁可不知道，
-  // 不可指错）。OSC 7 一旦出现，轮询永久让位。
+  // cwd 联动**只走 OSC 7**（事件驱动、零滞后）。曾有按 pid 轮询进程 cwd 的
+  // 兜底：2s 的滞后窗口让在途旧值把文件区来回拽（HKU 实测「开终端后进目录
+  // 变慢」），而 PowerShell 还会静默给错值——不优雅就砍掉。没发 OSC 7 的
+  // shell 明确不跟随，下面的说明条给出一行式的启用片段。
+
+  // 面板从折叠展开时聚焦终端（⌃` 打开即打字，VSCode 同款）。
+  const collapsed = useWorkspace((st) => st.panelCollapsed);
   useEffect(() => {
-    if (!active || status !== "live" || osc7 || pid === undefined || !pollable(shell)) return;
-    let stopped = false;
-    const tick = async () => {
-      const { data } = await api
-        .GET("/api/v1/processes/{pid}", { params: { path: { pid } } })
-        .catch(() => ({ data: undefined }));
-      if (stopped) return;
-      const cwd = data?.cwd;
-      // 没变化就不写 store：每 2s 搅动一次订阅者毫无意义。
-      const cur = useWorkspace.getState().tabs.find((t) => t.id === id)?.cwd;
-      if (cwd && cwd !== cur) setTabCwd(id, cwd, false);
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), 2_000);
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [active, status, osc7, pid, shell, id, setTabCwd]);
+    if (!collapsed && active) termRef.current?.focus();
+  }, [collapsed, active]);
+
+  // 说明条的宽限期：等 shell 打出第一个提示符（bash 的 OSC 7 随它到达），
+  // 别在启动瞬间闪一条马上消失的提示。
+  const [graceOver, setGraceOver] = useState(false);
+  const [noteDismissed, setNoteDismissed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setGraceOver(true), 2_500);
+    return () => clearTimeout(t);
+  }, []);
 
   const reconnect = () => {
     termRef.current?.reset();
@@ -188,13 +183,25 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
           <span>输出已保留，关闭标签即清除。</span>
         </div>
       )}
-      {status === "live" && isPowerShell(shell) && !osc7 && (
+      {status === "live" && !osc7 && graceOver && !noteDismissed && (
         <div className={s.termBanner} role="note">
           <span>
-            PowerShell 不跟随目录（`Set-Location` 不改进程 cwd，轮询会给出错的旧值）。
-            要启用联动，把这段加进 <code>$PROFILE</code>：
+            {isPowerShell(shell)
+              ? "PowerShell 未报告工作目录（OSC 7），文件区不跟随。加进 $PROFILE 即可启用："
+              : isZsh(shell)
+                ? "zsh 未报告工作目录（OSC 7），文件区不跟随。加进 ~/.zshrc 即可启用："
+                : "此 shell 未报告工作目录（OSC 7），文件区不跟随终端里的 cd。"}
           </span>
-          <code className={s.snippet}>{POWERSHELL_OSC7_SNIPPET}</code>
+          {isPowerShell(shell) && <code className={s.snippet}>{POWERSHELL_OSC7_SNIPPET}</code>}
+          {isZsh(shell) && <code className={s.snippet}>{ZSH_OSC7_SNIPPET}</code>}
+          <button
+            type="button"
+            className={s.tabClose}
+            aria-label="关闭提示"
+            onClick={() => setNoteDismissed(true)}
+          >
+            <X size={12} />
+          </button>
         </div>
       )}
       {status === "disconnected" && (

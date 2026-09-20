@@ -1,12 +1,10 @@
 /**
  * cwd 双向联动的纯函数部分（`docs/roadmap/12-workspace.md` §4.4）。
  *
- * 主路径 OSC 7（shell 自己报，`ESC ] 7 ; file://host/path BEL`）；兜底按
- * `TerminalInfo.pid` 轮询 `/api/v1/processes/{pid}` 的 cwd。两条路的已知边界：
- *
- * - **PowerShell 的 `Set-Location` 不改进程 cwd**（实测，§2.3）：轮询会**静默
- *   给出旧目录**——宁可空着，不可指错，所以 PowerShell 一律不轮询；
- * - 用户 bashrc 覆盖 PROMPT_COMMAND 时 OSC 7 消失，回落轮询。
+ * 联动**只走 OSC 7**（shell 自己报，`ESC ] 7 ; file://host/path BEL`）。
+ * 曾设计过按 `TerminalInfo.pid` 轮询进程 cwd 的兜底，砍掉了：2s 滞后的在途
+ * 旧值会把文件区来回拽，PowerShell 更是静默给错值（`Set-Location` 不改进程
+ * cwd，实测 §2.3）——宁可明确不跟随并给出启用片段，不可指错。
  */
 
 /**
@@ -47,12 +45,9 @@ export function isPowerShell(shell: string | undefined): boolean {
   return n === "powershell.exe" || n === "pwsh.exe" || n === "pwsh";
 }
 
-/**
- * 这个 shell 的进程 cwd 值不值得信。PowerShell 明确不值得（见模块文档）；
- * 其余 shell 的进程 cwd 跟着 `cd` 走（cmd.exe 实测跟得上）。
- */
-export function pollable(shell: string | undefined): boolean {
-  return !isPowerShell(shell);
+/** zsh（说明条要给它专属的 chpwd 片段）。 */
+export function isZsh(shell: string | undefined): boolean {
+  return shellName(shell) === "zsh";
 }
 
 /**
@@ -75,6 +70,10 @@ export function buildCdBytes(path: string, shell: string | undefined): Uint8Arra
   }
   return new TextEncoder().encode(line);
 }
+
+/** 给 zsh 用户的 `~/.zshrc` 片段：chpwd 钩子 + 启动时报一次。 */
+export const ZSH_OSC7_SNIPPET =
+  '_osc7(){ printf \'\\e]7;file://%s%s\\a\' "$HOST" "$PWD"; }; autoload -Uz add-zsh-hook; add-zsh-hook chpwd _osc7; _osc7';
 
 /** 给 PowerShell 用户的 `$PROFILE` 片段：加上它就有 OSC 7，联动即启用。 */
 export const POWERSHELL_OSC7_SNIPPET =

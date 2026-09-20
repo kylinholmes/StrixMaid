@@ -54,13 +54,13 @@ function Tile({
         ? fileIconUrl(entry.name)
         : null;
   const icon = builtin ? (
-    <img src={builtin} width={44} height={44} alt="" />
+    <img src={builtin} width={68} height={68} alt="" />
   ) : entry.kind === "dir" ? (
-    <Folder size={30} strokeWidth={1.2} className={s.kindDir} />
+    <Folder size={44} strokeWidth={1.2} className={s.kindDir} />
   ) : entry.kind === "symlink" ? (
-    <Link2 size={30} strokeWidth={1.2} />
+    <Link2 size={44} strokeWidth={1.2} />
   ) : (
-    <File size={30} strokeWidth={1.2} className={s.kindFile} />
+    <File size={44} strokeWidth={1.2} className={s.kindFile} />
   );
 
   return (

@@ -46,6 +46,20 @@ export function Workspace({ initial }: WorkspaceProps) {
     setPanelCollapsed(initial === "files");
   }, [initial, navKey, setPanelCollapsed]);
 
+  // ⌃` 切换终端面板（VSCode 同款）。capture 拦在 xterm 之前，终端聚焦时也能收。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.code === "Backquote") {
+        e.preventDefault();
+        e.stopPropagation();
+        const st = useWorkspace.getState();
+        st.setPanelCollapsed(!st.panelCollapsed);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   // 起点：主目录（capabilities 与会话就绪后才推得出）。
   useEffect(() => {
     if (cwd === null && user && caps.data) {
@@ -58,25 +72,29 @@ export function Workspace({ initial }: WorkspaceProps) {
   const past = useRef<string[]>([]);
   const future = useRef<string[]>([]);
   /**
-   * 反向 cd 之后，终端在追赶期间报出的还是**旧**目录（轮询最长滞后 2s）。
-   * 把这种迟到的旧值当「shell 又 cd 回去了」会把文件区拽回上一个目录——
-   * 表现为开着终端时每次进目录都来回弹、显得很慢。导航时记下旧目录，
-   * 短窗口内与它相同的报告一律忽略；报告是目标或第三个目录则立即跟随。
+   * 反向 cd 之后，流里可能还有一个 cd **之前**的 OSC 7 在路上，它报的是旧
+   * 目录；照单全收会把文件区拽回去。挡板按**事件序**工作、不用时钟：只在
+   * 真的发出过 cd 时记下（标签, 旧目录），该标签的下一个报告等于旧目录 →
+   * 忽略；是任何别的值（含目标）→ 清除挡板并照常跟随。我们注入的 cd 必然
+   * 在下一个提示符产生报告，挡板必然被清，不存在「真 cd 被误伤」的窗口。
    */
-  const staleGuard = useRef<{ prev: string | null; until: number }>({ prev: null, until: 0 });
+  const staleGuard = useRef<{ tabId: string | null; prev: string | null }>({
+    tabId: null,
+    prev: null,
+  });
   const navigate = useCallback(
     (path: string) => {
       const cur = useWorkspace.getState().cwd;
       if (cur === path) return;
       if (cur !== null) past.current.push(cur);
       future.current = [];
-      staleGuard.current = { prev: cur, until: Date.now() + 4_000 };
       setCwd(path);
       // 反向联动（§4.4）：给当前终端标签发一条 cd。只发给活着的、且不已在
-      // 该目录的；shell 回报 OSC 7 / 轮询后 follow 判定同路径，不会回环。
+      // 该目录的；shell 回报 OSC 7 后 follow 判定同路径，不会回环。
       const st = useWorkspace.getState();
       const tab = st.tabs.find((t) => t.id === st.activeId);
       if (tab?.status === "live" && tab.cwd !== path) {
+        staleGuard.current = { tabId: tab.id, prev: cur };
         termSockets.get(tab.id)?.send(buildCdBytes(path, tab.shell));
       }
     },
@@ -85,20 +103,24 @@ export function Workspace({ initial }: WorkspaceProps) {
 
   // 正向联动：活动终端报出新 cwd，文件区跟过去（§4.4「cd 到哪文件就到哪」）。
   const activeTabCwd = useWorkspace((st) => st.tabs.find((t) => t.id === st.activeId)?.cwd);
+  const activeTabId = useWorkspace((st) => st.activeId);
   useEffect(() => {
-    if (activeTabCwd === undefined || activeTabCwd === cwd) return;
+    if (activeTabCwd === undefined) return;
     const g = staleGuard.current;
-    if (activeTabCwd === g.prev && Date.now() < g.until) return; // 迟到的旧值，见上
-    setCwd(activeTabCwd);
-  }, [activeTabCwd, cwd, setCwd]);
+    if (g.tabId === activeTabId) {
+      if (activeTabCwd === g.prev) return; // cd 之前就在路上的旧报告，见上
+      staleGuard.current = { tabId: null, prev: null }; // 任何新值都清挡板
+    }
+    if (activeTabCwd !== cwd) setCwd(activeTabCwd);
+  }, [activeTabCwd, activeTabId, cwd, setCwd]);
   const jump = useCallback(
     (target: string, pushTo: React.MutableRefObject<string[]>) => {
       const st = useWorkspace.getState();
       if (st.cwd !== null) pushTo.current.push(st.cwd);
-      staleGuard.current = { prev: st.cwd, until: Date.now() + 4_000 };
       setCwd(target);
       const tab = st.tabs.find((t) => t.id === st.activeId);
       if (tab?.status === "live" && tab.cwd !== target) {
+        staleGuard.current = { tabId: tab.id, prev: st.cwd };
         termSockets.get(tab.id)?.send(buildCdBytes(target, tab.shell));
       }
     },
