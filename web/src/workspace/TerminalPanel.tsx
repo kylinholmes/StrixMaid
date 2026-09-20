@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronsUpDown, ChevronUp, Plus, X } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { Button, Menu } from "@/components";
 import { cx } from "@/lib/cx";
@@ -103,6 +103,45 @@ export function TerminalPanel() {
    * window 收不到 pointerup，监听器漏在那里，面板会一直粘着光标；
    * 捕获保证 move/up/cancel 都送到把手上，任一结束路径都能拆干净。
    */
+  /**
+   * VSCode 式展开（负责人定）：面板展开而一个终端都没有时，先向服务端
+   * 认领本会话还活着的终端（刷新页面后原有终端别丢），一个都没有才
+   * 自动开一个默认 shell。
+   */
+  const adopting = useRef(false);
+  useEffect(() => {
+    if (collapsed || tabs.length > 0 || adopting.current) return;
+    // 延一拍再读终态：子组件 effect 先于 Workspace 的「入口决定初始折叠」
+    // 跑，不等一下就会在 /files 入口下抢先开出终端。
+    const timer = setTimeout(() => {
+      const st = useWorkspace.getState();
+      if (st.panelCollapsed || st.tabs.length > 0 || adopting.current) return;
+      adopting.current = true;
+      void (async () => {
+        try {
+          const { data: list } = await api.GET("/api/v1/terminals");
+          if (useWorkspace.getState().tabs.length > 0) return;
+          if (list && list.length > 0) {
+            for (const t of list) {
+              addTab({
+                id: t.id,
+                title: titleOf(t.shell),
+                status: "live",
+                shell: t.shell,
+                pid: t.pid,
+              });
+            }
+          } else {
+            await create();
+          }
+        } finally {
+          adopting.current = false;
+        }
+      })();
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [collapsed, tabs.length, addTab, create]);
+
   const dragStart = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const el = e.currentTarget;

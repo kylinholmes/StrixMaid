@@ -45,6 +45,18 @@ export function App() {
     void restore();
   }, [restore]);
 
+  // 桌面应用手感：右键不弹浏览器菜单。输入区与终端放行——粘贴等原生
+  // 菜单在那里是刚需（xterm 的复制粘贴走浏览器菜单）。
+  useEffect(() => {
+    const onMenu = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('input, textarea, [contenteditable="true"], .xterm')) return;
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", onMenu);
+    return () => document.removeEventListener("contextmenu", onMenu);
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>

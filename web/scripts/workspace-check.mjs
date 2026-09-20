@@ -220,24 +220,28 @@ async function unixFlow(browser) {
   await page.goto(`${BASE}/files`);
   await page.waitForSelector("text=名称");
   check("文件列表渲染（主目录）", await page.isVisible("text=proj"));
-  check("从文件入口进入时终端面板收起", !(await page.isVisible("text=还没有终端")));
+  check("从文件入口进入时终端面板收起", !(await page.isVisible(".xterm")));
 
   // §4.1：两个导航入口指向同一页，且**每次点击**都重新生效——
   // React Router 复用组件实例，只看首挂载的话第二次点击就没反应了。
   await page.getByRole("button", { name: "终端", exact: true }).click();
-  await page.waitForSelector("text=还没有终端");
-  check("点导航「终端」展开面板", true);
+  // VSCode 式：展开时一个终端都没有 → 自动开一个。
+  await page.waitForSelector(".xterm", { timeout: 8000 });
+  check("点导航「终端」展开面板并自动开出终端", true);
   await page.getByRole("button", { name: "文件", exact: true }).click();
   await page.waitForTimeout(200);
-  check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
+  check("点导航「文件」收起面板", !(await page.isVisible(".xterm")));
 
   // ⌃` 切换终端面板（VSCode 同款）。
   await page.keyboard.press("Control+Backquote");
-  await page.waitForSelector("text=还没有终端");
-  check("Ctrl+` 展开终端面板", true);
+  await page.waitForFunction(() => {
+    const x = document.querySelector(".xterm");
+    return x !== null && x.getBoundingClientRect().height > 0;
+  });
+  check("Ctrl+` 展开终端面板（沿用已有终端）", true);
   await page.keyboard.press("Control+Backquote");
   await page.waitForTimeout(150);
-  check("Ctrl+` 再按折叠面板", !(await page.isVisible("text=还没有终端")));
+  check("Ctrl+` 再按折叠面板", !(await page.isVisible(".xterm")));
 
   // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
   check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
@@ -332,25 +336,26 @@ async function unixFlow(browser) {
   await page.waitForSelector("text=t1", { timeout: 5000 });
   check("焦点刷新后新目录出现", true);
 
-  // 终端：第一个标签用 shell 下拉建（非默认的 bash），验证下拉与参数直达后端。
+  // 终端：展开（沿用早前自动开出的 zsh），再用 shell 下拉建一个 bash。
   await page.click('[aria-label="展开终端面板"]');
+  await page.waitForSelector(".xterm", { timeout: 8000 });
   await page.click('[aria-label="选择 shell 新建终端"]');
   await page.getByRole("button", { name: "zsh（默认）" }).waitFor();
   await page.getByRole("button", { name: "bash", exact: true }).click();
-  await page.waitForSelector(".xterm", { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 2);
   check("shell 下拉建出终端（xterm 挂载）", true);
   check("POST 带上了选中的 shell", postedShells.includes("/bin/bash"), postedShells.join(","));
   check("标签名显示所选 shell", await page.isVisible("text=bash"));
   await page.waitForSelector("text=mock-shell", { timeout: 5000 }).catch(() => {});
-  await page.click(".xterm");
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("echo hi");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
-  const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
+  const echoed = await page.evaluate(() => document.querySelector('[class*=termHost]:not([class*=termHidden]) .xterm')?.textContent ?? "");
   check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
 
   // ---- 目录同步已按负责人决定移除：终端 cd 不影响文件区、导航不注入 cd ----
-  await page.click(".xterm");
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("cd /home/kylin/proj");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(600);
@@ -375,19 +380,18 @@ async function unixFlow(browser) {
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await page.waitForSelector("text=d0000.txt");
 
-  // 第二个标签 + 切换。
+  // 再开一个标签 + 切换（此前已有自动 zsh + 下拉 bash）。
   await page.click('[aria-label="新建终端"]');
-  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 2);
-  check("第二个标签，两个 xterm 实例并存（切走不卸载）", true);
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 3);
+  check("多标签的 xterm 实例并存（切走不卸载）", true);
 
-  // 在第二个标签里 exit 42。
-  await page.click(".xterm >> nth=1");
+  // 在新标签里 exit 42。
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("exit 42");
   await page.keyboard.press("Enter");
   await page.waitForSelector("text=已退出 (code 42)", { timeout: 5000 });
   check("退出显示带退出码，且与断线区分", true);
-  check("退出后内容保留（xterm 未销毁）",
-    (await page.locator(".xterm").count()) === 2);
+  check("退出后内容保留（xterm 未销毁）", (await page.locator(".xterm").count()) === 3);
 
   if (process.env.SHOT) {
     await page.screenshot({ path: `${process.env.SHOT}/workspace-terminal.png` });
