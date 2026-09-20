@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { HardDrive, Home, Slash } from "lucide-react";
-import { useRef } from "react";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { capabilitiesQuery } from "@/app/queries";
@@ -11,19 +10,35 @@ import { guessHome, platformOf } from "./path";
 import s from "./Workspace.module.css";
 
 type FilesystemInfo = components["schemas"]["FilesystemInfo"];
+type SystemInfo = components["schemas"]["SystemInfo"];
 
-/** 挂载点列表。周期性重取：挂载会来去（U 盘、NAS），也要发现「卡死后消失」的。 */
+/**
+ * 挂载点列表。**复用全局的 `["system","info"]` 缓存键**（概览页与性能页
+ * 已在用同一个端点），只是这里加了周期重取——挂载会来去（U 盘、NAS），
+ * 也要发现「卡死后消失」的。别开新键：同一端点两个键就是双倍请求
+ * 加两份会打架的缓存。
+ */
 function filesystemsQuery() {
   return {
-    queryKey: ["system", "info", "filesystems"],
-    queryFn: async (): Promise<FilesystemInfo[]> => {
+    queryKey: ["system", "info"],
+    queryFn: async (): Promise<SystemInfo> => {
       const { data, error } = await api.GET("/api/v1/system/info");
       if (error) throw error;
-      return data.filesystems ?? [];
+      return data;
     },
     refetchInterval: 30_000,
+    select: (d: SystemInfo) => d.filesystems ?? [],
   } as const;
 }
+
+/**
+ * 会话生命周期内见过的挂载点（§4.2 的「无响应」判定基线）。
+ *
+ * **模块级**而不是组件内的 ref：快速访问栏折叠、或切去别的页面时组件会
+ * 卸载，记忆跟着组件走的话，回来那一刻基线清零，卡死的挂载正好「凭空
+ * 消失」——恰是这条需求要防的事。
+ */
+const seenMounts = new Map<string, FilesystemInfo>();
 
 export interface QuickAccessProps {
   current: string | null;
@@ -42,17 +57,14 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
   const user = useSession((st) => st.user);
   const fs = useQuery(filesystemsQuery());
 
-  // 本页生命周期内见过的挂载点。用 ref 而不是 state：它只在渲染时被读，
-  // 且只增不减，不需要触发额外渲染。
-  const seen = useRef(new Map<string, FilesystemInfo>());
-  for (const f of fs.data ?? []) seen.current.set(f.mount_point, f);
+  for (const f of fs.data ?? []) seenMounts.set(f.mount_point, f);
   const liveMounts = fs.data ?? [];
   const liveKeys = new Set(liveMounts.map((f) => f.mount_point));
   // 只有在**拿到过一次成功结果**之后，缺席才有意义；请求失败时不判缺席。
   const staleMounts =
     fs.data === undefined
       ? []
-      : [...seen.current.values()].filter((f) => !liveKeys.has(f.mount_point));
+      : [...seenMounts.values()].filter((f) => !liveKeys.has(f.mount_point));
 
   const osId = caps.data?.identity?.os_id;
   const platform = platformOf(osId);

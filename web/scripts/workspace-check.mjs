@@ -153,6 +153,15 @@ async function unixFlow(browser) {
   check("文件列表渲染（主目录）", await page.isVisible("text=proj"));
   check("从文件入口进入时终端面板收起", !(await page.isVisible("text=还没有终端")));
 
+  // §4.1：两个导航入口指向同一页，且**每次点击**都重新生效——
+  // React Router 复用组件实例，只看首挂载的话第二次点击就没反应了。
+  await page.getByRole("button", { name: "终端", exact: true }).click();
+  await page.waitForSelector("text=还没有终端");
+  check("点导航「终端」展开面板", true);
+  await page.getByRole("button", { name: "文件", exact: true }).click();
+  await page.waitForTimeout(200);
+  check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
+
   // 进大目录：500 行渲染上限 + 「显示全部」。
   await page.click("text=proj");
   await page.waitForSelector("text=已显示前 500 项");
@@ -226,12 +235,19 @@ async function unixFlow(browser) {
     await page.screenshot({ path: `${process.env.SHOT}/workspace-terminal.png` });
   }
 
-  // 开到 8 个：`+` 必须禁用（§7-2），UI 自己算、后端从未回 409。
+  // 已退出的标签不占名额（服务端已释放）：8 个里有 1 个已退出时 + 仍可用。
   while ((await page.locator(".xterm").count()) < 8) {
     await page.click('[aria-label="新建终端"]');
     await page.waitForTimeout(120);
   }
-  check("到 8 个上限时 + 禁用", await page.locator('[aria-label="新建终端"]').isDisabled());
+  check(
+    "8 个标签但 1 个已退出时 + 仍可用",
+    !(await page.locator('[aria-label="新建终端"]').isDisabled()),
+  );
+  // 开满 8 个活的：`+` 必须禁用（§7-2），UI 自己算、后端从未回 409。
+  await page.click('[aria-label="新建终端"]');
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 9);
+  check("到 8 个存活上限时 + 禁用", await page.locator('[aria-label="新建终端"]').isDisabled());
 
   // 刷新保住滚动位置（§7-3）：进大目录、滚下去、焦点刷新、位置不动。
   await page.click('[aria-label="折叠终端面板"]');

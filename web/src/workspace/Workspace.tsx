@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { PanelLeft } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { capabilitiesQuery } from "@/app/queries";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
@@ -34,13 +35,14 @@ export function Workspace({ initial }: WorkspaceProps) {
   const osId = caps.data?.identity?.os_id;
   const platform = platformOf(osId);
 
-  // 入口决定面板初始态；只在进入时定一次，之后由用户操作接管。
-  const applied = useRef(false);
+  // 入口决定面板状态。**每次导航都重新生效**（key 于每次导航变化）：
+  // React Router 在 /terminal ↔ /files 之间切换时复用同一个组件实例，
+  // 只看「首次挂载」的话，点导航里的「终端」什么也不会发生。
+  const { key: navKey } = useLocation();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: navKey 就是要的触发器——每次导航（含同路径重复点击）重新应用入口初始态
   useEffect(() => {
-    if (applied.current) return;
-    applied.current = true;
     setPanelCollapsed(initial === "files");
-  }, [initial, setPanelCollapsed]);
+  }, [initial, navKey, setPanelCollapsed]);
 
   // 起点：主目录（capabilities 与会话就绪后才推得出）。
   useEffect(() => {

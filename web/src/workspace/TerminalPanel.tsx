@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Plus, X } from "lucide-react";
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
@@ -33,14 +33,24 @@ export function TerminalPanel() {
   const setPanelCollapsed = useWorkspace((st) => st.setPanelCollapsed);
   const limit = useWorkspace(atTabLimit);
   const creating = useRef(false);
+  /** 上一次开终端失败的原因。开成功或再点一次时清掉。 */
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const create = useCallback(async () => {
     // 连点保护：POST 在途时不再发第二个。
     if (creating.current) return;
     creating.current = true;
+    setCreateError(null);
     try {
       const { data, error } = await api.POST("/api/v1/terminals", { body: {} });
-      if (error || !data) return;
+      if (error || !data) {
+        // 静默失败会让人对着一个没反应的按钮连点：本页数不到的 409
+        // （另一个窗口占着同一会话的名额）、5xx、断网都要说出来。
+        setCreateError(
+          (error as { message?: string } | undefined)?.message ?? "开终端失败，请重试",
+        );
+        return;
+      }
       // 列表接口才有 shell 等元数据；此处用默认名，附着后标题无关紧要。
       const { data: list } = await api.GET("/api/v1/terminals");
       const info = list?.find((t) => t.id === data.id);
@@ -64,18 +74,26 @@ export function TerminalPanel() {
     [removeTab],
   );
 
-  /** 上边缘拖高：指针事件 + 全局 move/up，松手为止。 */
+  /**
+   * 上边缘拖高。用指针捕获而不是 window 监听：光标移出窗口再松手时
+   * window 收不到 pointerup，监听器漏在那里，面板会一直粘着光标；
+   * 捕获保证 move/up/cancel 都送到把手上，任一结束路径都能拆干净。
+   */
   const dragStart = useCallback(
-    (e: React.PointerEvent) => {
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const el = e.currentTarget;
+      el.setPointerCapture(e.pointerId);
       const startY = e.clientY;
       const startH = useWorkspace.getState().panelHeight;
       const move = (ev: PointerEvent) => setPanelHeight(startH + (startY - ev.clientY));
-      const up = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
+      const end = () => {
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", end);
+        el.removeEventListener("pointercancel", end);
       };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", end);
+      el.addEventListener("pointercancel", end);
     },
     [setPanelHeight],
   );
@@ -143,6 +161,11 @@ export function TerminalPanel() {
         >
           <Plus size={14} />
         </Button>
+        {createError && (
+          <span className={s.createError} role="alert">
+            {createError}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <Button
           iconOnly

@@ -51,9 +51,14 @@ interface WorkspaceState {
   toggleRail(): void;
 }
 
-/** 到达每会话上限即禁用「+」（§4.3）。 */
+/**
+ * 到达每会话上限即禁用「+」（§4.3）。
+ *
+ * **只数还活着的**（含断线——PTY 仍在跑、仍占服务端名额）：已退出的终端
+ * 服务端已经释放名额，标签只是留着给人看最后的输出，不该挡住新终端。
+ */
 export function atTabLimit(s: Pick<WorkspaceState, "tabs">): boolean {
-  return s.tabs.length >= MAX_TABS;
+  return s.tabs.filter((t) => t.status !== "exited").length >= MAX_TABS;
 }
 
 /** 已退出是终末态：迟到的断线/恢复事件不得改写它（exit 帧之后 WS 总会跟一个 close）。 */
@@ -97,7 +102,12 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   markLive: (id) => set((s) => ({ tabs: transition(s.tabs, id, { status: "live" }) })),
 
   setCwd: (path) => set({ cwd: path }),
-  setPanelHeight: (px) => set({ panelHeight: Math.max(120, px) }),
+  // 上限留出 160px 给文件区工具栏：面板长过容器会把自己的拖把手和标签栏
+  // 顶出可视区，只剩一个看不见的焦点元素能缩回来。
+  setPanelHeight: (px) =>
+    set({
+      panelHeight: Math.min(Math.max(120, px), Math.max(200, window.innerHeight - 160)),
+    }),
   setPanelCollapsed: (collapsed) => set({ panelCollapsed: collapsed }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
 }));

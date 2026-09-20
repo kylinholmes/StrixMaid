@@ -40,8 +40,15 @@ export function useDirListing(path: string | null) {
 
   useEffect(() => {
     if (path === null) return;
+    // 切回标签页时 focus 与 visibilitychange 几毫秒内先后触发，
+    // 各刷一次等于把在途请求取消再重发——300ms 内只认第一发。
+    let last = 0;
     const onFocus = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - last < 300) return;
+      last = now;
+      refresh();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);

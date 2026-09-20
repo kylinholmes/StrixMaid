@@ -255,6 +255,15 @@
   background: var(--surface-2);
 }
 
+.createError {
+  color: var(--warn);
+  font-size: var(--fs-300);
+  padding: 0 var(--sp-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .terminals {
   position: relative;
   flex: 1;

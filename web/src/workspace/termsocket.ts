@@ -34,8 +34,7 @@ export interface TermSocketHandlers {
   onStatus(up: boolean): void;
 }
 
-/** 与 `session/useSession.ts` 用同一个键——termsocket 不反向依赖 store。 */
-const TOKEN_KEY = "strixmaid.session.token";
+import { SESSION_TOKEN_KEY } from "@/session/token";
 
 export class TermSocket {
   private ws: WebSocket | null = null;
@@ -43,7 +42,7 @@ export class TermSocket {
   private closedByUs = false;
 
   constructor(id: string, h: TermSocketHandlers) {
-    const token = globalThis.localStorage?.getItem(TOKEN_KEY) ?? "";
+    const token = globalThis.localStorage?.getItem(SESSION_TOKEN_KEY) ?? "";
     const loc = globalThis.location;
     const proto = loc?.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${loc?.host ?? ""}/ws/terminal/${id}`, ["bearer", token]);

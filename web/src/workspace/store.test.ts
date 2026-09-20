@@ -68,4 +68,13 @@ describe("workspace store", () => {
     useWorkspace.getState().removeTab("0");
     expect(atTabLimit(useWorkspace.getState())).toBe(false);
   });
+
+  it("已退出的标签不占上限名额——服务端早已释放", () => {
+    for (let i = 0; i < MAX_TABS; i++)
+      useWorkspace.getState().addTab({ id: String(i), title: "sh", status: "live" });
+    expect(atTabLimit(useWorkspace.getState())).toBe(true);
+    useWorkspace.getState().markExited("0", "已退出 (code 0)");
+    expect(atTabLimit(useWorkspace.getState())).toBe(false);
+    expect(useWorkspace.getState().tabs).toHaveLength(MAX_TABS);
+  });
 });

@@ -40,13 +40,31 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
   const markDisconnected = useWorkspace((st) => st.markDisconnected);
   const markLive = useWorkspace((st) => st.markLive);
 
+  const lastDims = useRef<{ cols: number; rows: number } | null>(null);
+  const fitPending = useRef(false);
+
   const fitAndReport = useCallback(() => {
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit) return;
     fit.fit();
-    sockRef.current?.resize(term.cols, term.rows);
+    // 尺寸没变就不发帧：拖面板边时 ResizeObserver 每帧都响，把没变化的
+    // resize 也发出去，就是「每个鼠标事件 × 每个标签一次 worker RPC」的风暴。
+    const dims = { cols: term.cols, rows: term.rows };
+    if (lastDims.current?.cols === dims.cols && lastDims.current?.rows === dims.rows) return;
+    lastDims.current = dims;
+    sockRef.current?.resize(dims.cols, dims.rows);
   }, []);
+
+  /** 一帧最多量一次（rAF 合并），进一步压掉拖动期间的连环 fit。 */
+  const scheduleFit = useCallback(() => {
+    if (fitPending.current) return;
+    fitPending.current = true;
+    requestAnimationFrame(() => {
+      fitPending.current = false;
+      fitAndReport();
+    });
+  }, [fitAndReport]);
 
   const connect = useCallback(() => {
     sockRef.current?.close();
@@ -85,8 +103,12 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
     connect();
 
     const ro = new ResizeObserver(() => {
-      // 隐藏（display 尺寸为 0）时 fit 会量出胡话，跳过。
-      if (host.clientWidth > 0 && host.clientHeight > 0) fitAndReport();
+      // 只有活动标签才响应：非活动标签是 visibility:hidden，布局还在、
+      // RO 照样触发，8 个标签一起 fit 就是拖面板边时的卡顿来源。
+      // 隐藏期间漏掉的尺寸变化由「切回来补一次 fit」兜住。
+      if (!activeRef.current) return;
+      // 尺寸为 0（面板折叠）时 fit 会量出胡话，跳过。
+      if (host.clientWidth > 0 && host.clientHeight > 0) scheduleFit();
     });
     ro.observe(host);
 
@@ -99,9 +121,13 @@ export function TerminalTab({ id, active }: TerminalTabProps) {
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [connect, fitAndReport]);
+  }, [connect, scheduleFit]);
 
-  // 切回来时补一次 fit（隐藏期间的容器尺寸变化 ResizeObserver 量不准）。
+  // 活动状态给 RO 回调用（RO 的闭包建于挂载时，直接读 prop 是旧值）。
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
+  // 切回来时补一次 fit（隐藏期间的容器尺寸变化被上面的 RO 门挡掉了）。
   useEffect(() => {
     if (active) requestAnimationFrame(fitAndReport);
   }, [active, fitAndReport]);
