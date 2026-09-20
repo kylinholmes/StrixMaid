@@ -68,7 +68,15 @@ struct Terminal {
     /// 它存在只为一件事：**避免对回收后的 pid 再发一次信号**。pid 是会被系统
     /// 重用的，对一个已经不属于我们的进程组发 `SIGHUP` 就是误伤别人。
     closed: bool,
+    /// 本条目的「代」。pid 是会被系统复用的：`close` 先摘表再等收尸，这个
+    /// 窗口里新开的终端可能拿到同一个 pid 并插进表里。收尸任务与保留期清理
+    /// 只认代号相同的条目，免得把新终端误标 `closed`（那会让它关不掉、
+    /// 还可能被保留期清理误删）。
+    serial: u64,
 }
+
+/// [`Terminal::serial`] 的来源：进程内单调递增，永不复用。
+static NEXT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Drop for Terminal {
     fn drop(&mut self) {
@@ -230,7 +238,8 @@ impl TerminalTable {
         // dispatcher 析构时表就不会被 drop，`Terminal::drop` 里的 SIGHUP 也就
         // 永远不会发——worker 退出后 shell 变孤儿。
         let weak = Arc::downgrade(&self.inner);
-        let reaper = tokio::spawn(reap(weak, pid, self.linger));
+        let serial = NEXT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reaper = tokio::spawn(reap(weak, pid, serial, self.linger));
 
         let result = TermOpenResult {
             pid: pid.as_raw() as u32,
@@ -246,6 +255,7 @@ impl TerminalTable {
                 pumps,
                 reaper: Some(reaper),
                 closed: false,
+                serial,
             },
         );
         tracing::info!(
@@ -330,6 +340,7 @@ impl TerminalTable {
 async fn reap(
     table: Weak<Mutex<HashMap<u32, Terminal>>>,
     pid: Pid,
+    serial: u64,
     linger: Duration,
 ) -> Option<TermExit> {
     // `waitpid` 是阻塞调用，放进阻塞线程池，别占住 runtime 的工作线程。
@@ -366,21 +377,24 @@ async fn reap(
     let pid_key = pid.as_raw() as u32;
     if let Some(table) = table.upgrade() {
         let mut lingering = false;
-        if let Some(term) = table.lock().await.get_mut(&pid_key) {
+        // 只认代号相同的条目：`close` 摘表后到这里之间，这个 pid 可能已被
+        // 系统复用、被一个**新**终端插进表里——动它就是误伤（见 `Terminal::serial`）。
+        if let Some(term) = table.lock().await.get_mut(&pid_key)
+            && term.serial == serial
+        {
             // 进程已经回收，pid 随时可能被系统重用——绝不能再往它身上发信号。
             term.closed = true;
             lingering = true;
         }
         if lingering {
             // 条目的正常出口是 `term.close` 来取；这里只兜主进程一直不来的异常
-            // 路径。只清 `closed` 的条目：万一这个 pid 已被一个新终端占用
-            // （新条目 `closed = false`），不能把人家误删。
+            // 路径。同样只清代号相同的条目，不能把复用了 pid 的新终端误删。
             let weak = Arc::downgrade(&table);
             tokio::spawn(async move {
                 tokio::time::sleep(linger).await;
                 let Some(table) = weak.upgrade() else { return };
                 let mut guard = table.lock().await;
-                if guard.get(&pid_key).is_some_and(|t| t.closed) {
+                if guard.get(&pid_key).is_some_and(|t| t.closed && t.serial == serial) {
                     guard.remove(&pid_key);
                     tracing::debug!(pid = pid_key, "退出状态无人来取，条目过期清除");
                 }

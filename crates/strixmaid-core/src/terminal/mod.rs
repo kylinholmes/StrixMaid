@@ -1353,16 +1353,7 @@ mod tests {
                 });
             }
 
-            let (main_side, worker_side) = IpcChannel::pair().unwrap();
-            tokio::spawn(async move {
-                let _ = worker::serve(worker_side, Arc::new(d)).await;
-            });
-            // pid 传 -1：这个 worker 是进程内的，绝不能真去 kill 谁。
-            // 附件照样收得到：`IpcChannel::pair()` 在 Windows 上把两端的对端
-            // 都设成本进程，`DuplicateHandle` 的源就是自己。
-            let handle = WorkerHandle::connect(main_side, -1, None)
-                .await
-                .expect("假 worker 握手失败");
+            let handle = serve_in_process(d).await;
 
             FakeWorker {
                 handle,
@@ -1393,6 +1384,21 @@ mod tests {
         fn closes(&self) -> Vec<u32> {
             self.closes.lock().unwrap().clone()
         }
+    }
+
+    /// 把一个装好方法的分发表接成进程内 worker，返回主进程侧的句柄。
+    ///
+    /// pid 传 -1：这个 worker 是进程内的，绝不能真去 kill 谁。
+    /// 附件照样收得到：`IpcChannel::pair()` 在 Windows 上把两端的对端
+    /// 都设成本进程，`DuplicateHandle` 的源就是自己。
+    async fn serve_in_process(d: Dispatcher) -> WorkerHandle {
+        let (main_side, worker_side) = IpcChannel::pair().unwrap();
+        tokio::spawn(async move {
+            let _ = worker::serve(worker_side, Arc::new(d)).await;
+        });
+        WorkerHandle::connect(main_side, -1, None)
+            .await
+            .expect("进程内 worker 握手失败")
     }
 
     fn registry(max_per_session: usize, idle_timeout_secs: u64) -> Arc<TerminalRegistry> {
@@ -1875,13 +1881,7 @@ mod tests {
     async fn start_real_worker() -> WorkerHandle {
         let mut d = Dispatcher::new();
         let _table = crate::worker::terminal::register(&mut d);
-        let (main_side, worker_side) = IpcChannel::pair().unwrap();
-        tokio::spawn(async move {
-            let _ = worker::serve(worker_side, Arc::new(d)).await;
-        });
-        WorkerHandle::connect(main_side, -1, None)
-            .await
-            .expect("真 worker 握手失败")
+        serve_in_process(d).await
     }
 
     /// A 期回归（`roadmap/12-workspace.md` §4.9）：**真 PTY** 下 shell 自行退出后，
