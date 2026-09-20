@@ -62,7 +62,11 @@ export class TermSocket {
         if (frame.t === "exit") {
           this.exited = true;
           const { reason, code, signal } = frame;
-          h.onExit({ reason, ...(code !== undefined && { code }), ...(signal !== undefined && { signal }) });
+          h.onExit({
+            reason,
+            ...(code !== undefined && { code }),
+            ...(signal !== undefined && { signal }),
+          });
         }
       } catch {
         // 忽略
