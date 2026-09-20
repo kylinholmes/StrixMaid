@@ -2,10 +2,15 @@
 //!
 //! # 为什么经 worker
 //!
-//! 文件的可见性由文件系统按 uid 裁决（`design.md` §1 原则 3）。两个端点经
+//! 文件的可见性由文件系统按 uid 裁决（`design.md` §1 原则 3）。读文件的端点经
 //! [`crate::auth::exec`] 投递到会话的 user worker：普通用户看不到 `/etc/shadow`
 //! 就是 403，不需要服务端写一行判断。主进程（可能是 root）里读文件会让任何
 //! 登录用户看到全部文件，授权模型直接失效。
+//!
+//! 唯一的例外是 [`type_icon`]：类型图标是操作系统的属性、按扩展名取、
+//! **不产生任何文件访问**，因此留在主进程里让缓存跨会话共用——与
+//! [`super::processes::icon`] 同一套理由，展开见
+//! [`strixmaid_core::providers::fs::icon`] 的模块文档。
 //!
 //! # `allowed_roots` 不是安全边界
 //!
@@ -19,9 +24,11 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Extension, Query, State};
-use axum::response::Response;
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse as _, Response};
 use futures::StreamExt as _;
+use strixmaid_core::providers::fs::icon::FileTypeIcons;
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
 use strixmaid_types::file::{DirListing, FileContent, FileListQuery, FilePathQuery};
@@ -39,6 +46,10 @@ pub struct FilesState {
     auth: Arc<AuthState>,
     /// `files.allowed_roots`，启动时转成字符串，随每次 RPC 下发。
     allowed_roots: Arc<Vec<String>>,
+    /// 文件类型图标的缓存。**只**给 [`type_icon`] 用——那是 `/files/*` 里唯一
+    /// 不经 worker 的端点（类型图标是操作系统的属性、不产生文件访问，
+    /// 理由见 `strixmaid_core::providers::fs::icon` 的模块文档）。
+    type_icons: FileTypeIcons,
 }
 
 impl FilesState {
@@ -51,6 +62,7 @@ impl FilesState {
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect(),
             ),
+            type_icons: FileTypeIcons::new(),
         }
     }
 
@@ -68,7 +80,47 @@ pub fn router(state: FilesState) -> OpenApiRouter<()> {
         .routes(routes!(list_dir))
         .routes(routes!(read_file))
         .routes(routes!(raw_file))
+        .routes(routes!(type_icon))
         .with_state(state)
+}
+
+/// 文件类型图标
+///
+/// 按**扩展名**（不含点，如 `pdf`）取这一类文件的系统图标。Linux 与无窗口
+/// 服务器的 macOS 环境一律 404，前端据此回落到内置图标集（§4.7）。
+#[utoipa::path(
+    get,
+    path = "/files/icon/{ext}",
+    tag = "files",
+    security(("bearer" = [])),
+    params(("ext" = String, Path, description = "扩展名，不含前导点，如 `pdf`")),
+    responses(
+        // body 用 `String` 表达二进制响应的理由见 `processes::icon`。
+        (status = 200, description = "这一类文件的系统图标（响应体是原始 PNG 字节）", content_type = "image/png", body = String),
+        (status = 400, description = "扩展名不合法（含点号、分隔符或过长）", body = ApiError),
+        (status = 401, description = "未认证", body = ApiError),
+        (status = 404, description = "本平台不提供文件类型图标（Linux、无窗口服务器的 macOS），\
+                                      或系统给不出这一类的图标", body = ApiError),
+    ),
+)]
+pub async fn type_icon(
+    State(st): State<FilesState>,
+    // 不用这个值，但必须提取：与 `processes::icon` 同一理由——它是本端点
+    // 需要会话这件事在代码里的凭据。
+    Extension(_session): Extension<Session>,
+    Path(ext): Path<String>,
+) -> ApiResult<Response> {
+    let png = st.type_icons.icon_png(&ext).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            // 类型图标只随「换默认打开程序 / 换系统主题」这种小时级事件变化，
+            // 浏览器端存一天；服务端缓存仍是 5 分钟档（IconCache::TTL）。
+            (header::CACHE_CONTROL, "max-age=86400"),
+        ],
+        png.as_slice().to_vec(),
+    )
+        .into_response())
 }
 
 /// 列目录

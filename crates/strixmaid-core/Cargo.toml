@@ -63,6 +63,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    # 文件类型图标：`SHGetFileInfoW` 要求调用线程先初始化 COM（外壳图标
+    # 处理器是 COM 组件），见 platform/windows/icon.rs 的 `ComInit`。
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Environment",
     "Win32_System_EventLog",

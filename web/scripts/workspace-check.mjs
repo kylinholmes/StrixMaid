@@ -129,6 +129,15 @@ async function mockApi(page, { platform, osId }) {
       const page = limit === undefined ? list : list.slice(offset, offset + limit);
       return json({ path: qpath, entries: page, skipped: found.skipped, total });
     }
+    if (p.includes("/files/icon/")) {
+      // 系统文件类型图标（按扩展名）：与缩略图同一张 1×1 PNG 即可，
+      // 断言只看 <img src="blob:">。
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
     if (p.endsWith("/files/raw")) {
       // 1×1 红色 PNG。
       const png = Buffer.from(
@@ -377,8 +386,15 @@ async function unixFlow(browser) {
   await page.waitForSelector('[class*=tileGrid]');
   await page.waitForSelector('[class*=tileIcon] img[src^="blob:"]', { timeout: 5000 });
   check("平铺视图的图片条目出缩略图", true);
+  // 层叠是列表模式的东西（负责人 2026-09-20 定）：平铺永远单层。
+  check("平铺视图不渲染层叠垫层", (await page.locator("[data-pane]").count()) === 1);
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await page.waitForSelector("text=d0000.txt");
+  // 系统文件类型图标：探测通过后按扩展名取，列表行的图标是 blob:。
+  await page.waitForSelector('[data-pane="top"] [class*=nameCell] img[src^="blob:"]', {
+    timeout: 5000,
+  });
+  check("列表行用上系统类型图标（/files/icon）", true);
 
   // 再开一个标签 + 切换（此前已有自动 zsh + 下拉 bash）。
   await page.click('[aria-label="新建终端"]');

@@ -196,7 +196,7 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 |---|---|
 | `GET /terminals/shells` | 本机可用 shell（名字 + 路径 + 哪个是默认） |
 | `GET /files/raw?path=` | 原始字节流，带大小上限。缩略图与将来的下载都用它 |
-| `GET /files/icon?…` | 按文件类型取图标，返回 PNG。**内置图标集把这条路盖住了**（§4.7：图标在前端解决、零请求），端点保留是给「取系统真图标」留位，见 §8 未决 8 |
+| `GET /files/icon/{ext}` | 按**扩展名**取系统真图标，返回 PNG（2026-09-20 落地，见 §8 未决 8）。前端优先它、404 回落内置集（§4.7） |
 | `GET /files` 增加分页与排序参数 | 见 §4.5 |
 | `TerminalInfo` 增加 `pid` | cwd 兜底要它 |
 
@@ -236,9 +236,10 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 
 **零缺口**。89 KB 打进前端资源，对 15 MiB 的体积门槛（当前 release 10.5 MB）无影响。
 
-**两套都按扩展名/MIME 映射，所以图标完全在前端解决、零请求。** `GET /files/icon`
-这个端点在有内置集的情况下不会被调用——它保留下来是给「取系统真图标」那条路
-（见 §8 未决 8）留位。
+**两套都按扩展名/MIME 映射，所以内置集这条路完全在前端解决、零请求。**
+2026-09-20 起「取系统真图标」也落地了（`GET /files/icon/{ext}`，见 §8 未决 8）：
+支持的平台（Windows、有窗口服务器的 macOS）上文件优先显示系统图标，内置集
+降为回落；Linux 后端 404，前端探测一次后整个会话零请求，内置集照旧。
 
 **许可证不一样，要分别处理。** vscode-icons 是 MIT；**Papirus 是 GPL-3.0**——与本项目
 同许可（`Cargo.toml` 的 `license = "GPL-3.0-only"`），方向没问题，但 GPL 的
@@ -373,7 +374,17 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
    （inotify / `ReadDirectoryChangesW` / FSEvents）与收益不匹配，而目录变化通常正是
    使用者自己在下面那个终端里造成的。
 
-8. **「取系统真图标」这条还做不做。** 原计划 Windows 走 `SHGetFileInfoW`、macOS 走
-   `NSWorkspace`。内置集定下来之后它的价值缩小成「装了 Office 的机器上 `.docx` 显示
-   真正的 Word 图标」，而代价是三平台各一套实现（macOS 还得先搭 objc 桥，仓库目前
-   一处都没有）。`GET /files/icon` 端点为它留着位。**倾向 D 期再评估，不在 B 期做。**
+8. ~~**「取系统真图标」这条还做不做。**~~ **做了（2026-09-20，负责人要求）**。
+   端点 `GET /files/icon/{ext}`，key 是扩展名（按类型缓存与请求，§4.6 的账）：
+   - **Windows**：`SHGetFileInfoW(SHGFI_USEFILEATTRIBUTES)`——虚构文件名、只查
+     注册表、不碰磁盘；先 `SHGFI_ICONLOCATION` + `PrivateExtractIconsW` 取精确
+     64px，处理器动态生成的类型回落 `SHGFI_ICON` 大图标档。
+   - **macOS**：objc 桥落在 `platform/appkit.rs`（手写 `objc_msgSend`，与
+     `iokit.rs` 同取向，不引 objc2）：`UTType` → `NSWorkspace iconForContentType:`
+     （老系统回落 `iconForFileType:`）→ `NSBitmapImageRep` 编码 PNG。
+     `available()` 以窗口服务器连接（`CGSessionCopyCurrentDictionary`）为闸——
+     守护进程形态下 AppKit 行为不确定，误开的代价是挂住，宁严勿宽。
+   - **Linux**：不做（未决 3 的图标主题问题原样在），恒 404。
+   - 缓存照搬 `IconCache`（TTL/负缓存/single-flight），不预热（类型集合事先
+     不可知）。前端 `sysicons.ts` 先拿 `txt` 探测一次，404 就整个会话不再问；
+     文件优先系统图标、回落内置集，目录仍走内置集（分类文件夹信息量更大）。

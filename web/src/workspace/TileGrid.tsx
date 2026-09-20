@@ -2,6 +2,7 @@ import { File, Folder, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cx } from "@/lib/cx";
 import { fileIconUrl, folderIconUrl } from "./icons";
+import { useSysIcon } from "./sysicons";
 import { fetchThumb, thumbEligible } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -47,11 +48,13 @@ function Tile({
   onSelect: () => void;
 }) {
   const { ref, url } = useLazyThumb(path, thumbEligible(entry));
+  // 优先级：缩略图 > 系统真图标 > 内置图标集 > 通用形状（与 KindIcon 一致）。
+  const sys = useSysIcon(entry.kind === "file" ? entry.name : null);
   const builtin =
     entry.kind === "dir"
       ? folderIconUrl(entry.name)
       : entry.kind === "file"
-        ? fileIconUrl(entry.name)
+        ? (sys ?? fileIconUrl(entry.name))
         : null;
   const icon = builtin ? (
     <img src={builtin} width={68} height={68} alt="" />

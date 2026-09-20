@@ -54,6 +54,8 @@ use strixmaid_types::{ApiError, ApiResult};
 
 use super::{Probe, Provider};
 
+pub mod icon;
+
 #[cfg(windows)]
 pub mod windows;
 

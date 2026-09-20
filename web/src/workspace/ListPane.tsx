@@ -7,6 +7,7 @@ import { fileIconUrl, folderIconUrl } from "./icons";
 import { OverlayScrollbar } from "./OverlayScrollbar";
 import { joinPath, type Platform } from "./path";
 import { useWorkspace } from "./store";
+import { useSysIcon } from "./sysicons";
 import { TileGrid } from "./TileGrid";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -35,9 +36,12 @@ function fmtMtime(ts: number): string {
 }
 
 function KindIcon({ entry }: { entry: DirEntry }) {
+  // 系统真图标（§8 未决 8）优先，其次内置图标集（§4.7），最后通用形状。
+  // hook 必须无条件调用，因此放在 symlink 的早退之前；目录不问系统
+  // （内置集的分类文件夹比系统那张千篇一律的蓝色文件夹信息量大）。
+  const sys = useSysIcon(entry.kind === "file" ? entry.name : null);
   if (entry.kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
-  // 内置图标集（§4.7）：文件夹总有图标，文件认不出时回落到通用形状。
-  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name);
+  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : (sys ?? fileIconUrl(entry.name));
   if (src)
     return (
       <img
