@@ -8,6 +8,7 @@ import { ProcPage } from "@/proc/ProcPage";
 import { useSession } from "@/session/useSession";
 import { SvcPage } from "@/svc/SvcPage";
 import { useTheme } from "@/theme/useTheme";
+import { Workspace } from "@/workspace/Workspace";
 import { Overview } from "./Overview";
 import { capabilitiesQuery } from "./queries";
 import { Shell } from "./Shell";
@@ -60,8 +61,9 @@ export function App() {
             <Route path="/processes" element={<ProcPage />} />
             <Route path="/services" element={<SvcPage />} />
             <Route path="/logs" element={<LogsPage />} />
-            <Route path="/terminal" element={<StubPage title="终端" />} />
-            <Route path="/files" element={<StubPage title="文件" />} />
+            {/* 两个入口指向同一个工作区，只是初始状态不同（roadmap/12 §4.1）。 */}
+            <Route path="/terminal" element={<Workspace initial="terminal" />} />
+            <Route path="/files" element={<Workspace initial="files" />} />
             <Route path="/audit" element={<StubPage title="审计" />} />
             <Route path="/settings" element={<StubPage title="设置" />} />
             <Route path="*" element={<Navigate to="/overview" replace />} />

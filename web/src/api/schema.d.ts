@@ -846,6 +846,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/terminals/shells": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 可用 shell 列表
+         * @description 新建终端下拉用。默认项（会话用户的登录 shell / `%COMSPEC%`）排最前。
+         *     这只是展示清单，不是准入判定——开终端时 worker 仍按自己的白名单复核。
+         */
+        get: operations["list_shells"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/terminals/{id}": {
         parameters: {
             query?: never;
@@ -2382,6 +2403,24 @@ export interface components {
              * @example Asia/Shanghai
              */
             timezone: string;
+        };
+        /** @description `GET /api/v1/terminals/shells` 列表项：本机可供开终端的一个 shell。 */
+        ShellInfo: {
+            /**
+             * @description 是否为会话用户的默认 shell（Unix：passwd 的登录 shell；Windows：`%COMSPEC%`）。
+             *     列表里恰好一项为 `true`，且排在最前。
+             */
+            default: boolean;
+            /**
+             * @description 展示名（文件名）。
+             * @example zsh
+             */
+            name: string;
+            /**
+             * @description 绝对路径，直接可作 [`CreateTerminalReq::shell`]。
+             * @example /bin/zsh
+             */
+            path: string;
         };
         /**
          * @description 允许发送的信号。
@@ -4972,6 +5011,35 @@ export interface operations {
             };
             /** @description 写入失败 */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_shells: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可用 shell，默认项在最前 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShellInfo"][];
+                };
+            };
+            /** @description 未认证 */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
