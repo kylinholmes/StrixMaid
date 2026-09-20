@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +11,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "@/api/client";
 import {
   Button,
   type Column,
@@ -22,10 +24,11 @@ import {
   Toolbar,
   ToolbarSpacer,
 } from "@/components";
+import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
 import { fileIconUrl, folderIconUrl } from "./icons";
 import { OverlayScrollbar } from "./OverlayScrollbar";
-import { joinPath, type Platform, parentPath } from "./path";
+import { joinPath, type Platform, parentPath, splitForCompletion } from "./path";
 import { useWorkspace } from "./store";
 import { TileGrid } from "./TileGrid";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
@@ -126,6 +129,58 @@ export function FileList({
   /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
   const [editing, setEditing] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // ---- 地址栏补全（负责人 2026-09-20 要求）：父目录的子目录按前缀过滤 ----
+  const qc = useQueryClient();
+  const [sugs, setSugs] = useState<string[]>([]);
+  const [sugIdx, setSugIdx] = useState(-1);
+
+  useEffect(() => {
+    if (editing === null) {
+      setSugs([]);
+      return;
+    }
+    const split = splitForCompletion(editing.trim(), platform);
+    if (!split) {
+      setSugs([]);
+      return;
+    }
+    // 去抖 + 短缓存：同一父目录连续敲字不重复打后端。
+    const t = setTimeout(async () => {
+      try {
+        const data = await qc.fetchQuery({
+          queryKey: ["complete", split.parent],
+          staleTime: 10_000,
+          queryFn: async () => {
+            const { data: d, error: e } = await api.GET("/api/v1/files", {
+              params: {
+                query: { path: split.parent, limit: 200, sort: "name", order: "asc" },
+              },
+            });
+            if (e) throw e;
+            return d;
+          },
+        });
+        const pref = split.prefix.toLowerCase();
+        setSugs(
+          (data.entries ?? [])
+            .filter((en) => en.kind === "dir" && en.name.toLowerCase().startsWith(pref))
+            .slice(0, 8)
+            .map((en) => joinPath(split.parent, en.name, platform)),
+        );
+        setSugIdx(-1);
+      } catch {
+        setSugs([]); // 父目录读不到就不补，不打扰输入
+      }
+    }, 150);
+    return () => clearTimeout(t);
+  }, [editing, platform, qc]);
+
+  const acceptSuggestion = (target: string) => {
+    onNavigate(target);
+    setEditing(null);
+    setSugs([]);
+  };
 
   // ---- 虚拟滚动：只渲染视口附近的行（§4.5「不能一次渲染出来」）----
   const [scrollTop, setScrollTop] = useState(0);
@@ -252,28 +307,77 @@ export function FileList({
         >
           <ArrowUp size={14} />
         </Button>
-        <input
-          className={s.pathBar}
-          aria-label="路径，回车跳转"
-          title={path ?? ""}
-          value={editing ?? path ?? ""}
-          onChange={(e) => setEditing(e.target.value)}
-          onFocus={(e) => e.target.select()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              const target = (editing ?? "").trim();
-              if (target && target !== path) onNavigate(target);
+        <span className={s.pathWrap}>
+          <input
+            className={s.pathBar}
+            aria-label="路径，回车跳转"
+            aria-expanded={sugs.length > 0}
+            title={path ?? ""}
+            value={editing ?? path ?? ""}
+            onChange={(e) => setEditing(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown" && sugs.length > 0) {
+                e.preventDefault();
+                setSugIdx((i) => (i + 1) % sugs.length);
+                return;
+              }
+              if (e.key === "ArrowUp" && sugs.length > 0) {
+                e.preventDefault();
+                setSugIdx((i) => (i <= 0 ? sugs.length - 1 : i - 1));
+                return;
+              }
+              if (e.key === "Tab" && sugIdx >= 0 && sugs[sugIdx]) {
+                // Tab 只补进输入框，继续往下敲；Enter 才跳转。
+                e.preventDefault();
+                setEditing(sugs[sugIdx]);
+                return;
+              }
+              if (e.key === "Enter") {
+                const chosen = sugIdx >= 0 ? sugs[sugIdx] : null;
+                const target = (chosen ?? editing ?? "").trim();
+                if (target && target !== path) onNavigate(target);
+                setEditing(null);
+                setSugs([]);
+                e.currentTarget.blur();
+              }
+              if (e.key === "Escape") {
+                if (sugs.length > 0) {
+                  setSugs([]); // 第一次 Esc 收下拉，第二次才还原输入
+                  return;
+                }
+                setEditing(null);
+                e.currentTarget.blur();
+              }
+            }}
+            onBlur={() => {
               setEditing(null);
-              e.currentTarget.blur();
-            }
-            if (e.key === "Escape") {
-              setEditing(null);
-              e.currentTarget.blur();
-            }
-          }}
-          onBlur={() => setEditing(null)}
-          spellCheck={false}
-        />
+              setSugs([]);
+            }}
+            spellCheck={false}
+          />
+          {editing !== null && sugs.length > 0 && (
+            <ul className={s.pathSugs} role="listbox" aria-label="路径补全">
+              {sugs.map((p2, i) => (
+                <li key={p2}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={i === sugIdx}
+                    className={cx(s.pathSug, i === sugIdx && s.pathSugActive)}
+                    // mousedown 抢在 input 失焦之前，click 就来不及了
+                    onMouseDown={(ev) => {
+                      ev.preventDefault();
+                      acceptSuggestion(p2);
+                    }}
+                  >
+                    {p2}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </span>
         <ToolbarSpacer />
         <Segmented
           label="文件视图"

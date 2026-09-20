@@ -252,8 +252,19 @@ async function unixFlow(browser) {
   await page.press('[aria-label="路径，回车跳转"]', "Enter");
   await page.waitForSelector("text=nginx.conf");
   check("地址栏输入回车跳转", true);
+
+  // 地址栏补全：敲前缀出下拉，↓ 选中 Enter 跳转。
+  await page.fill('[aria-label="路径，回车跳转"]', "/home/kylin/pr");
+  await page.waitForSelector('[role="option"]:has-text("/home/kylin/proj")', { timeout: 4000 });
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("text=共 800 项");
+  check(
+    "地址栏补全可选中并跳转",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
+  );
   await page.click("text=主目录");
-  await page.waitForSelector("text=proj");
+  await page.waitForSelector('tbody >> text=proj');
 
   // 进大目录：服务端分页（首页 500）+ 虚拟滚动（DOM 里只有视口附近的行）。
   await page.click("text=proj");
