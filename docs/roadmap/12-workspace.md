@@ -152,7 +152,13 @@
 - 字节流是**裸二进制**，`web/src/lib/ws.ts`（`/ws` 控制面的 envelope 客户端）
   **不能复用**，另写一个薄客户端。
 
-### 4.4 cwd 联动
+### 4.4 cwd 联动（已移除，2026-09-20）
+
+> **本节按 C 期实现后又整体移除**（负责人 2026-09-20 决定）：反向注入 `cd`
+> 会在终端里回显并重画提示符，切换标签还会牵动文件区跳目录重取，实测有
+> 体感卡顿；轮询兜底则有 2s 滞后的旧值回弹问题。两个方向都拆掉，终端与
+> 文件各自独立。保留下来的独立成果：macOS 进程 cwd（`PROC_PIDVNODEPATHINFO`）
+> 与 `TerminalInfo.pid`。以下原设计仅存档。
 
 **主路径 OSC 7，纯前端。** shell 用 `ESC ] 7 ; file://<host>/<path> BEL` 报出自己的
 cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端一行不改**，

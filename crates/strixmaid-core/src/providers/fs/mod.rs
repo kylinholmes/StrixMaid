@@ -46,11 +46,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-// `DirEntryInfo` 只在 Unix 侧的 `EntryMapper` 里构造；Windows 侧在
-// [`windows::EntryMapper`] 里，那边自己 use。
-#[cfg(unix)]
 use strixmaid_types::file::DirEntryInfo;
-use strixmaid_types::file::{DirListing, FileContent, FileKind};
+use strixmaid_types::file::{DirListing, FileContent, FileKind, FileSortKey};
+use strixmaid_types::process::SortOrder;
+use strixmaid_types::rpc::{FS_RAW_MAX_CHUNK, FsRawChunk};
 use strixmaid_types::{ApiError, ApiResult};
 
 use super::{Probe, Provider};
@@ -61,8 +60,15 @@ pub mod windows;
 #[cfg(windows)]
 use windows::EntryMapper;
 
-/// `fs.read` 的大小上限（roadmap/04 §A.3）。超出直接报错，不截断。
-pub const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
+/// `fs.read` 的大小上限。超出直接报错，不截断。
+///
+/// 原为 5 MiB（roadmap/04 §A.3），但 worker RPC 的单帧上限是 1 MiB
+/// （`ipc::MAX_FRAME_LEN`）：**大于约 1 MiB 的响应从来就过不了通道**，
+/// 只会在帧层炸出一个 IPC 错误——那 5 MiB 是纸面数字，测试只测了
+/// `read_blocking`、没走真通道，所以活到今天。收到帧安全的 640 KiB
+/// （JSON 转义最坏 ~2 倍后仍 < 1 MiB），超限得到的是清晰的 400 而不是
+/// 通道错误。大文件走 `fs.raw` 的分块（12 号方案 §4.6）。
+pub const MAX_READ_BYTES: u64 = 640 * 1024;
 
 /// 二进制判定的扫描窗口：前 8 KiB 含 NUL 即视为二进制。
 const NUL_SCAN_BYTES: usize = 8 * 1024;
@@ -249,13 +255,18 @@ impl FsProvider {
         Self::default()
     }
 
-    /// `fs.list`：列目录。
-    pub async fn list(&self, path: &str, roots: &[String]) -> ApiResult<DirListing> {
+    /// `fs.list`：列目录（含排序与分页，`opts` 见 [`ListOptions`]）。
+    pub async fn list(
+        &self,
+        path: &str,
+        roots: &[String],
+        opts: ListOptions,
+    ) -> ApiResult<DirListing> {
         let dir = resolve(path, roots)?;
         let caches = Arc::clone(&self.caches);
         // 卡死的 NFS 挂载点上一次 lstat 就能挂住，整段放进阻塞线程池，
         // 不让它占住 worker 的 runtime 线程。
-        tokio::task::spawn_blocking(move || list_blocking(&caches, &dir))
+        tokio::task::spawn_blocking(move || list_blocking(&caches, &dir, &opts))
             .await
             .map_err(|e| ApiError::internal("fs.list 任务异常").with_detail(e.to_string()))?
     }
@@ -266,6 +277,46 @@ impl FsProvider {
         tokio::task::spawn_blocking(move || read_blocking(&file))
             .await
             .map_err(|e| ApiError::internal("fs.read 任务异常").with_detail(e.to_string()))?
+    }
+
+    /// `fs.raw`：按块读原始字节（roadmap/12 §4.6）。
+    pub async fn raw(
+        &self,
+        path: &str,
+        roots: &[String],
+        offset: u64,
+        len: u32,
+    ) -> ApiResult<FsRawChunk> {
+        let file = resolve(path, roots)?;
+        tokio::task::spawn_blocking(move || raw_blocking(&file, offset, len))
+            .await
+            .map_err(|e| ApiError::internal("fs.raw 任务异常").with_detail(e.to_string()))?
+    }
+}
+
+/// [`FsProvider::list`] 的排序与分页选项。缺省即旧行为：全量、目录在前按名称。
+#[derive(Debug, Clone, Copy)]
+pub struct ListOptions {
+    /// 最多返回多少条；`None` 不分页。
+    pub limit: Option<u32>,
+    /// 排序后跳过前多少条。
+    pub offset: u32,
+    /// 组内排序键（目录永远在前）。
+    pub sort: FileSortKey,
+    /// 排序方向。
+    pub order: SortOrder,
+}
+
+/// **不 derive**：`SortOrder::default()` 是 `Desc`（进程页「先看最占资源的」），
+/// 文件列表的缺省必须是名称**升序**——derive 会把这两个语境的默认值悄悄绑在一起。
+impl Default for ListOptions {
+    fn default() -> Self {
+        ListOptions {
+            limit: None,
+            offset: 0,
+            sort: FileSortKey::Name,
+            order: SortOrder::Asc,
+        }
     }
 }
 
@@ -281,13 +332,14 @@ impl Provider for FsProvider {
     }
 }
 
-fn list_blocking(caches: &Caches, dir: &Path) -> ApiResult<DirListing> {
+fn list_blocking(caches: &Caches, dir: &Path, opts: &ListOptions) -> ApiResult<DirListing> {
     // Windows：裸 `\` 是「全部驱动器」这个虚拟根，它不是一个真目录
     // （read_dir 会落到**当前盘**的根上，那是另一个目录）。在这里截住，
     // 改为枚举驱动器，见 `windows::list_drives`。
     #[cfg(windows)]
     if windows::is_namespace_root(dir) {
-        return Ok(windows::list_drives(dir));
+        let d = windows::list_drives(dir);
+        return Ok(finish_listing(d.path, d.entries, d.skipped, opts));
     }
 
     let rd = std::fs::read_dir(dir).map_err(|e| io_err(dir, &e))?;
@@ -320,16 +372,105 @@ fn list_blocking(caches: &Caches, dir: &Path) -> ApiResult<DirListing> {
             target,
         ));
     }
-    // 目录在前，其余按名称（roadmap/04 §A.3）。
-    entries.sort_by(|a, b| {
-        let (da, db) = (a.kind == FileKind::Dir, b.kind == FileKind::Dir);
-        db.cmp(&da).then_with(|| a.name.cmp(&b.name))
-    });
-    Ok(DirListing {
-        path: dir.to_string_lossy().into_owned(),
+    Ok(finish_listing(
+        dir.to_string_lossy().into_owned(),
         entries,
         skipped,
+        opts,
+    ))
+}
+
+/// 排序 + 分页收尾。**目录永远在前**（roadmap/04 §A.3），排序键与方向只
+/// 决定目录组内与文件组内的顺序；`total` 是分页前的条目数。
+fn finish_listing(
+    path: String,
+    mut entries: Vec<DirEntryInfo>,
+    skipped: u32,
+    opts: &ListOptions,
+) -> DirListing {
+    let key_cmp = |a: &DirEntryInfo, b: &DirEntryInfo| match opts.sort {
+        FileSortKey::Name => a.name.cmp(&b.name),
+        // 大小/时间相同的条目退回名称序：排序要稳定可预期，刷新不跳动。
+        FileSortKey::Size => a.size_bytes.cmp(&b.size_bytes).then_with(|| a.name.cmp(&b.name)),
+        FileSortKey::Mtime => a.mtime_ts.cmp(&b.mtime_ts).then_with(|| a.name.cmp(&b.name)),
+    };
+    entries.sort_by(|a, b| {
+        let (da, db) = (a.kind == FileKind::Dir, b.kind == FileKind::Dir);
+        db.cmp(&da).then_with(|| match opts.order {
+            SortOrder::Asc => key_cmp(a, b),
+            SortOrder::Desc => key_cmp(b, a),
+        })
+    });
+
+    let total = entries.len() as u32;
+    let paged = match opts.limit {
+        None => entries,
+        Some(limit) => entries
+            .into_iter()
+            .skip(opts.offset as usize)
+            .take(limit as usize)
+            .collect(),
+    };
+    DirListing {
+        path,
+        entries: paged,
+        skipped,
+        total: Some(total),
+    }
+}
+
+/// [`FsProvider::raw`] 的阻塞部分：定位 + 读一块。
+fn raw_blocking(file: &Path, offset: u64, len: u32) -> ApiResult<FsRawChunk> {
+    use std::io::{Read as _, Seek as _};
+
+    // 跟随符号链接：读的就是链接指向的内容（与 `fs.read` 同一规则）。
+    let meta = std::fs::metadata(file).map_err(|e| io_err(file, &e))?;
+    if meta.is_dir() {
+        return Err(ApiError::invalid_request(format!(
+            "{} 是目录，不是文件",
+            file.display()
+        )));
+    }
+    let len = len.min(FS_RAW_MAX_CHUNK) as usize;
+    let mut fh = std::fs::File::open(file).map_err(|e| io_err(file, &e))?;
+    fh.seek(std::io::SeekFrom::Start(offset))
+        .map_err(|e| io_err(file, &e))?;
+    let mut buf = vec![0u8; len];
+    let mut got = 0;
+    while got < len {
+        match fh.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(io_err(file, &e)),
+        }
+    }
+    buf.truncate(got);
+    Ok(FsRawChunk {
+        total_bytes: meta.len(),
+        mime: mime_of(file).to_owned(),
+        data_hex: hex::encode(buf),
     })
+}
+
+/// 按扩展名猜 MIME。只覆盖浏览器要「按图渲染」的那几类；其余一律
+/// octet-stream——错报成 text/* 会让浏览器把二进制当页面打开。
+fn mime_of(file: &Path) -> &'static str {
+    let ext = file
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    }
 }
 
 fn read_blocking(file: &Path) -> ApiResult<FileContent> {
@@ -443,6 +584,142 @@ mod tests {
 
     fn roots(rs: &[&str]) -> Vec<String> {
         rs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 临时目录守卫（仓库惯例：不为测试引 tempfile，`temp_dir` + pid + Drop 清理）。
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "strixmaid-fs-test-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 造一个临时目录：两个子目录 + 三个大小可区分的文件。
+    fn sample_dir(name: &str) -> TempDir {
+        let td = TempDir::new(name);
+        std::fs::create_dir(td.path().join("zdir")).unwrap();
+        std::fs::create_dir(td.path().join("adir")).unwrap();
+        std::fs::write(td.path().join("big.bin"), vec![0u8; 300]).unwrap();
+        std::fs::write(td.path().join("mid.bin"), vec![0u8; 200]).unwrap();
+        std::fs::write(td.path().join("small.bin"), vec![0u8; 100]).unwrap();
+        td
+    }
+
+    fn names(l: &DirListing) -> Vec<&str> {
+        l.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn 排序_目录永远在前_键只管组内() {
+        let td = sample_dir("sort");
+        let p = td.path().to_string_lossy().into_owned();
+        let f = FsProvider::new();
+
+        // 按大小降序：目录仍在最前（组内按名称），文件从大到小。
+        let l = f
+            .list(
+                &p,
+                &roots(&[&p]),
+                ListOptions {
+                    sort: FileSortKey::Size,
+                    order: SortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            names(&l),
+            vec!["zdir", "adir", "big.bin", "mid.bin", "small.bin"],
+            "目录组在前；Desc 下目录组内名称也反序"
+        );
+        assert_eq!(l.total, Some(5));
+    }
+
+    #[tokio::test]
+    async fn 分页_在排序之后生效且_total_是全量() {
+        let td = sample_dir("page");
+        let p = td.path().to_string_lossy().into_owned();
+        let f = FsProvider::new();
+        let l = f
+            .list(
+                &p,
+                &roots(&[&p]),
+                ListOptions {
+                    limit: Some(2),
+                    offset: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 默认名称升序全量为 adir zdir big mid small → 跳 1 取 2。
+        assert_eq!(names(&l), vec!["zdir", "big.bin"]);
+        assert_eq!(l.total, Some(5), "total 必须是分页前的全量");
+    }
+
+    #[tokio::test]
+    async fn raw_分块取回且越界返回空块() {
+        let td = TempDir::new("raw");
+        let file = td.path().join("blob.png");
+        let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &data).unwrap();
+        let p = file.to_string_lossy().into_owned();
+        let root = td.path().to_string_lossy().into_owned();
+        let f = FsProvider::new();
+
+        // 两块拼回原文件。
+        let c1 = f.raw(&p, &roots(&[&root]), 0, 600).await.unwrap();
+        assert_eq!(c1.total_bytes, 1000);
+        assert_eq!(c1.mime, "image/png", "按扩展名猜 MIME");
+        let b1 = hex::decode(&c1.data_hex).unwrap();
+        assert_eq!(b1.len(), 600);
+        let c2 = f.raw(&p, &roots(&[&root]), 600, 600).await.unwrap();
+        let b2 = hex::decode(&c2.data_hex).unwrap();
+        assert_eq!(b2.len(), 400, "尾块按剩余长度截断");
+        assert_eq!([b1, b2].concat(), data);
+
+        // 越界偏移：空块而不是错误——调用方以 offset >= total 判终。
+        let c3 = f.raw(&p, &roots(&[&root]), 2000, 600).await.unwrap();
+        assert!(c3.data_hex.is_empty());
+
+        // 目录不是文件。
+        let err = f.raw(&root, &roots(&[&root]), 0, 100).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn raw_单块长度被夹到上限() {
+        let td = TempDir::new("clamp");
+        let file = td.path().join("big.bin");
+        std::fs::write(&file, vec![7u8; (FS_RAW_MAX_CHUNK + 1024) as usize]).unwrap();
+        let p = file.to_string_lossy().into_owned();
+        let root = td.path().to_string_lossy().into_owned();
+        let f = FsProvider::new();
+        // 请求超过上限的块长：夹到 FS_RAW_MAX_CHUNK——单帧 1 MiB 的约束在
+        // worker 侧守住，不信任主进程恰好传对。
+        let c = f
+            .raw(&p, &roots(&[&root]), 0, FS_RAW_MAX_CHUNK * 4)
+            .await
+            .unwrap();
+        assert_eq!(hex::decode(&c.data_hex).unwrap().len(), FS_RAW_MAX_CHUNK as usize);
     }
 
     #[cfg(unix)]
@@ -568,7 +845,7 @@ mod tests {
             return;
         }
         let fs = FsProvider::new();
-        let listing = fs.list("/proc/self", &roots(&["/"])).await.unwrap();
+        let listing = fs.list("/proc/self", &roots(&["/"]), ListOptions::default()).await.unwrap();
         assert!(!listing.entries.is_empty());
         // /proc/self 下必有 status 这个普通文件与 fd 这个目录。
         assert!(listing.entries.iter().any(|e| e.name == "status"));
@@ -587,7 +864,7 @@ mod tests {
 
         let fs = FsProvider::new();
         let listing = fs
-            .list(&dir.to_string_lossy(), &roots(&["/"]))
+            .list(&dir.to_string_lossy(), &roots(&["/"]), ListOptions::default())
             .await
             .unwrap();
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
@@ -625,7 +902,7 @@ mod tests {
         let err = fs.read("/no/such/strixmaid-file", &all).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
 
-        let err = fs.list("/etc/passwd", &all).await.unwrap_err();
+        let err = fs.list("/etc/passwd", &all, ListOptions::default()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest, "对文件 list 应报不是目录");
     }
 
@@ -669,7 +946,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::NotFound);
 
         if Path::new(&hosts).is_file() {
-            let err = fs.list(&hosts, &all).await.unwrap_err();
+            let err = fs.list(&hosts, &all, ListOptions::default()).await.unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidRequest, "对文件 list 应报不是目录：{err:?}");
         }
     }
@@ -680,7 +957,7 @@ mod tests {
     async fn 本机_列根得到驱动器() {
         let fs = FsProvider::new();
         for req in ["/", "\\"] {
-            let listing = fs.list(req, &roots(&["/"])).await.unwrap();
+            let listing = fs.list(req, &roots(&["/"]), ListOptions::default()).await.unwrap();
             assert_eq!(listing.path, "\\", "虚拟根的规范形式是 `\\`");
             assert_eq!(listing.skipped, 0);
             assert!(
@@ -714,7 +991,7 @@ mod tests {
         }
         let fs = FsProvider::new();
         let t0 = std::time::Instant::now();
-        let listing = fs.list(&dir, &roots(&["/"])).await.unwrap();
+        let listing = fs.list(&dir, &roots(&["/"]), ListOptions::default()).await.unwrap();
         let cost = t0.elapsed();
         let named = listing.entries.iter().filter(|e| e.user.is_some()).count();
         eprintln!(
@@ -764,7 +1041,7 @@ mod tests {
 
         let fs = FsProvider::new();
         let listing = fs
-            .list(&dir.to_string_lossy(), &roots(&["/"]))
+            .list(&dir.to_string_lossy(), &roots(&["/"]), ListOptions::default())
             .await
             .unwrap();
         let ln = listing.entries.iter().find(|e| e.name == "ln").unwrap();
@@ -798,7 +1075,7 @@ mod tests {
 
         let fs = FsProvider::new();
         let listing = fs
-            .list(&dir.to_string_lossy(), &roots(&["/"]))
+            .list(&dir.to_string_lossy(), &roots(&["/"]), ListOptions::default())
             .await
             .unwrap();
         let ln = listing.entries.iter().find(|e| e.name == "ln").unwrap();

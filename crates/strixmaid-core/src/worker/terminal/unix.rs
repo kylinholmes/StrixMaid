@@ -536,15 +536,6 @@ fn build_env(target: &User, shell: &Path, switched: bool) -> Vec<(String, String
     };
     // xterm-256color：xterm.js 支持 256 色，报低了会让 shell 主题变单调。
     set("TERM", "xterm-256color".into());
-    // OSC 7 注入（12 号方案 §4.4，未决 5 的决定）：**只走环境变量，不碰任何
-    // 用户 rc 文件**。bash 从环境继承 PROMPT_COMMAND，每个提示符前把 cwd 用
-    // `ESC ] 7 ; file://host/path BEL` 报出来，前端据此让文件区跟随 `cd`。
-    // 局限说在明处：用户的 bashrc 覆盖它就失效（回落到按 pid 轮询进程 cwd）；
-    // zsh/dash 无视这个变量（同样走轮询兜底）；fish 原生就发 OSC 7。
-    set(
-        "PROMPT_COMMAND",
-        r#"printf '\033]7;file://%s%s\007' "$HOSTNAME" "$PWD""#.into(),
-    );
     set("HOME", target.dir.to_string_lossy().into_owned());
     set("USER", target.name.clone());
     set("LOGNAME", target.name.clone());
@@ -1072,39 +1063,6 @@ mod tests {
             .close(TermCloseParams { pid: info.pid })
             .await
             .unwrap();
-    }
-
-    /// C 期回归（`roadmap/12-workspace.md` §4.4）：bash 在 `cd` 之后必须发出
-    /// OSC 7——注入走的是 PROMPT_COMMAND 环境变量，这条测试保证注入真的到了
-    /// shell 手里并在提示符前生效，而不只是「环境变量设了」。
-    #[tokio::test]
-    async fn bash_cd_后发出_osc7() {
-        if !listed_shells().iter().any(|s| s == "/bin/bash") {
-            eprintln!("跳过：/etc/shells 里没有 /bin/bash");
-            return;
-        }
-        let table = TerminalTable::new();
-        let (info, fd) = table
-            .open(TermOpenParams {
-                shell: Some("/bin/bash".into()),
-                user: None,
-                cols: 80,
-                rows: 24,
-            })
-            .await
-            .unwrap();
-        let mut stream = attach(fd);
-
-        // 起动后的第一个提示符就该带 OSC 7（报出初始目录）。
-        read_until(&mut stream, "\u{1b}]7;file://").await;
-
-        stream.write_all(b"cd /tmp\n").await.unwrap();
-        // cd 之后的下一个提示符必须报出新目录。`/tmp\x07` 里的 BEL 保证匹配的
-        // 是 OSC 7 的收尾而不是命令回显。macOS 上 bash 的 $PWD 就是 /tmp
-        //（符号链接不解析），两平台同一断言。
-        read_until(&mut stream, "/tmp\u{7}").await;
-
-        table.close(TermCloseParams { pid: info.pid }).await.unwrap();
     }
 
     /// 表被整个丢掉（worker 退出、dispatcher 析构）时，shell 不能变成孤儿。

@@ -26,10 +26,6 @@ export interface Tab {
   shell?: string;
   /** worker 内 shell 的 pid（cwd 兜底轮询的目标）。 */
   pid?: number;
-  /** 这个终端报出的当前目录（OSC 7 或轮询）。不知道就没有——宁可空着不可指错。 */
-  cwd?: string;
-  /** 收到过 OSC 7。此后轮询永久停用：shell 亲口说的比进程属性可信。 */
-  osc7?: boolean;
 }
 
 /** 每会话终端上限（`TerminalConfig::max_per_session` 的默认值）。UI 自己算，不等后端 409。 */
@@ -48,6 +44,10 @@ interface WorkspaceState {
   railCollapsed: boolean;
   /** 隐藏以 `.` 开头的条目（dotfile 约定，三平台一致处理）。 */
   hideHidden: boolean;
+  /** 文件区视图：列表 / 平铺图标（§4.5）。 */
+  viewMode: "list" | "tiles";
+  /** 文件列表的排序状态（服务端排序的参数）。 */
+  dirSort: { key: "name" | "size" | "mtime"; desc: boolean };
 
   addTab(tab: Tab): void;
   removeTab(id: string): void;
@@ -56,12 +56,12 @@ interface WorkspaceState {
   markDisconnected(id: string): void;
   markLive(id: string): void;
   setCwd(path: string): void;
-  /** 某个终端报出了自己的 cwd（`viaOsc7` 标记来源；OSC 7 一旦出现即压过轮询）。 */
-  setTabCwd(id: string, path: string, viaOsc7: boolean): void;
   setPanelHeight(px: number): void;
   setPanelCollapsed(collapsed: boolean): void;
   toggleRail(): void;
   toggleHidden(): void;
+  setViewMode(mode: "list" | "tiles"): void;
+  setDirSort(sort: { key: "name" | "size" | "mtime"; desc: boolean }): void;
 }
 
 /**
@@ -87,6 +87,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   panelCollapsed: false,
   railCollapsed: false,
   hideHidden: false,
+  viewMode: "list",
+  dirSort: { key: "name", desc: false },
 
   addTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab], activeId: tab.id })),
 
@@ -117,10 +119,6 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
 
   setCwd: (path) => set({ cwd: path }),
 
-  setTabCwd: (id, path, viaOsc7) =>
-    set((s) => ({
-      tabs: transition(s.tabs, id, viaOsc7 ? { cwd: path, osc7: true } : { cwd: path }),
-    })),
   // 上限留出 160px 给文件区工具栏：面板长过容器会把自己的拖把手和标签栏
   // 顶出可视区，只剩一个看不见的焦点元素能缩回来。
   setPanelHeight: (px) =>
@@ -130,4 +128,6 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setPanelCollapsed: (collapsed) => set({ panelCollapsed: collapsed }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
   toggleHidden: () => set((s) => ({ hideHidden: !s.hideHidden })),
+  setViewMode: (mode) => set({ viewMode: mode }),
+  setDirSort: (sort) => set({ dirSort: sort }),
 }));

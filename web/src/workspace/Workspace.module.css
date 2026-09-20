@@ -113,13 +113,48 @@
   flex: 1;
 }
 
-.fileScroll {
-  overflow: auto;
+/* 原生滚动条藏掉，右缘用自绘的悬浮细条（OverlayScrollbar）。 */
+.scrollWrap {
+  position: relative;
   flex: 1;
   min-height: 0;
 }
 
-/* 地址栏：平时长得像一段路径文本，聚焦才现出输入框的形。 */
+.fileScroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.fileScroll::-webkit-scrollbar {
+  display: none;
+}
+
+.overlayThumb {
+  position: absolute;
+  right: 3px;
+  width: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+  opacity: 0;
+  transition: opacity var(--t-color) var(--ease);
+  cursor: default;
+  touch-action: none;
+}
+
+.overlayThumb[data-visible] {
+  opacity: 1;
+}
+
+.overlayThumb:hover,
+.overlayThumb[data-dragging] {
+  background: var(--ink-3);
+  opacity: 1;
+}
+
+/* 地址栏：就是一段路径文本，无边框；悬停/聚焦只做底色变化（负责人定），
+   焦点可见性交给全局 :focus-visible。 */
 .pathBar {
   font-family: var(--mono);
   font-size: var(--fs-300);
@@ -131,21 +166,65 @@
      长路径截尾部，完整路径在 title 里。 */
   min-width: 0;
   flex: 1;
-  border: 1px solid transparent;
+  border: none;
   border-radius: var(--radius-sm);
   background: none;
   padding: 2px var(--sp-2);
 }
 
-.pathBar:hover {
-  border-color: var(--line);
+.pathBar:hover,
+.pathBar:focus {
+  background: var(--surface-2);
+  color: var(--ink);
 }
 
-.pathBar:focus {
-  border-color: var(--stroke);
+.pathWrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.pathSugs {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 2px 0 0;
+  padding: 2px;
   background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 14%);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.pathSug {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+  color: var(--ink-2);
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pathSug:hover {
+  background: var(--surface-2);
+}
+
+.pathSugActive {
+  background: var(--sel);
   color: var(--ink);
-  outline: none;
 }
 
 .nameCell {
@@ -338,4 +417,60 @@
   color: var(--ink-3);
   font-size: var(--fs-400);
   gap: var(--sp-3);
+}
+
+/* ---------------------------------------------------------------- 平铺视图 */
+
+.tileGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tile:hover {
+  background: var(--surface-2);
+}
+
+.tileSelected {
+  border-color: var(--stroke);
+  background: var(--sel);
+}
+
+.tileIcon {
+  width: 80px;
+  height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tileIcon img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+}
+
+.tileName {
+  font-size: var(--fs-300);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

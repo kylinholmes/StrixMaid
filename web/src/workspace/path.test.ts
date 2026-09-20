@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { guessHome, isDriveRoot, isVirtualRoot, joinPath, parentPath, platformOf } from "./path";
+import {
+  guessHome,
+  isDriveRoot,
+  isVirtualRoot,
+  joinPath,
+  parentPath,
+  platformOf,
+  splitForCompletion,
+} from "./path";
 
 describe("platformOf", () => {
   it("识别 windows", () => expect(platformOf("windows")).toBe("windows"));
@@ -41,4 +49,22 @@ describe("guessHome", () => {
   it("macos", () => expect(guessHome("macos", "kylin", 501)).toBe("/Users/kylin"));
   it("linux 普通用户", () => expect(guessHome("ubuntu", "alice", 1000)).toBe("/home/alice"));
   it("linux root", () => expect(guessHome("ubuntu", "root", 0)).toBe("/root"));
+});
+
+describe("splitForCompletion", () => {
+  it("unix 常规", () =>
+    expect(splitForCompletion("/home/ky", "unix")).toEqual({ parent: "/home", prefix: "ky" }));
+  it("unix 根下", () =>
+    expect(splitForCompletion("/ho", "unix")).toEqual({ parent: "/", prefix: "ho" }));
+  it("以分隔符结尾 = 列整个目录", () =>
+    expect(splitForCompletion("/home/", "unix")).toEqual({ parent: "/home", prefix: "" }));
+  it("相对路径不补", () => expect(splitForCompletion("ho", "unix")).toBeNull());
+  it("windows 盘根下", () =>
+    expect(splitForCompletion("C:\\Us", "windows")).toEqual({ parent: "C:\\", prefix: "Us" }));
+  it("windows 深层", () =>
+    expect(splitForCompletion("C:\\Users\\ky", "windows")).toEqual({
+      parent: "C:\\Users",
+      prefix: "ky",
+    }));
+  it("windows 裸盘符不补", () => expect(splitForCompletion("C:", "windows")).toBeNull());
 });

@@ -55,7 +55,7 @@ function listings(platform, big) {
       skipped: 0,
     },
     "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
-    "/home/kylin/docs": { entries: makeEntries(2, "d"), skipped: 0 },
+    "/home/kylin/docs": { entries: [{ ...makeEntries(1)[0], name: "logo.png" }, ...makeEntries(2, "d")], skipped: 0 },
     "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
     "/etc": { entries: [{ ...makeEntries(1)[0], name: "nginx.conf" }], skipped: 0 },
   };
@@ -66,6 +66,9 @@ const postedShells = [];
 
 /** 终端 WS 收到的 cd 命令行（反向联动的断言点）。 */
 const cwdCommands = [];
+
+/** /api/v1/files 收到的完整查询参数（排序/分页的断言点）。 */
+const filesQueries = [];
 
 async function mockApi(page, { platform, osId }) {
   const maps = listings(platform, true);
@@ -102,12 +105,36 @@ async function mockApi(page, { platform, osId }) {
       });
     }
     if (p.endsWith("/files")) {
-      const q = url.searchParams.get("path");
-      filesRequests.push(q);
-      const found = maps[q];
-      return found
-        ? json({ path: q, ...found })
-        : json({ code: "not_found", message: `没有 ${q}` }, 404);
+      const qs = url.searchParams;
+      const qpath = qs.get("path");
+      filesRequests.push(qpath);
+      filesQueries.push(Object.fromEntries(qs.entries()));
+      const found = maps[qpath];
+      if (!found) return json({ code: "not_found", message: `没有 ${qpath}` }, 404);
+      const key = qs.get("sort") ?? "name";
+      const desc = qs.get("order") === "desc";
+      const cmp =
+        key === "size"
+          ? (a, b) => a.size_bytes - b.size_bytes || a.name.localeCompare(b.name)
+          : key === "mtime"
+            ? (a, b) => a.mtime_ts - b.mtime_ts || a.name.localeCompare(b.name)
+            : (a, b) => a.name.localeCompare(b.name);
+      const list = [...found.entries].sort(
+        (a, b) => (b.kind === "dir") - (a.kind === "dir") || (desc ? cmp(b, a) : cmp(a, b)),
+      );
+      const total = list.length;
+      const offset = Number(qs.get("offset") ?? 0);
+      const limit = qs.get("limit") ? Number(qs.get("limit")) : undefined;
+      const page = limit === undefined ? list : list.slice(offset, offset + limit);
+      return json({ path: qpath, entries: page, skipped: found.skipped, total });
+    }
+    if (p.endsWith("/files/raw")) {
+      // 1×1 红色 PNG。
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
     }
     if (p.endsWith("/terminals/shells")) {
       return json([
@@ -203,6 +230,14 @@ async function unixFlow(browser) {
   await page.waitForTimeout(200);
   check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
 
+  // ⌃` 切换终端面板（VSCode 同款）。
+  await page.keyboard.press("Control+Backquote");
+  await page.waitForSelector("text=还没有终端");
+  check("Ctrl+` 展开终端面板", true);
+  await page.keyboard.press("Control+Backquote");
+  await page.waitForTimeout(150);
+  check("Ctrl+` 再按折叠面板", !(await page.isVisible("text=还没有终端")));
+
   // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
   check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
   await page.click('[aria-label="隐藏隐藏文件"]');
@@ -217,18 +252,45 @@ async function unixFlow(browser) {
   await page.press('[aria-label="路径，回车跳转"]', "Enter");
   await page.waitForSelector("text=nginx.conf");
   check("地址栏输入回车跳转", true);
-  await page.click("text=主目录");
-  await page.waitForSelector("text=proj");
 
-  // 进大目录：500 行渲染上限 + 「显示全部」。
+  // 地址栏补全：敲前缀出下拉，↓ 选中 Enter 跳转。
+  await page.fill('[aria-label="路径，回车跳转"]', "/home/kylin/pr");
+  await page.waitForSelector('[role="option"]:has-text("/home/kylin/proj")', { timeout: 4000 });
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("text=共 800 项");
+  check(
+    "地址栏补全可选中并跳转",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
+  );
+  await page.click("text=主目录");
+  await page.waitForSelector('tbody >> text=proj');
+
+  // 进大目录：服务端分页（首页 500）+ 虚拟滚动（DOM 里只有视口附近的行）。
   await page.click("text=proj");
-  await page.waitForSelector("text=已显示前 500 项");
+  await page.waitForSelector("text=共 800 项，已加载 500");
   const rows = await page.locator("tbody tr").count();
-  check("大目录默认只渲染 500 行", rows === 500, `实际 ${rows}`);
+  check("虚拟滚动只渲染视口附近的行", rows < 120, `DOM 行数 ${rows}`);
   check("skipped 提示", await page.isVisible("text=1 个条目因无权限或已消失被跳过"));
-  await page.click("text=显示全部");
-  await page.waitForFunction(() => document.querySelectorAll("tbody tr").length === 800);
-  check("显示全部后 800 行", true);
+  // 滚到已加载末尾触发下一页，直到 800 全部加载。
+  const bigScroller = page.locator('[class*=fileScroll]').first();
+  await bigScroller.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+  await page.waitForFunction(
+    () => document.body.textContent?.includes("共 800 项") && !document.body.textContent?.includes("已加载"),
+    undefined,
+    { timeout: 8000 },
+  );
+  check("滚动到底自动加载完 800 项", true);
+  // 表头点「大小」→ 服务端排序参数带出去。
+  await page.click('th button:has-text("大小")');
+  await page.waitForTimeout(300);
+  check(
+    "点表头触发服务端排序",
+    filesQueries.some((q) => q.sort === "size" && q.path === "/home/kylin/proj"),
+    JSON.stringify(filesQueries.at(-1)),
+  );
+  await page.click('th button:has-text("名称")');
+  await page.waitForTimeout(300);
 
   // 后退 → 主目录；前进 → 又回来。
   await page.click('[aria-label="后退"]');
@@ -279,40 +341,31 @@ async function unixFlow(browser) {
   const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
   check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
 
-  // ---- C 期：cwd 双向联动（当前活动标签是 bash，mock 会发 OSC 7）----
-
-  // 正向：终端里 cd → 文件区跟过去。
+  // ---- 目录同步已按负责人决定移除：终端 cd 不影响文件区、导航不注入 cd ----
   await page.click(".xterm");
   await page.keyboard.type("cd /home/kylin/proj");
   await page.keyboard.press("Enter");
-  await page.waitForSelector("text=已显示前 500 项", { timeout: 5000 });
+  await page.waitForTimeout(600);
   check(
-    "终端 cd 后文件区跟随（OSC 7）",
-    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
+    "终端 cd 不再牵动文件区",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin",
   );
-
-  // 反向：文件区导航 → 给当前终端发 cd。
-  await page.click("text=主目录");
-  await page.waitForSelector("text=docs");
-  await page.click("text=docs");
+  await page.click('tbody >> text=docs');
   await page.waitForSelector("text=d0000.txt");
+  await page.waitForTimeout(300);
   check(
-    "文件区进目录给终端发了 cd",
-    cwdCommands.some((c) => c.line === "cd '/home/kylin/docs'"),
+    "文件区导航不再向终端注入 cd",
+    !cwdCommands.some((c) => c.line.includes("docs")),
     cwdCommands.map((c) => c.line).join(" | "),
   );
 
-  // PowerShell 退化路径：无 OSC 7 → 不联动 + 界面说明（绝不轮询旧值）。
-  await page.click('[aria-label="选择 shell 新建终端"]');
-  await page.getByRole("button", { name: "pwsh", exact: true }).click();
-  await page.waitForSelector("text=PowerShell 不跟随目录", { timeout: 5000 });
-  check("PowerShell 无 OSC 7 时显示说明", true);
-  check(
-    "PowerShell 的 cwd 未被轮询采信（文件区不动）",
-    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/docs",
-  );
-  await page.locator('[aria-label^="关闭"]').last().click();
-  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 1);
+  // 平铺视图 + 缩略图：logo.png 出图，目录出图标。
+  await page.getByRole("button", { name: "平铺", exact: true }).click();
+  await page.waitForSelector('[class*=tileGrid]');
+  await page.waitForSelector('[class*=tileIcon] img[src^="blob:"]', { timeout: 5000 });
+  check("平铺视图的图片条目出缩略图", true);
+  await page.getByRole("button", { name: "列表", exact: true }).click();
+  await page.waitForSelector("text=d0000.txt");
 
   // 第二个标签 + 切换。
   await page.click('[aria-label="新建终端"]');
@@ -348,8 +401,10 @@ async function unixFlow(browser) {
 
   // 刷新保住滚动位置（§7-3）：进大目录、滚下去、焦点刷新、位置不动。
   await page.click('[aria-label="折叠终端面板"]');
-  await page.click("text=proj");
-  await page.waitForSelector("text=已显示前 500 项");
+  await page.click("text=主目录");
+  await page.waitForSelector('tbody >> text=proj');
+  await page.click('tbody >> text=proj');
+  await page.waitForSelector("text=共 800 项");
   const scroller = page.locator(".fileScroll, [class*=fileScroll]").first();
   await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));

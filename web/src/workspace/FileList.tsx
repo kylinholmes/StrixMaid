@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,29 +10,34 @@ import {
   Link2,
   RefreshCw,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { components } from "@/api/schema";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "@/api/client";
 import {
   Button,
   type Column,
   EmptyState,
   ErrorState,
   ProgressLine,
+  Segmented,
   Table,
   TableSkeleton,
   Toolbar,
   ToolbarSpacer,
 } from "@/components";
+import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
-import { joinPath, type Platform, parentPath } from "./path";
+import { fileIconUrl, folderIconUrl } from "./icons";
+import { OverlayScrollbar } from "./OverlayScrollbar";
+import { joinPath, type Platform, parentPath, splitForCompletion } from "./path";
 import { useWorkspace } from "./store";
-import { useDirListing } from "./useDirListing";
+import { TileGrid } from "./TileGrid";
+import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
 
-type DirEntry = components["schemas"]["DirEntryInfo"];
-
-/** 默认渲染的行数上限；普通目录远小于它，只有 WinSxS 这类目录会碰到。 */
-const RENDER_CAP = 500;
+/** 虚拟滚动的行高兜底值；真实值在首行渲染后量出。 */
+const ROW_FALLBACK = 28;
+/** 视口外多渲染几行，滚动时不露白。 */
+const OVERSCAN = 12;
 
 /** `0o644` → `rw-r--r--`。Windows 上是合成值（`providers/fs/windows.rs`），照样能读。 */
 export function fmtMode(mode: number): string {
@@ -51,10 +57,22 @@ function fmtMtime(ts: number): string {
   return sameYear ? md : `${d.getFullYear()}-${md}`;
 }
 
-function KindIcon({ kind }: { kind: DirEntry["kind"] }) {
-  if (kind === "dir")
+function KindIcon({ entry }: { entry: DirEntry }) {
+  if (entry.kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
+  // 内置图标集（§4.7）：文件夹总有图标，文件认不出时回落到通用形状。
+  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name);
+  if (src)
+    return (
+      <img
+        src={src}
+        width={16}
+        height={16}
+        alt={entry.kind === "dir" ? "目录" : ""}
+        aria-hidden={entry.kind !== "dir"}
+      />
+    );
+  if (entry.kind === "dir")
     return <Folder size={14} strokeWidth={1.5} className={s.kindDir} aria-label="目录" />;
-  if (kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
   return <File size={14} strokeWidth={1.5} className={s.kindFile} aria-hidden="true" />;
 }
 
@@ -72,7 +90,7 @@ export interface FileListProps {
 }
 
 /**
- * 文件只读列表（§4.5 的列表视图）。平铺图标、缩略图、分页都在 D 期。
+ * 文件区（§4.5）：列表视图（虚拟滚动 + 服务端分页排序）与平铺图标视图。
  *
  * 目录项导航一律走 [`joinPath`]——Windows 驱动器根的 `name` 就是完整路径,
  * `joinPath` 知道这件事，组件里不手写拼接。
@@ -87,42 +105,143 @@ export function FileList({
   onForward,
   leading,
 }: FileListProps) {
-  const { data, error, isPending, isFetching, refresh } = useDirListing(path);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [showAll, setShowAll] = useState(false);
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const toggleHidden = useWorkspace((st) => st.toggleHidden);
+  const viewMode = useWorkspace((st) => st.viewMode);
+  const setViewMode = useWorkspace((st) => st.setViewMode);
+  const dirSort = useWorkspace((st) => st.dirSort);
+  const setDirSort = useWorkspace((st) => st.setDirSort);
+
+  const {
+    entries,
+    total,
+    skipped,
+    error,
+    isPending,
+    isFetching,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+    refresh,
+  } = useDirListing(path, dirSort);
+
+  const [selected, setSelected] = useState<string | null>(null);
   /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
   const [editing, setEditing] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // ---- 地址栏补全（负责人 2026-09-20 要求）：父目录的子目录按前缀过滤 ----
+  const qc = useQueryClient();
+  const [sugs, setSugs] = useState<string[]>([]);
+  const [sugIdx, setSugIdx] = useState(-1);
+
+  useEffect(() => {
+    if (editing === null) {
+      setSugs([]);
+      return;
+    }
+    const split = splitForCompletion(editing.trim(), platform);
+    if (!split) {
+      setSugs([]);
+      return;
+    }
+    // 去抖 + 短缓存：同一父目录连续敲字不重复打后端。
+    const t = setTimeout(async () => {
+      try {
+        const data = await qc.fetchQuery({
+          queryKey: ["complete", split.parent],
+          staleTime: 10_000,
+          queryFn: async () => {
+            const { data: d, error: e } = await api.GET("/api/v1/files", {
+              params: {
+                query: { path: split.parent, limit: 200, sort: "name", order: "asc" },
+              },
+            });
+            if (e) throw e;
+            return d;
+          },
+        });
+        const pref = split.prefix.toLowerCase();
+        setSugs(
+          (data.entries ?? [])
+            .filter((en) => en.kind === "dir" && en.name.toLowerCase().startsWith(pref))
+            .slice(0, 8)
+            .map((en) => joinPath(split.parent, en.name, platform)),
+        );
+        setSugIdx(-1);
+      } catch {
+        setSugs([]); // 父目录读不到就不补，不打扰输入
+      }
+    }, 150);
+    return () => clearTimeout(t);
+  }, [editing, platform, qc]);
+
+  const acceptSuggestion = (target: string) => {
+    onNavigate(target);
+    setEditing(null);
+    setSugs([]);
+  };
+
+  // ---- 虚拟滚动：只渲染视口附近的行（§4.5「不能一次渲染出来」）----
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(600);
+  const [rowH, setRowH] = useState(ROW_FALLBACK);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    ro.observe(el);
+    setViewportH(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
+  // 首行真实高度量一次：行高猜错时滚动条与内容错位。
+  const measureRow = useCallback((el: HTMLDivElement | null) => {
+    const tr = el?.querySelector("tbody tr:not([data-spacer])");
+    const h = tr?.getBoundingClientRect().height;
+    if (h && h > 8) setRowH(h);
+  }, []);
 
   // 换目录回到顶部并清选中；刷新（同 path 重取）不走这里，滚动与选中原地保留。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 刻意只对 path 变化生效
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
     setSelected(null);
-    setShowAll(false);
     setEditing(null);
   }, [path]);
 
   const up = path === null ? null : parentPath(path, platform);
 
-  // 隐藏文件按 dotfile 约定过滤（后端不区分平台的 hidden 属性，前端也不猜）。
-  const hiddenCount = hideHidden
-    ? (data?.entries ?? []).filter((e) => e.name.startsWith(".")).length
-    : 0;
-  // 大目录兜底（D 期的分页 + 虚拟滚动到位前）：一次渲染上万行会把页面卡死，
-  // 默认只渲染前 RENDER_CAP 行，其余点「显示全部」明确换取。
-  const allRows = hideHidden
-    ? (data?.entries ?? []).filter((e) => !e.name.startsWith("."))
-    : (data?.entries ?? []);
-  const capped = !showAll && allRows.length > RENDER_CAP;
-  const visibleRows = capped ? allRows.slice(0, RENDER_CAP) : allRows;
+  // 隐藏文件按 dotfile 约定过滤（在已加载的页内做；后端分页不知道这条约定）。
+  const visible = hideHidden ? entries.filter((e) => !e.name.startsWith(".")) : entries;
+  const hiddenCount = hideHidden ? entries.length - visible.length : 0;
 
-  const enter = (entry: DirEntry) => {
-    if (path === null) return;
-    if (entry.kind !== "dir") return;
-    onNavigate(joinPath(path, entry.name, platform));
+  const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
+  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
+  const slice = visible.slice(start, end);
+
+  // 滚近已加载末尾就取下一页。
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && end >= visible.length - OVERSCAN) {
+      void fetchNextPage();
+    }
+  }, [end, visible.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const enter = useCallback(
+    (entry: DirEntry) => {
+      if (path === null || entry.kind !== "dir") return;
+      onNavigate(joinPath(path, entry.name, platform));
+    },
+    [path, platform, onNavigate],
+  );
+
+  /** 点表头：同键翻方向，异键切键（升序起步）。排序在服务端，翻页也一致。 */
+  const onHeaderClick = (key: string) => {
+    if (key !== "name" && key !== "size" && key !== "mtime") return;
+    const k = key as FileSortKey;
+    setDirSort(dirSort.key === k ? { key: k, desc: !dirSort.desc } : { key: k, desc: false });
   };
 
   const columns: readonly Column<DirEntry>[] = [
@@ -132,7 +251,7 @@ export function FileList({
       mono: true,
       render: (e) => (
         <span className={s.nameCell}>
-          <KindIcon kind={e.kind} />
+          <KindIcon entry={e} />
           <span>{e.name}</span>
           {e.target && <span className={s.linkTarget}>→ {e.target}</span>}
         </span>
@@ -188,29 +307,88 @@ export function FileList({
         >
           <ArrowUp size={14} />
         </Button>
-        <input
-          className={s.pathBar}
-          aria-label="路径，回车跳转"
-          title={path ?? ""}
-          value={editing ?? path ?? ""}
-          onChange={(e) => setEditing(e.target.value)}
-          onFocus={(e) => e.target.select()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              const target = (editing ?? "").trim();
-              if (target && target !== path) onNavigate(target);
+        <span className={s.pathWrap}>
+          <input
+            className={s.pathBar}
+            role="combobox"
+            aria-label="路径，回车跳转"
+            aria-expanded={sugs.length > 0}
+            aria-controls="path-sugs"
+            title={path ?? ""}
+            value={editing ?? path ?? ""}
+            onChange={(e) => setEditing(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown" && sugs.length > 0) {
+                e.preventDefault();
+                setSugIdx((i) => (i + 1) % sugs.length);
+                return;
+              }
+              if (e.key === "ArrowUp" && sugs.length > 0) {
+                e.preventDefault();
+                setSugIdx((i) => (i <= 0 ? sugs.length - 1 : i - 1));
+                return;
+              }
+              if (e.key === "Tab" && sugIdx >= 0 && sugs[sugIdx]) {
+                // Tab 只补进输入框，继续往下敲；Enter 才跳转。
+                e.preventDefault();
+                setEditing(sugs[sugIdx]);
+                return;
+              }
+              if (e.key === "Enter") {
+                const chosen = sugIdx >= 0 ? sugs[sugIdx] : null;
+                const target = (chosen ?? editing ?? "").trim();
+                if (target && target !== path) onNavigate(target);
+                setEditing(null);
+                setSugs([]);
+                e.currentTarget.blur();
+              }
+              if (e.key === "Escape") {
+                if (sugs.length > 0) {
+                  setSugs([]); // 第一次 Esc 收下拉，第二次才还原输入
+                  return;
+                }
+                setEditing(null);
+                e.currentTarget.blur();
+              }
+            }}
+            onBlur={() => {
               setEditing(null);
-              e.currentTarget.blur();
-            }
-            if (e.key === "Escape") {
-              setEditing(null);
-              e.currentTarget.blur();
-            }
-          }}
-          onBlur={() => setEditing(null)}
-          spellCheck={false}
-        />
+              setSugs([]);
+            }}
+            spellCheck={false}
+          />
+          {editing !== null && sugs.length > 0 && (
+            <div id="path-sugs" className={s.pathSugs} role="listbox" aria-label="路径补全">
+              {sugs.map((p2, i) => (
+                <button
+                  key={p2}
+                  type="button"
+                  role="option"
+                  aria-selected={i === sugIdx}
+                  className={cx(s.pathSug, i === sugIdx && s.pathSugActive)}
+                  // mousedown 抢在 input 失焦之前，click 就来不及了
+                  onMouseDown={(ev) => {
+                    ev.preventDefault();
+                    acceptSuggestion(p2);
+                  }}
+                >
+                  {p2}
+                </button>
+              ))}
+            </div>
+          )}
+        </span>
         <ToolbarSpacer />
+        <Segmented
+          label="文件视图"
+          options={[
+            { value: "list", label: "列表" },
+            { value: "tiles", label: "平铺" },
+          ]}
+          value={viewMode}
+          onChange={setViewMode}
+        />
         <Button
           iconOnly
           size="sm"
@@ -225,42 +403,65 @@ export function FileList({
         </Button>
       </Toolbar>
       {isFetching && !isPending && <ProgressLine />}
-      <div ref={scrollRef} className={s.fileScroll}>
-        {path === null || (isPending && !data) ? (
-          <TableSkeleton />
-        ) : error ? (
-          <ErrorState
-            title="读不到这个目录。"
-            detail={(error as { message?: string }).message ?? String(error)}
-            onRetry={refresh}
-          />
-        ) : (
-          <>
-            <Table
-              caption={`目录 ${path} 的内容`}
-              columns={columns}
-              rows={visibleRows}
-              rowKey={(e) => e.name}
-              selectedKey={selected}
-              onSelect={(e) => {
-                setSelected(e.name);
-                enter(e);
-              }}
-              empty={<EmptyState title="这个目录是空的" />}
+      <div className={s.scrollWrap}>
+        <div
+          ref={scrollRef}
+          className={s.fileScroll}
+          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        >
+          {path === null || (isPending && entries.length === 0) ? (
+            <TableSkeleton />
+          ) : error ? (
+            <ErrorState
+              title="读不到这个目录。"
+              detail={(error as { message?: string }).message ?? String(error)}
+              onRetry={refresh}
             />
-            {capped && (
-              <div className={s.showAllRow}>
-                <Button size="sm" onClick={() => setShowAll(true)}>
-                  共 {allRows.length} 项，已显示前 {RENDER_CAP} 项——显示全部
-                </Button>
-              </div>
-            )}
-          </>
-        )}
-        {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
-        {data && (data.skipped ?? 0) > 0 && (
-          <p className={s.skippedNote}>{data.skipped} 个条目因无权限或已消失被跳过</p>
-        )}
+          ) : viewMode === "tiles" ? (
+            <TileGrid
+              entries={visible}
+              pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
+              selected={selected}
+              onSelect={setSelected}
+              onEnterDir={enter}
+            />
+          ) : (
+            <div ref={measureRow}>
+              <Table
+                caption={`目录 ${path} 的内容`}
+                columns={columns}
+                rows={slice}
+                rowKey={(e) => e.name}
+                selectedKey={selected}
+                onSelect={(e) => {
+                  setSelected(e.name);
+                  enter(e);
+                }}
+                onHeaderClick={onHeaderClick}
+                sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
+                empty={<EmptyState title="这个目录是空的" />}
+                leadingRow={
+                  start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
+                }
+                trailingRow={
+                  visible.length - end > 0 && (
+                    <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
+                  )
+                }
+              />
+            </div>
+          )}
+          {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
+          {total > entries.length && !hasNextPage && null}
+          {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
+          {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
+          {total > 0 && (
+            <p className={s.skippedNote}>
+              共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
+            </p>
+          )}
+        </div>
+        <OverlayScrollbar target={scrollRef} />
       </div>
     </div>
   );

@@ -6,13 +6,11 @@ import { capabilitiesQuery } from "@/app/queries";
 import { Button } from "@/components";
 import { cx } from "@/lib/cx";
 import { useSession } from "@/session/useSession";
-import { buildCdBytes } from "./cwd";
 import { FileList } from "./FileList";
 import { guessHome, platformOf } from "./path";
 import { QuickAccess } from "./QuickAccess";
 import { useWorkspace } from "./store";
 import { TerminalPanel } from "./TerminalPanel";
-import { termSockets } from "./termsocket";
 import s from "./Workspace.module.css";
 
 export interface WorkspaceProps {
@@ -22,8 +20,8 @@ export interface WorkspaceProps {
 
 /**
  * 工作区（`docs/roadmap/12-workspace.md`）：终端与文件合成一块。
- * 「我在哪个目录」是一个状态，不是两个——B 期先把两半放进同一个页面，
- * cwd 双向联动（OSC 7）是 C 期。
+ * 终端与文件同处一页；**不做目录同步**（曾按 §4.4 实现过双向联动，
+ * 负责人 2026-09-20 裁定移除：注入 cd 与跟随跳转带来体感卡顿，不值）。
  */
 export function Workspace({ initial }: WorkspaceProps) {
   const cwd = useWorkspace((st) => st.cwd);
@@ -46,6 +44,20 @@ export function Workspace({ initial }: WorkspaceProps) {
     setPanelCollapsed(initial === "files");
   }, [initial, navKey, setPanelCollapsed]);
 
+  // ⌃` 切换终端面板（VSCode 同款）。capture 拦在 xterm 之前，终端聚焦时也能收。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.code === "Backquote") {
+        e.preventDefault();
+        e.stopPropagation();
+        const st = useWorkspace.getState();
+        st.setPanelCollapsed(!st.panelCollapsed);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   // 起点：主目录（capabilities 与会话就绪后才推得出）。
   useEffect(() => {
     if (cwd === null && user && caps.data) {
@@ -64,36 +76,26 @@ export function Workspace({ initial }: WorkspaceProps) {
       if (cur !== null) past.current.push(cur);
       future.current = [];
       setCwd(path);
-      // 反向联动（§4.4）：给当前终端标签发一条 cd。只发给活着的、且不已在
-      // 该目录的；shell 回报 OSC 7 / 轮询后 follow 判定同路径，不会回环。
-      const st = useWorkspace.getState();
-      const tab = st.tabs.find((t) => t.id === st.activeId);
-      if (tab?.status === "live" && tab.cwd !== path) {
-        termSockets.get(tab.id)?.send(buildCdBytes(path, tab.shell));
-      }
     },
     [setCwd],
   );
 
-  // 正向联动：活动终端报出新 cwd，文件区跟过去（§4.4「cd 到哪文件就到哪」）。
-  const activeTabCwd = useWorkspace((st) => st.tabs.find((t) => t.id === st.activeId)?.cwd);
-  useEffect(() => {
-    if (activeTabCwd !== undefined && activeTabCwd !== cwd) setCwd(activeTabCwd);
-  }, [activeTabCwd, cwd, setCwd]);
+  const jump = useCallback(
+    (target: string, pushTo: React.MutableRefObject<string[]>) => {
+      const st = useWorkspace.getState();
+      if (st.cwd !== null) pushTo.current.push(st.cwd);
+      setCwd(target);
+    },
+    [setCwd],
+  );
   const goBack = useCallback(() => {
     const prev = past.current.pop();
-    if (prev === undefined) return;
-    const cur = useWorkspace.getState().cwd;
-    if (cur !== null) future.current.push(cur);
-    setCwd(prev);
-  }, [setCwd]);
+    if (prev !== undefined) jump(prev, future);
+  }, [jump]);
   const goForward = useCallback(() => {
     const next = future.current.pop();
-    if (next === undefined) return;
-    const cur = useWorkspace.getState().cwd;
-    if (cur !== null) past.current.push(cur);
-    setCwd(next);
-  }, [setCwd]);
+    if (next !== undefined) jump(next, past);
+  }, [jump]);
 
   return (
     <div className={s.workspace}>

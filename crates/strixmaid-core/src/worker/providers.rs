@@ -365,16 +365,31 @@ fn register_fs(d: &mut Dispatcher) {
     d.register_fn(rpc::FS_LIST, move |v| {
         let f = f.clone();
         async move {
-            let q: rpc::FsParams = params(rpc::FS_LIST, v)?;
-            result(f.list(&q.path, &q.allowed_roots).await?)
+            let q: rpc::FsListParams = params(rpc::FS_LIST, v)?;
+            let opts = crate::providers::fs::ListOptions {
+                limit: q.limit,
+                offset: q.offset,
+                sort: q.sort.unwrap_or_default(),
+                order: q.order.unwrap_or(strixmaid_types::process::SortOrder::Asc),
+            };
+            result(f.list(&q.path, &q.allowed_roots, opts).await?)
         }
     });
 
+    let f = fs.clone();
     d.register_fn(rpc::FS_READ, move |v| {
-        let f = fs.clone();
+        let f = f.clone();
         async move {
             let q: rpc::FsParams = params(rpc::FS_READ, v)?;
             result(f.read(&q.path, &q.allowed_roots).await?)
+        }
+    });
+
+    d.register_fn(rpc::FS_RAW, move |v| {
+        let f = fs.clone();
+        async move {
+            let q: rpc::FsRawParams = params(rpc::FS_RAW, v)?;
+            result(f.raw(&q.path, &q.allowed_roots, q.offset, q.len).await?)
         }
     });
 }

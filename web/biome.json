@@ -3,7 +3,8 @@
   "files": {
     "includes": [
       "src/**",
-      "!src/api/schema.d.ts"
+      "!src/api/schema.d.ts",
+      "!src/assets/icons/**"
     ]
   },
   "formatter": {

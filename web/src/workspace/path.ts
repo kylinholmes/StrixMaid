@@ -71,3 +71,25 @@ export function guessHome(osId: string | undefined, username: string, uid: numbe
   if (osId?.toLowerCase() === "macos") return uid === 0 ? "/var/root" : `/Users/${username}`;
   return uid === 0 ? "/root" : `/home/${username}`;
 }
+
+/**
+ * 地址栏补全：把输入拆成「已确定的父目录 + 正在敲的最后一段前缀」。
+ * 认不出的形状（相对路径、裸盘符）返回 `null`——不补全好过瞎补。
+ */
+export function splitForCompletion(
+  input: string,
+  p: Platform,
+): { parent: string; prefix: string } | null {
+  if (p === "windows") {
+    if (input === "\\" || input === "/") return { parent: "\\", prefix: "" };
+    if (!/^[A-Za-z]:\\/.test(input)) return null;
+    const cut = input.lastIndexOf("\\");
+    // `C:\pre` 的父是盘根 `C:\`；更深的层级按段切。
+    const head = input.slice(0, cut);
+    const parent = /^[A-Za-z]:$/.test(head) ? `${head}\\` : head;
+    return { parent, prefix: input.slice(cut + 1) };
+  }
+  if (!input.startsWith("/")) return null;
+  const cut = input.lastIndexOf("/");
+  return { parent: cut === 0 ? "/" : input.slice(0, cut), prefix: input.slice(cut + 1) };
+}

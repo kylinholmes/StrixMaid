@@ -81,10 +81,12 @@ pub const LOG_VACUUM: &str = "log.vacuum";
 /// user 层能力实测（读）。参数无，结果 [`crate::capability::UserProbe`]。
 pub const CAPS_PROBE_USER: &str = "caps.probe_user";
 
-/// 列目录（读，roadmap/04 §A）。参数 [`FsParams`]，结果 [`crate::file::DirListing`]。
+/// 列目录（读，roadmap/04 §A）。参数 [`FsListParams`]，结果 [`crate::file::DirListing`]。
 pub const FS_LIST: &str = "fs.list";
 /// 读文本文件（读）。参数 [`FsParams`]，结果 [`crate::file::FileContent`]。
 pub const FS_READ: &str = "fs.read";
+/// 按块读原始字节（读，roadmap/12 §4.6）。参数 [`FsRawParams`]，结果 [`FsRawChunk`]。
+pub const FS_RAW: &str = "fs.raw";
 
 /// 开一个 PTY（`roadmap/03-terminal.md` §4.5）。
 ///
@@ -245,6 +247,66 @@ pub struct FsParams {
     /// 允许浏览的根路径列表。空列表 = 一律拒绝。
     #[serde(default)]
     pub allowed_roots: Vec<String>,
+}
+
+/// `fs.list` 的参数：在 [`FsParams`] 之上加分页与排序（roadmap/12 §4.5）。
+///
+/// 全部可缺省——缺省即旧行为（全量、目录在前按名称），老调用方不受影响。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsListParams {
+    /// 见 [`FsParams::path`]。
+    pub path: String,
+    /// 见 [`FsParams::allowed_roots`]。
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+    /// 最多返回多少条。`None` = 不分页。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// 跳过前多少条（在排序**之后**生效）。
+    #[serde(default)]
+    pub offset: u32,
+    /// 排序键。`None` = 名称。**目录永远在前**，键只决定组内顺序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<crate::file::FileSortKey>,
+    /// 排序方向。`None` = 升序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<crate::process::SortOrder>,
+}
+
+/// `fs.raw` 的参数：按块取一个文件的原始字节（roadmap/12 §4.6）。
+///
+/// **为什么分块**：worker RPC 的单帧上限是 1 MiB（`ipc::MAX_FRAME_LEN`），
+/// 大响应根本过不了通道；控制面又是串行的，一个大帧会把同会话的其它调用
+/// 顶住。每块 ≤ [`FS_RAW_MAX_CHUNK`]，由主进程循环取齐并流式转发给浏览器。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsRawParams {
+    /// 见 [`FsParams::path`]。
+    pub path: String,
+    /// 见 [`FsParams::allowed_roots`]。
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+    /// 从文件的哪个字节偏移开始读。
+    #[serde(default)]
+    pub offset: u64,
+    /// 本块最多读多少字节，上限 [`FS_RAW_MAX_CHUNK`]（worker 侧夹紧）。
+    pub len: u32,
+}
+
+/// `fs.raw` 单块的字节数上限（256 KiB）。
+///
+/// hex 编码后 512 KiB，加上 JSON 骨架仍在 1 MiB 帧限之内。
+pub const FS_RAW_MAX_CHUNK: u32 = 256 * 1024;
+
+/// `fs.raw` 的响应：一块字节与文件的整体信息。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsRawChunk {
+    /// 文件总大小（字节）。调用方据此决定还要不要取下一块。
+    pub total_bytes: u64,
+    /// 按扩展名猜的 MIME；猜不出为 `application/octet-stream`。
+    pub mime: String,
+    /// 本块字节的 hex 编码（用 hex 而不是 base64：不为 33% 的体积差引入新依赖，
+    /// IPC 在本机 socketpair 上，2 倍字节不构成成本）。
+    pub data_hex: String,
 }
 
 /// `proc.live` 的订阅参数（roadmap/04 §B.3）。

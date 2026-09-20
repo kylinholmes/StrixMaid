@@ -273,6 +273,8 @@ pub(super) fn list_drives(dir: &Path) -> DirListing {
         path: dir.to_string_lossy().into_owned(),
         entries,
         skipped: 0,
+        // 排序分页收尾（`finish_listing`）会重建这份 DirListing 并填上真值。
+        total: None,
     }
 }
 

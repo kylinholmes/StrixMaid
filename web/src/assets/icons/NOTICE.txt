@@ -1,0 +1,30 @@
+随本产品分发的文件类型图标：版权声明、许可与出处
+================================================
+
+这个文件存在的理由是许可条款本身要求它存在（体例照抄 ../fonts/NOTICE.txt，
+不另立一套）。选型依据与 54 项逐项对照见 docs/roadmap/12-workspace.md §4.7。
+
+两套图标按类别互补取用（文件夹优先 Papirus、文件优先 vscode-icons，
+互为回落）；SVG 原样收录、未作修改，文件本身即 GPL 所要求的
+Corresponding Source。
+
+
+Papirus Icon Theme（20 个：folders/ 的大部分 + files/csv.svg、files/makefile.svg）
+---------------------------------------------------------------------------------
+版权：Copyright (C) 2016-2024 Papirus Development Team
+许可：GNU General Public License v3.0 —— ./licenses/GPL-3.0.txt（全文随附）
+出处：https://github.com/PapirusDevelopmentTeam/papirus-icon-theme
+      取自其 Papirus/64x64/places/ 与 mimetypes/ 目录（只取这两类，避开上游
+      README 声明有商标限制的品牌 logo）。上游大量使用符号链接，收录时逐个
+      解链并断言内容以 <svg 或 <?xml 开头（CDN 对软链返回的是目标路径字符串，
+      这个坑踩过一次，见 docs/HANDOFF-2026-09-18.md §3.3）。
+说明：本项目自身即 GPL-3.0-only，方向一致；GPL 的源码随附义务由「SVG 原样
+      收录在本目录」满足——SVG 就是它自己的源。
+
+
+vscode-icons（34 个：files/ 的大部分 + folders/folder-config、folder-log、
+folder-database、folder-node）
+-----------------------------------------------------------------------------
+版权：Copyright (c) 2016 Roberto Huertas
+许可：MIT —— ./licenses/vscode-icons-MIT.txt
+出处：https://github.com/vscode-icons/vscode-icons 的 icons/ 目录。

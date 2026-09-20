@@ -218,6 +218,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/files/raw": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 取原始字节
+         * @description 缩略图与将来的下载都走它。按 ≤256 KiB 的块从 worker 取回并流式转发。
+         */
+        get: operations["raw_file"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -1384,6 +1404,12 @@ export interface components {
              *     为 0 表示全部列出。
              */
             skipped?: number;
+            /**
+             * Format: int32
+             * @description 排序后、分页前的条目总数。分页 UI 据此显示「共 N 项」。
+             *     老服务端没有这个字段（`None` = 没分页，`entries` 即全部）。
+             */
+            total?: number | null;
         };
         /** @description 块设备（`/sys/block/<name>`）。 */
         DiskInfo: {
@@ -1472,6 +1498,11 @@ export interface components {
          * @enum {string}
          */
         FileKind: "file" | "dir" | "symlink" | "block_device" | "char_device" | "fifo" | "socket" | "unknown";
+        /**
+         * @description 目录列表的排序键。**目录永远排在前面**，键只决定组内顺序。
+         * @enum {string}
+         */
+        FileSortKey: "name" | "size" | "mtime";
         /** @description 已挂载文件系统的容量占用。 */
         FilesystemInfo: {
             /**
@@ -3332,6 +3363,41 @@ export interface operations {
             };
         };
     };
+    raw_file: {
+        parameters: {
+            query: {
+                /**
+                 * @description 绝对路径。
+                 * @example /etc
+                 */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 文件的原始字节 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": number[];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     list_dir: {
         parameters: {
             query: {
@@ -3341,6 +3407,14 @@ export interface operations {
                  * @example /etc
                  */
                 path: string;
+                /** @description 最多返回多少条。缺省不分页。 */
+                limit?: number | null;
+                /** @description 跳过前多少条（排序之后生效）。 */
+                offset?: number | null;
+                /** @description 排序键，缺省按名称。 */
+                sort?: components["schemas"]["FileSortKey"] | null;
+                /** @description 排序方向，缺省升序。 */
+                order?: components["schemas"]["SortOrder"] | null;
             };
             header?: never;
             path?: never;

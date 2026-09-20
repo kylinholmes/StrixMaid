@@ -2270,6 +2270,7 @@ dependencies = [
  "axum",
  "clap",
  "futures",
+ "hex",
  "hyper",
  "hyper-util",
  "rand 0.10.2",
