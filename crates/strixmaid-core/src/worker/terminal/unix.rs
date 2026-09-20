@@ -485,20 +485,10 @@ fn resolve_shell(requested: Option<&str>, target: &User) -> ApiResult<PathBuf> {
     Ok(PathBuf::from(req))
 }
 
-/// `/etc/shells` 里列出的 shell。注释与空行跳过。
-///
-/// **不做路径规范化**：`/etc/shells` 写的是什么就比什么。规范化（解符号链接、
-/// 折叠 `..`）会把 `/bin/../bin/zsh` 也放进来，凭空扩大匹配面；而拒绝它的代价
-/// 只是调用方要写规范路径。
+/// `/etc/shells` 里列出的 shell。实现与「下拉清单」端点共用一份
+/// （`crate::terminal::shells`），白名单判定与展示清单不许各解析各的。
 fn listed_shells() -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(SHELLS_FILE) else {
-        return Vec::new();
-    };
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_owned)
-        .collect()
+    crate::terminal::shells::listed_shells()
 }
 
 /// 登录 shell 的 `argv[0]`：文件名前加 `-`。

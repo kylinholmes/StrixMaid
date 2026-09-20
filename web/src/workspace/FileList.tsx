@@ -1,4 +1,14 @@
-import { ArrowLeft, ArrowRight, ArrowUp, File, Folder, Link2, RefreshCw } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Eye,
+  EyeOff,
+  File,
+  Folder,
+  Link2,
+  RefreshCw,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { components } from "@/api/schema";
 import {
@@ -14,6 +24,7 @@ import {
 } from "@/components";
 import { fmtBytes } from "@/lib/fmt";
 import { joinPath, type Platform, parentPath } from "./path";
+import { useWorkspace } from "./store";
 import { useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
 
@@ -79,6 +90,10 @@ export function FileList({
   const { data, error, isPending, isFetching, refresh } = useDirListing(path);
   const [selected, setSelected] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const hideHidden = useWorkspace((st) => st.hideHidden);
+  const toggleHidden = useWorkspace((st) => st.toggleHidden);
+  /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
+  const [editing, setEditing] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // 换目录回到顶部并清选中；刷新（同 path 重取）不走这里，滚动与选中原地保留。
@@ -87,13 +102,20 @@ export function FileList({
     scrollRef.current?.scrollTo({ top: 0 });
     setSelected(null);
     setShowAll(false);
+    setEditing(null);
   }, [path]);
 
   const up = path === null ? null : parentPath(path, platform);
 
+  // 隐藏文件按 dotfile 约定过滤（后端不区分平台的 hidden 属性，前端也不猜）。
+  const hiddenCount = hideHidden
+    ? (data?.entries ?? []).filter((e) => e.name.startsWith(".")).length
+    : 0;
   // 大目录兜底（D 期的分页 + 虚拟滚动到位前）：一次渲染上万行会把页面卡死，
   // 默认只渲染前 RENDER_CAP 行，其余点「显示全部」明确换取。
-  const allRows = data?.entries ?? [];
+  const allRows = hideHidden
+    ? (data?.entries ?? []).filter((e) => !e.name.startsWith("."))
+    : (data?.entries ?? []);
   const capped = !showAll && allRows.length > RENDER_CAP;
   const visibleRows = capped ? allRows.slice(0, RENDER_CAP) : allRows;
 
@@ -166,10 +188,38 @@ export function FileList({
         >
           <ArrowUp size={14} />
         </Button>
-        <span className={s.pathBar} title={path ?? ""}>
-          {path ?? ""}
-        </span>
+        <input
+          className={s.pathBar}
+          aria-label="路径，回车跳转"
+          title={path ?? ""}
+          value={editing ?? path ?? ""}
+          onChange={(e) => setEditing(e.target.value)}
+          onFocus={(e) => e.target.select()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              const target = (editing ?? "").trim();
+              if (target && target !== path) onNavigate(target);
+              setEditing(null);
+              e.currentTarget.blur();
+            }
+            if (e.key === "Escape") {
+              setEditing(null);
+              e.currentTarget.blur();
+            }
+          }}
+          onBlur={() => setEditing(null)}
+          spellCheck={false}
+        />
         <ToolbarSpacer />
+        <Button
+          iconOnly
+          size="sm"
+          aria-label={hideHidden ? "显示隐藏文件" : "隐藏隐藏文件"}
+          title={hideHidden ? "显示以 . 开头的条目" : "隐藏以 . 开头的条目"}
+          onClick={toggleHidden}
+        >
+          {hideHidden ? <EyeOff size={14} /> : <Eye size={14} />}
+        </Button>
         <Button iconOnly size="sm" aria-label="刷新" onClick={refresh}>
           <RefreshCw size={14} />
         </Button>
@@ -207,6 +257,7 @@ export function FileList({
             )}
           </>
         )}
+        {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
         {data && (data.skipped ?? 0) > 0 && (
           <p className={s.skippedNote}>{data.skipped} 个条目因无权限或已消失被跳过</p>
         )}

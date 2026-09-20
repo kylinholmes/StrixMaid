@@ -38,6 +38,8 @@ interface WorkspaceState {
   panelCollapsed: boolean;
   /** 左侧快速访问栏是否折叠。 */
   railCollapsed: boolean;
+  /** 隐藏以 `.` 开头的条目（dotfile 约定，三平台一致处理）。 */
+  hideHidden: boolean;
 
   addTab(tab: Tab): void;
   removeTab(id: string): void;
@@ -49,6 +51,7 @@ interface WorkspaceState {
   setPanelHeight(px: number): void;
   setPanelCollapsed(collapsed: boolean): void;
   toggleRail(): void;
+  toggleHidden(): void;
 }
 
 /**
@@ -73,6 +76,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   panelHeight: 320,
   panelCollapsed: false,
   railCollapsed: false,
+  hideHidden: false,
 
   addTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab], activeId: tab.id })),
 
@@ -110,4 +114,5 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     }),
   setPanelCollapsed: (collapsed) => set({ panelCollapsed: collapsed }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
+  toggleHidden: () => set((s) => ({ hideHidden: !s.hideHidden })),
 }));

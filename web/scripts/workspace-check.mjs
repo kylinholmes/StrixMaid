@@ -51,13 +51,17 @@ function listings(platform, big) {
   }
   return {
     "/home/kylin": {
-      entries: [dir("proj"), dir("docs"), ...makeEntries(4)],
+      entries: [dir("proj"), dir("docs"), dir(".config"), { ...makeEntries(1)[0], name: ".bashrc" }, ...makeEntries(4)],
       skipped: 0,
     },
     "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
     "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
+    "/etc": { entries: [{ ...makeEntries(1)[0], name: "nginx.conf" }], skipped: 0 },
   };
 }
+
+/** POST /terminals 收到的 shell 参数（无则 null），按序记录。 */
+const postedShells = [];
 
 async function mockApi(page, { platform, osId }) {
   const maps = listings(platform, true);
@@ -101,9 +105,17 @@ async function mockApi(page, { platform, osId }) {
         ? json({ path: q, ...found })
         : json({ code: "not_found", message: `没有 ${q}` }, 404);
     }
+    if (p.endsWith("/terminals/shells")) {
+      return json([
+        { path: "/bin/zsh", name: "zsh", default: true },
+        { path: "/bin/bash", name: "bash", default: false },
+      ]);
+    }
     if (p.endsWith("/terminals") && method === "POST") {
+      const body = route.request().postDataJSON() ?? {};
+      postedShells.push(body.shell ?? null);
       const id = `term${++terminalSeq}`;
-      liveTerminals.set(id, { shell: "/bin/zsh" });
+      liveTerminals.set(id, { shell: body.shell ?? "/bin/zsh" });
       return json({ id }, 201);
     }
     if (p.endsWith("/terminals") && method === "GET") {
@@ -162,6 +174,23 @@ async function unixFlow(browser) {
   await page.waitForTimeout(200);
   check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
 
+  // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
+  check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
+  await page.click('[aria-label="隐藏隐藏文件"]');
+  await page.waitForSelector("text=2 个隐藏条目未显示");
+  check("开关后 dotfile 不再显示", !(await page.isVisible("text=.bashrc")));
+  await page.click('[aria-label="显示隐藏文件"]');
+  await page.waitForSelector("text=.bashrc");
+  check("再开回来 dotfile 恢复显示", true);
+
+  // 地址栏输入：敲路径回车即跳转。
+  await page.fill('[aria-label="路径，回车跳转"]', "/etc");
+  await page.press('[aria-label="路径，回车跳转"]', "Enter");
+  await page.waitForSelector("text=nginx.conf");
+  check("地址栏输入回车跳转", true);
+  await page.click("text=主目录");
+  await page.waitForSelector("text=proj");
+
   // 进大目录：500 行渲染上限 + 「显示全部」。
   await page.click("text=proj");
   await page.waitForSelector("text=已显示前 500 项");
@@ -204,11 +233,15 @@ async function unixFlow(browser) {
   await page.waitForSelector("text=t1", { timeout: 5000 });
   check("焦点刷新后新目录出现", true);
 
-  // 终端：开标签 → 打字回显 → exit 42 → 「已退出 (code 42)」且内容保留。
+  // 终端：第一个标签用 shell 下拉建（非默认的 bash），验证下拉与参数直达后端。
   await page.click('[aria-label="展开终端面板"]');
-  await page.click("text=开一个");
+  await page.click('[aria-label="选择 shell 新建终端"]');
+  await page.getByRole("button", { name: "zsh（默认）" }).waitFor();
+  await page.getByRole("button", { name: "bash", exact: true }).click();
   await page.waitForSelector(".xterm", { timeout: 8000 });
-  check("终端标签建立（xterm 挂载）", true);
+  check("shell 下拉建出终端（xterm 挂载）", true);
+  check("POST 带上了选中的 shell", postedShells.includes("/bin/bash"), postedShells.join(","));
+  check("标签名显示所选 shell", await page.isVisible("text=bash"));
   await page.waitForSelector("text=mock-shell", { timeout: 5000 }).catch(() => {});
   await page.click(".xterm");
   await page.keyboard.type("echo hi");

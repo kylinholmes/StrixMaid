@@ -1,8 +1,10 @@
-import { ChevronDown, ChevronUp, Plus, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, ChevronsUpDown, ChevronUp, Plus, X } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { api } from "@/api/client";
-import { Button } from "@/components";
+import { Button, Menu } from "@/components";
 import { cx } from "@/lib/cx";
+import { useDismiss } from "@/lib/useDismiss";
 import { atTabLimit, MAX_TABS, useWorkspace } from "./store";
 import { TerminalTab } from "./TerminalTab";
 import s from "./Workspace.module.css";
@@ -35,31 +37,47 @@ export function TerminalPanel() {
   const creating = useRef(false);
   /** 上一次开终端失败的原因。开成功或再点一次时清掉。 */
   const [createError, setCreateError] = useState<string | null>(null);
+  const [shellMenu, setShellMenu] = useDismiss();
+  // 清单几乎不变，缓存一小时；面板挂载即取，免得第一次点下拉要等。
+  const shells = useQuery({
+    queryKey: ["terminals", "shells"],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/v1/terminals/shells");
+      if (error) throw error;
+      return data;
+    },
+    staleTime: 3_600_000,
+  });
 
-  const create = useCallback(async () => {
-    // 连点保护：POST 在途时不再发第二个。
-    if (creating.current) return;
-    creating.current = true;
-    setCreateError(null);
-    try {
-      const { data, error } = await api.POST("/api/v1/terminals", { body: {} });
-      if (error || !data) {
-        // 静默失败会让人对着一个没反应的按钮连点：本页数不到的 409
-        // （另一个窗口占着同一会话的名额）、5xx、断网都要说出来。
-        setCreateError(
-          (error as { message?: string } | undefined)?.message ?? "开终端失败，请重试",
-        );
-        return;
+  const create = useCallback(
+    async (shell?: string) => {
+      // 连点保护：POST 在途时不再发第二个。
+      if (creating.current) return;
+      creating.current = true;
+      setCreateError(null);
+      try {
+        const { data, error } = await api.POST("/api/v1/terminals", {
+          body: shell ? { shell } : {},
+        });
+        if (error || !data) {
+          // 静默失败会让人对着一个没反应的按钮连点：本页数不到的 409
+          // （另一个窗口占着同一会话的名额）、5xx、断网都要说出来。
+          setCreateError(
+            (error as { message?: string } | undefined)?.message ?? "开终端失败，请重试",
+          );
+          return;
+        }
+        // 列表接口才有 shell 等元数据；此处用默认名，附着后标题无关紧要。
+        const { data: list } = await api.GET("/api/v1/terminals");
+        const info = list?.find((t) => t.id === data.id);
+        addTab({ id: data.id, title: info ? titleOf(info.shell) : "shell", status: "live" });
+        setPanelCollapsed(false);
+      } finally {
+        creating.current = false;
       }
-      // 列表接口才有 shell 等元数据；此处用默认名，附着后标题无关紧要。
-      const { data: list } = await api.GET("/api/v1/terminals");
-      const info = list?.find((t) => t.id === data.id);
-      addTab({ id: data.id, title: info ? titleOf(info.shell) : "shell", status: "live" });
-      setPanelCollapsed(false);
-    } finally {
-      creating.current = false;
-    }
-  }, [addTab, setPanelCollapsed]);
+    },
+    [addTab, setPanelCollapsed],
+  );
 
   const close = useCallback(
     (id: string) => {
@@ -120,6 +138,22 @@ export function TerminalPanel() {
           }}
         />
       )}
+      {/* 菜单挂在面板层而不是标签栏里：标签栏 overflow-x:auto 会把向上弹出的
+          菜单裁掉/挡住点击。从面板上边缘向上弹，盖在文件区之上。 */}
+      {shellMenu && (
+        <Menu
+          label="选择 shell"
+          style={{ position: "absolute", bottom: "100%", left: "var(--sp-3)", zIndex: 10 }}
+          items={(shells.data ?? []).map((sh) => ({
+            id: sh.path,
+            label: sh.default ? `${sh.name}（默认）` : sh.name,
+          }))}
+          onPick={(path) => {
+            setShellMenu(false);
+            void create(path);
+          }}
+        />
+      )}
       <div className={s.tabBar}>
         {tabs.map((t) => (
           <div
@@ -156,10 +190,22 @@ export function TerminalPanel() {
           size="sm"
           aria-label="新建终端"
           disabled={limit}
-          title={limit ? `本会话已达 ${MAX_TABS} 个终端上限` : "新建终端"}
+          title={limit ? `本会话已达 ${MAX_TABS} 个终端上限` : "新建终端（默认 shell）"}
           onClick={() => void create()}
         >
           <Plus size={14} />
+        </Button>
+        <Button
+          iconOnly
+          size="sm"
+          aria-label="选择 shell 新建终端"
+          disabled={limit}
+          onClick={(e) => {
+            e.stopPropagation();
+            setShellMenu((v) => !v);
+          }}
+        >
+          <ChevronsUpDown size={13} />
         </Button>
         {createError && (
           <span className={s.createError} role="alert">

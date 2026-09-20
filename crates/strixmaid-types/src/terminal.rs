@@ -75,6 +75,20 @@ pub struct TerminalInfo {
     pub attached: bool,
 }
 
+/// `GET /api/v1/terminals/shells` 列表项：本机可供开终端的一个 shell。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ShellInfo {
+    /// 绝对路径，直接可作 [`CreateTerminalReq::shell`]。
+    #[schema(example = "/bin/zsh")]
+    pub path: String,
+    /// 展示名（文件名）。
+    #[schema(example = "zsh")]
+    pub name: String,
+    /// 是否为会话用户的默认 shell（Unix：passwd 的登录 shell；Windows：`%COMSPEC%`）。
+    /// 列表里恰好一项为 `true`，且排在最前。
+    pub default: bool,
+}
+
 /// `POST /api/v1/terminals/{id}/resize` 的请求体。
 ///
 /// 走 REST 而不是塞进终端 WS 流，是因为写操作一律走 REST（幂等、易调试、好审计），

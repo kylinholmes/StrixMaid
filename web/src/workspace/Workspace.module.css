@@ -119,6 +119,7 @@
   min-height: 0;
 }
 
+/* 地址栏：平时长得像一段路径文本，聚焦才现出输入框的形。 */
 .pathBar {
   font-family: var(--mono);
   font-size: var(--fs-300);
@@ -130,6 +131,21 @@
      长路径截尾部，完整路径在 title 里。 */
   min-width: 0;
   flex: 1;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  padding: 2px var(--sp-2);
+}
+
+.pathBar:hover {
+  border-color: var(--line);
+}
+
+.pathBar:focus {
+  border-color: var(--stroke);
+  background: var(--surface);
+  color: var(--ink);
+  outline: none;
 }
 
 .nameCell {
