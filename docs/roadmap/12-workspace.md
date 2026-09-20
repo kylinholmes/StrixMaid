@@ -195,8 +195,9 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 | 端点 | 用途 |
 |---|---|
 | `GET /terminals/shells` | 本机可用 shell（名字 + 路径 + 哪个是默认） |
-| `GET /files/raw?path=` | 原始字节流，带大小上限。缩略图与将来的下载都用它 |
-| `GET /files/icon?…` | 按文件类型取图标，返回 PNG。**内置图标集把这条路盖住了**（§4.7：图标在前端解决、零请求），端点保留是给「取系统真图标」留位，见 §8 未决 8 |
+| `GET /files/raw?path=` | 原始字节流，按 ≤256 KiB 分块从 worker 取回再流式转发。将来的下载用它（缩略图 2026-09-21 起改走 `/files/thumb`，见 §4.7） |
+| `GET /files/thumb?path=` | 服务端缩好的缩略图（§4.7 改判）。EXIF 方向随响应头 `x-thumb-orientation` 透传 |
+| `GET /files/icon/{ext}` | 按**扩展名**取系统真图标，返回 PNG（2026-09-20 落地，见 §8 未决 8）。前端优先它、404 回落内置集（§4.7） |
 | `GET /files` 增加分页与排序参数 | 见 §4.5 |
 | `TerminalInfo` 增加 `pid` | cwd 兜底要它 |
 
@@ -205,10 +206,27 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 
 ### 4.7 图标与缩略图
 
-**缩略图：后端只送字节，浏览器解码。** `/files/raw` 把原始字节送出来，前端用 canvas
-缩放。这样后端**不引入任何图片解码库**——图片解析器历来是 CVE 重灾区，在 worker 里
-解码用户的任意图片文件等于自己开一个攻击面。代价只是小图走全尺寸带宽，给个上限
-（超过阈值的图片不出缩略图，显示通用图标）即可。
+**缩略图：服务端缩好再下发**（`GET /files/thumb`，**2026-09-21 改判**）。
+
+~~原定：后端只送字节（`/files/raw`）、浏览器自己缩，后端不引入任何图片解码库，
+代价是小图走全尺寸带宽、给个 8 MiB 上限即可。~~ **这条规则在真实照片目录上等于
+没有缩略图**：相机直出的 JPG 普遍 13～27 MiB，一张都过不了那道闸，而那恰恰是最
+需要预览的地方（负责人实测 `~/Pictures/Export` 后改判）。
+
+新做法与原顾虑的处置，逐条对应（实现见 `providers/fs/thumb.rs` 的模块文档）：
+
+| 层 | 做法 | 消掉的风险 |
+|---|---|---|
+| 一 | 相机 JPEG 先取 **EXIF 内嵌预览**，按 TIFF 的 IFD 结构读几个整数偏移量 | 这条路**一个像素都不解码**；实测 18 MiB 原图 → 5 KB、6.4 ms，照片目录绝大多数条目走它 |
+| 二 | 真要解码时**先读文件头拿尺寸**，像素数超 8000 万直接拒绝 | 解压炸弹 |
+| 三 | 解码器是纯 Rust（zune-jpeg / png / image-webp），整段包在 `catch_unwind` 里 | 越界是 panic 而不是可利用的内存破坏；坏图也不掀掉 worker |
+
+没变的两条仍然承重：解码发生在 **worker**（登录用户身份），可见性照旧由文件权限
+裁决；`allowed_roots` 照旧在 `resolve()` 里校验。EXIF 方向标签**透传给前端**用 CSS
+转正——服务端转就得解码，正好违背内嵌预览存在的理由。
+
+**边界**：HEIC / HEIF 没有缩略图。纯 Rust 生态里没有可用的解码器，为它引 libheif（C）
+正是上面第三层要避免的东西；这类文件如实回落系统类型图标。
 
 **图标：两套内置，按类别各自优先（2026-09-18 定）。**
 
@@ -236,9 +254,10 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 
 **零缺口**。89 KB 打进前端资源，对 15 MiB 的体积门槛（当前 release 10.5 MB）无影响。
 
-**两套都按扩展名/MIME 映射，所以图标完全在前端解决、零请求。** `GET /files/icon`
-这个端点在有内置集的情况下不会被调用——它保留下来是给「取系统真图标」那条路
-（见 §8 未决 8）留位。
+**两套都按扩展名/MIME 映射，所以内置集这条路完全在前端解决、零请求。**
+2026-09-20 起「取系统真图标」也落地了（`GET /files/icon/{ext}`，见 §8 未决 8）：
+支持的平台（Windows、有窗口服务器的 macOS）上文件优先显示系统图标，内置集
+降为回落；Linux 后端 404，前端探测一次后整个会话零请求，内置集照旧。
 
 **许可证不一样，要分别处理。** vscode-icons 是 MIT；**Papirus 是 GPL-3.0**——与本项目
 同许可（`Cargo.toml` 的 `license = "GPL-3.0-only"`），方向没问题，但 GPL 的
@@ -266,8 +285,10 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
   内存缓存，最坏约 7 个往返。
 - **改走 WS 反而更慢**：一条 WS 就是一条连接，几十张缩略图挤在上面是串行的，
   除非自己实现多路复用与乱序回执。HTTP/1.1 的 6 条并发是白送的并行。
-- `<img src="/api/v1/files/icon?…">` 在 HTTP 下自动缓存、自动并发、自动解码；
-  走 WS 要手工 blob、自管缓存、自管并发。
+- HTTP 下自动缓存、自动并发、自动解码；走 WS 要手工 blob、自管缓存、自管并发。
+  （**落地时打了个折**：`<img src>` 带不了 `Authorization` 头，图标与缩略图实际
+  走的是裸 `fetch` + object URL，见 `web/src/workspace/thumbs.ts`。自动并发与
+  浏览器 HTTP 缓存照旧生效，省掉的只有「自动解码成 `<img>`」那一步。）
 - REST 端点自动进 OpenAPI → 前端类型免费；WS 要手写 envelope 协议并自己维护类型。
 
 真要提速，正路是反代上开 HTTP/2，或加一个批量端点——**两者都是加法**，现在不必
@@ -373,7 +394,24 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
    （inotify / `ReadDirectoryChangesW` / FSEvents）与收益不匹配，而目录变化通常正是
    使用者自己在下面那个终端里造成的。
 
-8. **「取系统真图标」这条还做不做。** 原计划 Windows 走 `SHGetFileInfoW`、macOS 走
-   `NSWorkspace`。内置集定下来之后它的价值缩小成「装了 Office 的机器上 `.docx` 显示
-   真正的 Word 图标」，而代价是三平台各一套实现（macOS 还得先搭 objc 桥，仓库目前
-   一处都没有）。`GET /files/icon` 端点为它留着位。**倾向 D 期再评估，不在 B 期做。**
+8. ~~**「取系统真图标」这条还做不做。**~~ **做了（2026-09-20，负责人要求）**。
+   端点 `GET /files/icon/{ext}`，key 是扩展名（按类型缓存与请求，§4.6 的账）：
+   - **Windows**：`SHGetFileInfoW(SHGFI_USEFILEATTRIBUTES)`——虚构文件名、只查
+     注册表、不碰磁盘；先 `SHGFI_ICONLOCATION` + `PrivateExtractIconsW` 取精确
+     64px，处理器动态生成的类型回落 `SHGFI_ICON` 大图标档。
+   - **macOS**：objc 桥落在 `platform/appkit.rs`（手写 `objc_msgSend`，与
+     `iokit.rs` 同取向，不引 objc2）：`UTType` → `NSWorkspace iconForContentType:`
+     （老系统回落 `iconForFileType:`）→ `NSBitmapImageRep` 编码 PNG。
+     `available()` 以窗口服务器连接（`CGSessionCopyCurrentDictionary`）为闸——
+     守护进程形态下 AppKit 行为不确定，误开的代价是挂住，宁严勿宽。
+   - **Linux**：不做（未决 3 的图标主题问题原样在），恒 404。
+   - 缓存照搬 `IconCache`（TTL/负缓存/single-flight），不预热（类型集合事先
+     不可知）。前端 `sysicons.ts` 先拿 `txt` 探测一次，404 就整个会话不再问。
+   - **覆盖面（负责人 2026-09-20 追加：Win/Mac 的图标都从系统读，文件夹也是）**：
+     目录与无扩展名文件走保留 key `$dir` / `$file`（`$` 被扩展名消毒拒绝，
+     保留名撞不上真实类型）；macOS 另有 `GET /files/icon-path?path=`——
+     `.app` 这类 bundle 与符号链接按路径 `iconForFile:` 取**这一个条目**的
+     真身（Zed.app 显示 Zed 的 logo）。Windows 不开按路径这条：那是一次以
+     服务进程身份的磁盘访问，与「类型图标不碰磁盘所以可以不经 worker」的
+     前提相抵触；展示范围用与 `/files` 同一对 `normalize`/`is_allowed` 把关。
+     内置图标集降为回落（Linux 的主力）。

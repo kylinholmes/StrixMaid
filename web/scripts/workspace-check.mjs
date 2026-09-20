@@ -54,6 +54,7 @@ function listings(platform, big) {
       entries: [dir("proj"), dir("docs"), dir(".config"), { ...makeEntries(1)[0], name: ".bashrc" }, ...makeEntries(4)],
       skipped: 0,
     },
+    "/home": { entries: [dir("kylin")], skipped: 0 },
     "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
     "/home/kylin/docs": { entries: [{ ...makeEntries(1)[0], name: "logo.png" }, ...makeEntries(2, "d")], skipped: 0 },
     "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
@@ -69,6 +70,12 @@ const cwdCommands = [];
 
 /** /api/v1/files 收到的完整查询参数（排序/分页的断言点）。 */
 const filesQueries = [];
+
+/** 1×1 红色 PNG：图标与缩略图的 mock 响应共用。 */
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 async function mockApi(page, { platform, osId }) {
   const maps = listings(platform, true);
@@ -128,13 +135,20 @@ async function mockApi(page, { platform, osId }) {
       const page = limit === undefined ? list : list.slice(offset, offset + limit);
       return json({ path: qpath, entries: page, skipped: found.skipped, total });
     }
-    if (p.endsWith("/files/raw")) {
-      // 1×1 红色 PNG。
-      const png = Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-        "base64",
-      );
-      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    if (p.includes("/files/icon/") || p.endsWith("/files/icon-path") || p.endsWith("/files/raw")) {
+      // 系统类型图标（按扩展名 / $dir / $file）、按路径的 bundle 图标、
+      // 原始字节：同一张 1×1 PNG 即可，断言只看 <img src="blob:">。
+      return route.fulfill({ status: 200, contentType: "image/png", body: PNG_1X1 });
+    }
+    if (p.endsWith("/files/thumb")) {
+      // 服务端缩好的缩略图（§4.7 改判后的那条路）。方向头一并给上：
+      // 前端要按它转，给 6（顺时针 90°）才能断言真的读了这个头。
+      return route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: { "x-thumb-orientation": "6" },
+        body: PNG_1X1,
+      });
     }
     if (p.endsWith("/terminals/shells")) {
       return json([
@@ -210,7 +224,7 @@ async function mockApi(page, { platform, osId }) {
 }
 
 async function unixFlow(browser) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ reducedMotion: "reduce" });
   page.on("pageerror", (e) => check("页面无未捕获异常", false, String(e)));
   await mockApi(page, { platform: "unix", osId: "ubuntu" });
   await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
@@ -219,30 +233,36 @@ async function unixFlow(browser) {
   await page.goto(`${BASE}/files`);
   await page.waitForSelector("text=名称");
   check("文件列表渲染（主目录）", await page.isVisible("text=proj"));
-  check("从文件入口进入时终端面板收起", !(await page.isVisible("text=还没有终端")));
+  check("从文件入口进入时终端面板收起", !(await page.isVisible(".xterm")));
 
   // §4.1：两个导航入口指向同一页，且**每次点击**都重新生效——
   // React Router 复用组件实例，只看首挂载的话第二次点击就没反应了。
   await page.getByRole("button", { name: "终端", exact: true }).click();
-  await page.waitForSelector("text=还没有终端");
-  check("点导航「终端」展开面板", true);
+  // VSCode 式：展开时一个终端都没有 → 自动开一个。
+  await page.waitForSelector(".xterm", { timeout: 8000 });
+  check("点导航「终端」展开面板并自动开出终端", true);
   await page.getByRole("button", { name: "文件", exact: true }).click();
   await page.waitForTimeout(200);
-  check("点导航「文件」收起面板", !(await page.isVisible("text=还没有终端")));
+  check("点导航「文件」收起面板", !(await page.isVisible(".xterm")));
 
   // ⌃` 切换终端面板（VSCode 同款）。
   await page.keyboard.press("Control+Backquote");
-  await page.waitForSelector("text=还没有终端");
-  check("Ctrl+` 展开终端面板", true);
+  await page.waitForFunction(() => {
+    const x = document.querySelector(".xterm");
+    return x !== null && x.getBoundingClientRect().height > 0;
+  });
+  check("Ctrl+` 展开终端面板（沿用已有终端）", true);
   await page.keyboard.press("Control+Backquote");
   await page.waitForTimeout(150);
-  check("Ctrl+` 再按折叠面板", !(await page.isVisible("text=还没有终端")));
+  check("Ctrl+` 再按折叠面板", !(await page.isVisible(".xterm")));
 
   // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
   check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
   await page.click('[aria-label="隐藏隐藏文件"]');
-  await page.waitForSelector("text=2 个隐藏条目未显示");
-  check("开关后 dotfile 不再显示", !(await page.isVisible("text=.bashrc")));
+  await page.waitForFunction(
+    () => !document.querySelector('[data-pane="top"]')?.textContent?.includes(".bashrc"),
+  );
+  check("开关后 dotfile 不再显示", true);
   await page.click('[aria-label="显示隐藏文件"]');
   await page.waitForSelector("text=.bashrc");
   check("再开回来 dotfile 恢复显示", true);
@@ -258,7 +278,7 @@ async function unixFlow(browser) {
   await page.waitForSelector('[role="option"]:has-text("/home/kylin/proj")', { timeout: 4000 });
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await page.waitForSelector("text=共 800 项");
+  await page.waitForSelector('[data-pane="top"] >> text=p0000.txt');
   check(
     "地址栏补全可选中并跳转",
     (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
@@ -268,28 +288,33 @@ async function unixFlow(browser) {
 
   // 进大目录：服务端分页（首页 500）+ 虚拟滚动（DOM 里只有视口附近的行）。
   await page.click("text=proj");
-  await page.waitForSelector("text=共 800 项，已加载 500");
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('[data-pane="top"] [class*=fileScroll]')?.scrollHeight ?? 0) >
+      10000,
+  );
   const rows = await page.locator("tbody tr").count();
-  check("虚拟滚动只渲染视口附近的行", rows < 120, `DOM 行数 ${rows}`);
-  check("skipped 提示", await page.isVisible("text=1 个条目因无权限或已消失被跳过"));
+  check("虚拟滚动只渲染视口附近的行（含常驻垫层）", rows < 140, `DOM 行数 ${rows}`);
   // 滚到已加载末尾触发下一页，直到 800 全部加载。
-  const bigScroller = page.locator('[class*=fileScroll]').first();
+  const bigScroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await bigScroller.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
   await page.waitForFunction(
-    () => document.body.textContent?.includes("共 800 项") && !document.body.textContent?.includes("已加载"),
+    () =>
+      (document.querySelector('[data-pane="top"] [class*=fileScroll]')?.scrollHeight ?? 0) >
+      18000,
     undefined,
     { timeout: 8000 },
   );
   check("滚动到底自动加载完 800 项", true);
   // 表头点「大小」→ 服务端排序参数带出去。
-  await page.click('th button:has-text("大小")');
+  await page.click('[data-pane="top"] th button:has-text("大小")');
   await page.waitForTimeout(300);
   check(
     "点表头触发服务端排序",
     filesQueries.some((q) => q.sort === "size" && q.path === "/home/kylin/proj"),
     JSON.stringify(filesQueries.at(-1)),
   );
-  await page.click('th button:has-text("名称")');
+  await page.click('[data-pane="top"] th button:has-text("名称")');
   await page.waitForTimeout(300);
 
   // 后退 → 主目录；前进 → 又回来。
@@ -324,25 +349,26 @@ async function unixFlow(browser) {
   await page.waitForSelector("text=t1", { timeout: 5000 });
   check("焦点刷新后新目录出现", true);
 
-  // 终端：第一个标签用 shell 下拉建（非默认的 bash），验证下拉与参数直达后端。
+  // 终端：展开（沿用早前自动开出的 zsh），再用 shell 下拉建一个 bash。
   await page.click('[aria-label="展开终端面板"]');
+  await page.waitForSelector(".xterm", { timeout: 8000 });
   await page.click('[aria-label="选择 shell 新建终端"]');
   await page.getByRole("button", { name: "zsh（默认）" }).waitFor();
   await page.getByRole("button", { name: "bash", exact: true }).click();
-  await page.waitForSelector(".xterm", { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 2);
   check("shell 下拉建出终端（xterm 挂载）", true);
   check("POST 带上了选中的 shell", postedShells.includes("/bin/bash"), postedShells.join(","));
   check("标签名显示所选 shell", await page.isVisible("text=bash"));
   await page.waitForSelector("text=mock-shell", { timeout: 5000 }).catch(() => {});
-  await page.click(".xterm");
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("echo hi");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
-  const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
+  const echoed = await page.evaluate(() => document.querySelector('[class*=termHost]:not([class*=termHidden]) .xterm')?.textContent ?? "");
   check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
 
   // ---- 目录同步已按负责人决定移除：终端 cd 不影响文件区、导航不注入 cd ----
-  await page.click(".xterm");
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("cd /home/kylin/proj");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(600);
@@ -359,27 +385,55 @@ async function unixFlow(browser) {
     cwdCommands.map((c) => c.line).join(" | "),
   );
 
+  // 列表视图的小缩略图：logo.png 的图标位换成 16px 预览图。
+  await page.waitForSelector('[data-pane="top"] [class*=thumbMini][src^="blob:"]', {
+    timeout: 5000,
+  });
+  check("列表行的图片出小缩略图", true);
+  // EXIF 方向必须真的被用上：mock 给的是 6（顺时针 90°）。
+  const rotated = await page.evaluate(() => {
+    const img = document.querySelector('[data-pane="top"] [class*=thumbMini]');
+    return img ? getComputedStyle(img).transform : "";
+  });
+  check(
+    "缩略图按 EXIF 方向旋转",
+    rotated.startsWith("matrix") && rotated !== "matrix(1, 0, 0, 1, 0, 0)",
+    rotated,
+  );
+
   // 平铺视图 + 缩略图：logo.png 出图，目录出图标。
   await page.getByRole("button", { name: "平铺", exact: true }).click();
   await page.waitForSelector('[class*=tileGrid]');
   await page.waitForSelector('[class*=tileIcon] img[src^="blob:"]', { timeout: 5000 });
   check("平铺视图的图片条目出缩略图", true);
+  // 层叠是列表模式的东西（负责人 2026-09-20 定）：平铺永远单层。
+  check("平铺视图不渲染层叠垫层", (await page.locator("[data-pane]").count()) === 1);
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await page.waitForSelector("text=d0000.txt");
+  // 系统文件类型图标：探测通过后按扩展名取，列表行的图标是 blob:。
+  await page.waitForSelector('[data-pane="top"] [class*=nameCell] img[src^="blob:"]', {
+    timeout: 5000,
+  });
+  check("列表行用上系统类型图标（/files/icon）", true);
+  // 终端面板是浮层：文件滚动区按面板实测高度留底，最后一行不被盖住。
+  const panelInset = await page.evaluate(() => {
+    const el = document.querySelector('[data-pane="top"] [class*=fileScroll]');
+    return el ? Number.parseFloat(getComputedStyle(el).paddingBottom) : 0;
+  });
+  check("文件区为终端浮层留出底部空白", panelInset >= 20, `padding-bottom=${panelInset}`);
 
-  // 第二个标签 + 切换。
+  // 再开一个标签 + 切换（此前已有自动 zsh + 下拉 bash）。
   await page.click('[aria-label="新建终端"]');
-  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 2);
-  check("第二个标签，两个 xterm 实例并存（切走不卸载）", true);
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 3);
+  check("多标签的 xterm 实例并存（切走不卸载）", true);
 
-  // 在第二个标签里 exit 42。
-  await page.click(".xterm >> nth=1");
+  // 在新标签里 exit 42。
+  await page.click('[class*=termHost]:not([class*=termHidden]) .xterm');
   await page.keyboard.type("exit 42");
   await page.keyboard.press("Enter");
   await page.waitForSelector("text=已退出 (code 42)", { timeout: 5000 });
   check("退出显示带退出码，且与断线区分", true);
-  check("退出后内容保留（xterm 未销毁）",
-    (await page.locator(".xterm").count()) === 2);
+  check("退出后内容保留（xterm 未销毁）", (await page.locator(".xterm").count()) === 3);
 
   if (process.env.SHOT) {
     await page.screenshot({ path: `${process.env.SHOT}/workspace-terminal.png` });
@@ -404,8 +458,8 @@ async function unixFlow(browser) {
   await page.click("text=主目录");
   await page.waitForSelector('tbody >> text=proj');
   await page.click('tbody >> text=proj');
-  await page.waitForSelector("text=共 800 项");
-  const scroller = page.locator(".fileScroll, [class*=fileScroll]").first();
+  await page.waitForSelector('[data-pane="top"] >> text=p0000.txt');
+  const scroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.waitForTimeout(500);
@@ -422,7 +476,7 @@ async function unixFlow(browser) {
 }
 
 async function windowsFlow(browser) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ reducedMotion: "reduce" });
   await mockApi(page, { platform: "windows", osId: "windows" });
   await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
   filesRequests.length = 0;

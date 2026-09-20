@@ -2,10 +2,15 @@
 //!
 //! # 为什么经 worker
 //!
-//! 文件的可见性由文件系统按 uid 裁决（`design.md` §1 原则 3）。两个端点经
+//! 文件的可见性由文件系统按 uid 裁决（`design.md` §1 原则 3）。读文件的端点经
 //! [`crate::auth::exec`] 投递到会话的 user worker：普通用户看不到 `/etc/shadow`
 //! 就是 403，不需要服务端写一行判断。主进程（可能是 root）里读文件会让任何
 //! 登录用户看到全部文件，授权模型直接失效。
+//!
+//! 唯一的例外是 [`type_icon`]：类型图标是操作系统的属性、按扩展名取、
+//! **不产生任何文件访问**，因此留在主进程里让缓存跨会话共用——与
+//! [`super::processes::icon`] 同一套理由，展开见
+//! [`strixmaid_core::providers::fs::icon`] 的模块文档。
 //!
 //! # `allowed_roots` 不是安全边界
 //!
@@ -19,13 +24,19 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Extension, Query, State};
-use axum::response::Response;
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse as _, Response};
 use futures::StreamExt as _;
+use strixmaid_core::providers::fs;
+use strixmaid_core::providers::fs::icon::FileTypeIcons;
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
 use strixmaid_types::file::{DirListing, FileContent, FileListQuery, FilePathQuery};
-use strixmaid_types::rpc::{self, FS_RAW_MAX_CHUNK, FsListParams, FsParams, FsRawChunk, FsRawParams};
+use strixmaid_types::rpc::{
+    self, FS_RAW_MAX_CHUNK, FS_THUMB_MAX_PX, FsListParams, FsParams, FsRawChunk, FsRawParams,
+    FsThumb, FsThumbParams,
+};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -39,6 +50,10 @@ pub struct FilesState {
     auth: Arc<AuthState>,
     /// `files.allowed_roots`，启动时转成字符串，随每次 RPC 下发。
     allowed_roots: Arc<Vec<String>>,
+    /// 文件类型图标的缓存。**只**给 [`type_icon`] 用——那是 `/files/*` 里唯一
+    /// 不经 worker 的端点（类型图标是操作系统的属性、不产生文件访问，
+    /// 理由见 `strixmaid_core::providers::fs::icon` 的模块文档）。
+    type_icons: FileTypeIcons,
 }
 
 impl FilesState {
@@ -51,6 +66,7 @@ impl FilesState {
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect(),
             ),
+            type_icons: FileTypeIcons::new(),
         }
     }
 
@@ -68,7 +84,152 @@ pub fn router(state: FilesState) -> OpenApiRouter<()> {
         .routes(routes!(list_dir))
         .routes(routes!(read_file))
         .routes(routes!(raw_file))
+        .routes(routes!(type_icon))
+        .routes(routes!(path_icon))
+        .routes(routes!(thumb))
         .with_state(state)
+}
+
+/// 图片缩略图
+///
+/// 在会话的 worker 内缩好再下发（roadmap/12 §4.7，2026-09-21 改判）：
+/// 一张 20 MiB 的照片出去的只有几 KB。相机 JPEG 走 EXIF 内嵌预览、完全不解码；
+/// 其余真解码缩放，带像素数上限与 panic 兜底。
+#[utoipa::path(
+    get,
+    path = "/files/thumb",
+    tag = "files",
+    params(FilePathQuery),
+    security(("bearer" = [])),
+    responses(
+        // body 用 `String` 表达二进制体的理由见 `processes::icon`。
+        (status = 200, description = "缩略图（原始 JPEG / PNG 字节）", content_type = "image/jpeg", body = String),
+        (status = 400, description = "路径不合法、不是图片、格式不支持或图片已损坏", body = ApiError),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "无权限读取，或路径在 files.allowed_roots 之外", body = ApiError),
+        (status = 404, description = "文件不存在", body = ApiError),
+    ),
+)]
+pub async fn thumb(
+    State(st): State<FilesState>,
+    Extension(session): Extension<Session>,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Response> {
+    let thumb: FsThumb = exec::call(
+        &st.auth,
+        &session,
+        Privilege::User,
+        rpc::FS_THUMB,
+        FsThumbParams {
+            path: q.path,
+            allowed_roots: (*st.allowed_roots).clone(),
+            max_px: FS_THUMB_MAX_PX,
+        },
+    )
+    .await?;
+    let bytes = hex::decode(&thumb.data_hex)
+        .map_err(|e| ApiError::internal("缩略图不是合法 hex").with_detail(e.to_string()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, thumb.mime.clone()),
+            // 内容随文件变，而 URL 里只有路径：短缓存 + 前端自己的会话级
+            // object URL 缓存足够，改了图刷新页面就能看到新的。
+            (header::CACHE_CONTROL, "max-age=60".to_owned()),
+            // EXIF 方向交给前端转（服务端转就得解码，见 FsThumb::orientation）。
+            ("x-thumb-orientation".parse().unwrap(), thumb.orientation.to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// 具体条目的系统图标（按路径，macOS）
+///
+/// `.app` 这类 bundle 显示应用自己的图标而不是文件夹，符号链接解析到目标。
+/// 只有 macOS 提供（`NSWorkspace iconForFile:`），其余平台一律 404；
+/// 为什么 Windows 不开这条路见 `providers/fs/icon` 的文档。
+#[utoipa::path(
+    get,
+    path = "/files/icon-path",
+    tag = "files",
+    params(FilePathQuery),
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "这个条目的系统图标（响应体是原始 PNG 字节）", content_type = "image/png", body = String),
+        (status = 400, description = "路径不合法（相对路径、含 `..` 或控制字符）", body = ApiError),
+        (status = 401, description = "未认证", body = ApiError),
+        (status = 403, description = "路径在 files.allowed_roots 之外", body = ApiError),
+        (status = 404, description = "本平台不提供按路径取图标（macOS 之外）", body = ApiError),
+    ),
+)]
+pub async fn path_icon(
+    State(st): State<FilesState>,
+    Extension(_session): Extension<Session>,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Response> {
+    // 展示范围与 /files 其余端点同一份配置、同一套函数。worker 里由 fs
+    // provider 校验，这条不经 worker，就在这里用同一对 normalize/is_allowed
+    // ——`..` 先被消解再比较，按路径段判断（字符串前缀会把 /home2 误进 /home）。
+    let normalized = fs::normalize(&q.path)?;
+    if !fs::is_allowed(&normalized, &st.allowed_roots) {
+        return Err(ApiError::permission_denied(format!(
+            "路径 {} 不在允许浏览的范围内（files.allowed_roots）",
+            normalized.display()
+        ))
+        .into());
+    }
+    let normalized = normalized
+        .to_str()
+        .ok_or_else(|| ApiError::invalid_request("路径不是合法 UTF-8"))?;
+    let png = st.type_icons.path_icon_png(normalized).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            // 具体应用的图标随应用更新换，比类型图标勤一档：一小时。
+            (header::CACHE_CONTROL, "max-age=3600"),
+        ],
+        png.as_slice().to_vec(),
+    )
+        .into_response())
+}
+
+/// 文件类型图标
+///
+/// 按**扩展名**（不含点，如 `pdf`）取这一类文件的系统图标。Linux 与无窗口
+/// 服务器的 macOS 环境一律 404，前端据此回落到内置图标集（§4.7）。
+#[utoipa::path(
+    get,
+    path = "/files/icon/{ext}",
+    tag = "files",
+    security(("bearer" = [])),
+    params(("ext" = String, Path, description = "扩展名，不含前导点，如 `pdf`")),
+    responses(
+        // body 用 `String` 表达二进制响应的理由见 `processes::icon`。
+        (status = 200, description = "这一类文件的系统图标（响应体是原始 PNG 字节）", content_type = "image/png", body = String),
+        (status = 400, description = "扩展名不合法（含点号、分隔符或过长）", body = ApiError),
+        (status = 401, description = "未认证", body = ApiError),
+        (status = 404, description = "本平台不提供文件类型图标（Linux、无窗口服务器的 macOS），\
+                                      或系统给不出这一类的图标", body = ApiError),
+    ),
+)]
+pub async fn type_icon(
+    State(st): State<FilesState>,
+    // 不用这个值，但必须提取：与 `processes::icon` 同一理由——它是本端点
+    // 需要会话这件事在代码里的凭据。
+    Extension(_session): Extension<Session>,
+    Path(ext): Path<String>,
+) -> ApiResult<Response> {
+    let png = st.type_icons.icon_png(&ext).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            // 类型图标只随「换默认打开程序 / 换系统主题」这种小时级事件变化，
+            // 浏览器端存一天；服务端缓存仍是 5 分钟档（IconCache::TTL）。
+            (header::CACHE_CONTROL, "max-age=86400"),
+        ],
+        png.as_slice().to_vec(),
+    )
+        .into_response())
 }
 
 /// 列目录

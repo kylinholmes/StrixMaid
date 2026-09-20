@@ -17,6 +17,7 @@
 //! |---|---|---|
 //! | macOS | `sysctl` / `getfsstat` | `metrics::collect::macos`、`providers::system::macos` |
 //! | macOS | IOKit 只读属性 | 磁盘与 GPU 两个采集器 |
+//! | macOS | AppKit 的类型图标（objc_msgSend） | 文件类型图标；进程图标的 macOS 侧日后也走它 |
 //! | Windows | 注册表、宽字符、句柄 RAII | 几乎所有 Windows 侧模块 |
 //! | Windows | `NtQuerySystemInformation` | 进程 provider、CPU / 负载采集器 |
 //! | Windows | 卷与物理盘枚举 | 文件系统与磁盘采集器、`providers::system::windows` |
@@ -29,6 +30,9 @@ pub mod macos;
 
 #[cfg(target_os = "macos")]
 pub mod iokit;
+
+#[cfg(target_os = "macos")]
+pub mod appkit;
 
 #[cfg(windows)]
 pub mod windows;

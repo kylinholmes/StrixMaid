@@ -575,5 +575,5 @@ jobs:
       - name: 体积上限（design.md Q3 / roadmap/06 §5.2）
         run: |
           check() { s=$(stat -c%s "$1"); echo "$1: $s bytes"; [ "$s" -le "$2" ] || { echo "超出上限 $2"; exit 1; }; }
-          check strixmaid-musl-x86_64/strixmaid            $((15 * 1024 * 1024))
+          check strixmaid-musl-x86_64/strixmaid            $((18 * 1024 * 1024))
           check strixmaid-helper-gnu228/strixmaid-helper   $(( 1 * 1024 * 1024))

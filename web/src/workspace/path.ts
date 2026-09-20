@@ -93,3 +93,21 @@ export function splitForCompletion(
   const cut = input.lastIndexOf("/");
   return { parent: cut === 0 ? "/" : input.slice(0, cut), prefix: input.slice(cut + 1) };
 }
+
+/**
+ * `child` 是否严格位于 `parent` 之下（任意层级）。层叠导航用它判断
+ * push（进子目录）还是 pop（回祖先）；Windows 按段大小写不敏感。
+ */
+export function isDescendant(child: string, parent: string, p: Platform): boolean {
+  if (child === parent) return false;
+  const sep = p === "windows" ? "\\" : "/";
+  const norm = (x: string) => {
+    const t = x.endsWith(sep) && x.length > 1 ? x.slice(0, -1) : x;
+    return p === "windows" ? t.toLowerCase() : t;
+  };
+  const c = norm(child);
+  const pa = norm(parent);
+  if (p === "windows" && parent === "\\") return c !== "\\"; // 虚拟根之下是一切
+  const prefix = pa === sep ? sep : pa + sep;
+  return c.startsWith(prefix);
+}

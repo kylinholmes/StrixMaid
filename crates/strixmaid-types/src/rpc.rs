@@ -87,6 +87,8 @@ pub const FS_LIST: &str = "fs.list";
 pub const FS_READ: &str = "fs.read";
 /// 按块读原始字节（读，roadmap/12 §4.6）。参数 [`FsRawParams`]，结果 [`FsRawChunk`]。
 pub const FS_RAW: &str = "fs.raw";
+/// 出一张缩略图（读，roadmap/12 §4.7）。参数 [`FsThumbParams`]，结果 [`FsThumb`]。
+pub const FS_THUMB: &str = "fs.thumb";
 
 /// 开一个 PTY（`roadmap/03-terminal.md` §4.5）。
 ///
@@ -297,6 +299,62 @@ pub struct FsRawParams {
 /// hex 编码后 512 KiB，加上 JSON 骨架仍在 1 MiB 帧限之内。
 pub const FS_RAW_MAX_CHUNK: u32 = 256 * 1024;
 
+/// `fs.thumb` 的参数：出一张缩略图（roadmap/12 §4.7）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsThumbParams {
+    /// 见 [`FsParams::path`]。
+    pub path: String,
+    /// 见 [`FsParams::allowed_roots`]。
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+    /// 输出的最长边（像素）。worker 侧夹到 [`FS_THUMB_MAX_PX`]。
+    pub max_px: u32,
+}
+
+/// 缩略图最长边的上限（像素）。
+///
+/// 平铺视图的格子是 68 CSS 像素，二倍屏要 136；256 够用且留了余量，
+/// 再大只是白白占带宽——缩略图就是缩略图。
+pub const FS_THUMB_MAX_PX: u32 = 256;
+
+/// 缩略图编码后的字节上限。
+///
+/// 单帧上限 1 MiB，hex 后翻倍，因此原始字节必须留足余量。256 px 的 JPEG
+/// 通常只有 20～40 KiB，这个上限是**兜底**：编出来超了说明实现出了岔子
+/// （比如把原图当缩略图返回），宁可报错也不要把控制面顶住。
+pub const FS_THUMB_MAX_BYTES: usize = 384 * 1024;
+
+/// `fs.thumb` 的响应：一张已经缩好的小图。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsThumb {
+    /// 缩略图的 MIME（`image/jpeg` 或 `image/png`）。
+    pub mime: String,
+    /// 缩略图的宽（像素）。
+    pub width: u32,
+    /// 缩略图的高（像素）。
+    pub height: u32,
+    /// EXIF 方向标签（1～8，缺省 1 = 正立）。
+    ///
+    /// **调用方必须据此旋转**，否则竖着拍的照片会躺倒——相机不转像素，
+    /// 只在 EXIF 里记一句「这张要转 90°」。两条路都原样透传而不在服务端转：
+    /// 内嵌预览那条一旦要转就得解码，正好违背它存在的理由；解码那条转了
+    /// 也得把结论告诉前端，不如统一由前端一行 CSS 处理。
+    #[serde(default = "one")]
+    pub orientation: u8,
+    /// 这张图是**原图 EXIF 里内嵌的预览**，而不是解码缩放出来的。
+    ///
+    /// 留在协议里是因为两条路的风险与成本完全不同（内嵌预览根本不解码），
+    /// 出问题时要能一眼看出走的是哪条；也让日志与测试可以分别断言。
+    pub embedded: bool,
+    /// 缩略图字节的 hex 编码（与 [`FsRawChunk::data_hex`] 同一理由）。
+    pub data_hex: String,
+}
+
+/// [`FsThumb::orientation`] 的 serde 缺省值。
+fn one() -> u8 {
+    1
+}
+
 /// `fs.raw` 的响应：一块字节与文件的整体信息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsRawChunk {
@@ -358,7 +416,7 @@ mod tests {
             assert!(m.starts_with("log."), "{m}");
         }
         assert!(CAPS_PROBE_USER.starts_with("caps."));
-        for m in [FS_LIST, FS_READ] {
+        for m in [FS_LIST, FS_READ, FS_RAW, FS_THUMB] {
             assert!(m.starts_with("fs."), "{m}");
         }
     }
@@ -392,6 +450,8 @@ mod tests {
             CAPS_PROBE_USER,
             FS_LIST,
             FS_READ,
+            FS_RAW,
+            FS_THUMB,
             TERM_OPEN,
             TERM_RESIZE,
             TERM_CLOSE,

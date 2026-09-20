@@ -40,6 +40,11 @@ interface WorkspaceState {
   panelHeight: number;
   /** 终端面板是否折叠成底栏。 */
   panelCollapsed: boolean;
+  /** 终端面板当前**实测**占用的高度（px）。面板是浮层（CSS `.panel` 绝对
+   *  定位），文件区按这个值给底部留白，最后一行才不会被折叠条盖住。
+   *  由 TerminalPanel 的 ResizeObserver 上报：折叠条的真实高度随字体与
+   *  padding 走，猜一个常数迟早对不上。 */
+  panelInset: number;
   /** 左侧快速访问栏是否折叠。 */
   railCollapsed: boolean;
   /** 隐藏以 `.` 开头的条目（dotfile 约定，三平台一致处理）。 */
@@ -58,6 +63,7 @@ interface WorkspaceState {
   setCwd(path: string): void;
   setPanelHeight(px: number): void;
   setPanelCollapsed(collapsed: boolean): void;
+  setPanelInset(px: number): void;
   toggleRail(): void;
   toggleHidden(): void;
   setViewMode(mode: "list" | "tiles"): void;
@@ -85,6 +91,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   cwd: null,
   panelHeight: 320,
   panelCollapsed: false,
+  // 首次渲染的兜底值（≈折叠条一行）；RO 一挂上就换成实测。
+  panelInset: 40,
   railCollapsed: false,
   hideHidden: false,
   viewMode: "list",
@@ -126,6 +134,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
       panelHeight: Math.min(Math.max(120, px), Math.max(200, window.innerHeight - 160)),
     }),
   setPanelCollapsed: (collapsed) => set({ panelCollapsed: collapsed }),
+  setPanelInset: (px) => set({ panelInset: Math.max(0, Math.round(px)) }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
   toggleHidden: () => set((s) => ({ hideHidden: !s.hideHidden })),
   setViewMode: (mode) => set({ viewMode: mode }),

@@ -1,80 +1,13 @@
-import { useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  Eye,
-  EyeOff,
-  File,
-  Folder,
-  Link2,
-  RefreshCw,
-} from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useIsFetching, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, ArrowRight, ArrowUp, Eye, EyeOff, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
-import {
-  Button,
-  type Column,
-  EmptyState,
-  ErrorState,
-  ProgressLine,
-  Segmented,
-  Table,
-  TableSkeleton,
-  Toolbar,
-  ToolbarSpacer,
-} from "@/components";
+import { Button, ProgressLine, Segmented, Toolbar, ToolbarSpacer } from "@/components";
 import { cx } from "@/lib/cx";
-import { fmtBytes } from "@/lib/fmt";
-import { fileIconUrl, folderIconUrl } from "./icons";
-import { OverlayScrollbar } from "./OverlayScrollbar";
-import { joinPath, type Platform, parentPath, splitForCompletion } from "./path";
+import { ListPane } from "./ListPane";
+import { isDescendant, joinPath, type Platform, parentPath, splitForCompletion } from "./path";
 import { useWorkspace } from "./store";
-import { TileGrid } from "./TileGrid";
-import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
-
-/** 虚拟滚动的行高兜底值；真实值在首行渲染后量出。 */
-const ROW_FALLBACK = 28;
-/** 视口外多渲染几行，滚动时不露白。 */
-const OVERSCAN = 12;
-
-/** `0o644` → `rw-r--r--`。Windows 上是合成值（`providers/fs/windows.rs`），照样能读。 */
-export function fmtMode(mode: number): string {
-  const bits = "rwx";
-  let out = "";
-  for (let i = 8; i >= 0; i--) {
-    out += mode & (1 << i) ? bits[(8 - i) % 3] : "-";
-  }
-  return out;
-}
-
-function fmtMtime(ts: number): string {
-  const d = new Date(ts * 1000);
-  const sameYear = d.getFullYear() === new Date().getFullYear();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return sameYear ? md : `${d.getFullYear()}-${md}`;
-}
-
-function KindIcon({ entry }: { entry: DirEntry }) {
-  if (entry.kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
-  // 内置图标集（§4.7）：文件夹总有图标，文件认不出时回落到通用形状。
-  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name);
-  if (src)
-    return (
-      <img
-        src={src}
-        width={16}
-        height={16}
-        alt={entry.kind === "dir" ? "目录" : ""}
-        aria-hidden={entry.kind !== "dir"}
-      />
-    );
-  if (entry.kind === "dir")
-    return <Folder size={14} strokeWidth={1.5} className={s.kindDir} aria-label="目录" />;
-  return <File size={14} strokeWidth={1.5} className={s.kindFile} aria-hidden="true" />;
-}
 
 export interface FileListProps {
   path: string | null;
@@ -90,10 +23,13 @@ export interface FileListProps {
 }
 
 /**
- * 文件区（§4.5）：列表视图（虚拟滚动 + 服务端分页排序）与平铺图标视图。
+ * 文件区（§4.5）：工具栏（导航/地址栏补全/视图切换）+ 常驻两层的目录层叠。
  *
- * 目录项导航一律走 [`joinPath`]——Windows 驱动器根的 `name` 就是完整路径,
- * `joinPath` 知道这件事，组件里不手写拼接。
+ * **层叠导航**（负责人 2026-09-20 定，macOS 手感）：**父目录始终垫在下面**，
+ * 顶层向右让出一条边让父层透出来，点那条边即返回。垫层不用维护栈——它永远
+ * 就是 `parentPath(当前)`，推导即可。进子目录时旧顶层**原地降为垫层**（同
+ * key，位置与压暗走 CSS 过渡）、新层从右推入；回上级时顶层滑出、垫层升顶。
+ * 跨层级跳转（快速访问、地址栏）不演动画，直接换层。
  */
 export function FileList({
   path,
@@ -109,29 +45,63 @@ export function FileList({
   const toggleHidden = useWorkspace((st) => st.toggleHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
   const setViewMode = useWorkspace((st) => st.setViewMode);
-  const dirSort = useWorkspace((st) => st.dirSort);
-  const setDirSort = useWorkspace((st) => st.setDirSort);
+  const panelInset = useWorkspace((st) => st.panelInset);
 
-  const {
-    entries,
-    total,
-    skipped,
-    error,
-    isPending,
-    isFetching,
-    hasNextPage,
-    isFetchingNextPage,
-    fetchNextPage,
-    refresh,
-  } = useDirListing(path, dirSort);
+  // 列表⇄平铺切换是布局重构不是导航，层叠位移不许演过渡（负责人定）：
+  // 切换后的几帧内给层挂上「免动效」类，等类名变化都落地了再摘掉。
+  const [viewSwitching, setViewSwitching] = useState(false);
+  const prevView = useRef(viewMode);
+  useEffect(() => {
+    if (prevView.current === viewMode) return;
+    prevView.current = viewMode;
+    setViewSwitching(true);
+    const t = setTimeout(() => setViewSwitching(false), 80);
+    return () => clearTimeout(t);
+  }, [viewMode]);
 
-  const [selected, setSelected] = useState<string | null>(null);
+  const qc = useQueryClient();
+  const fetching = useIsFetching({ queryKey: ["dir", path] }) > 0;
+  const refresh = () => {
+    if (path !== null) void qc.invalidateQueries({ queryKey: ["dir", path] });
+  };
+
   /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
   const [editing, setEditing] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // ---- 地址栏补全（负责人 2026-09-20 要求）：父目录的子目录按前缀过滤 ----
-  const qc = useQueryClient();
+  // ---- 层叠状态：方向只决定「演不演」，垫层本身由 parentPath 推导 ----
+  /** 刚发生 push：给新顶层挂一次「从右推入」的入场动画。 */
+  const [pushAnim, setPushAnim] = useState(false);
+  /** 刚发生 pop：被弹掉的那层短暂留在最上面演「滑出」。 */
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const prevPath = useRef<string | null>(path);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在 path 变化时判定一次方向
+  useEffect(() => {
+    const old = prevPath.current;
+    prevPath.current = path;
+    if (old === null || path === null || old === path) return;
+    // 减少动态：布局照旧两层，动画全免。
+    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    if (isDescendant(path, old, platform)) {
+      setPushAnim(true);
+      setLeaving(null);
+    } else if (isDescendant(old, path, platform)) {
+      setLeaving(old);
+      setPushAnim(false);
+    } else {
+      setPushAnim(false);
+      setLeaving(null);
+    }
+  }, [path]);
+  useEffect(() => {
+    if (!pushAnim && leaving === null) return;
+    const t = setTimeout(() => {
+      setPushAnim(false);
+      setLeaving(null);
+    }, 420);
+    return () => clearTimeout(t);
+  }, [pushAnim, leaving]);
+
+  // ---- 地址栏补全：父目录的子目录按前缀过滤 ----
   const [sugs, setSugs] = useState<string[]>([]);
   const [sugIdx, setSugIdx] = useState(-1);
 
@@ -182,111 +152,92 @@ export function FileList({
     setSugs([]);
   };
 
-  // ---- 虚拟滚动：只渲染视口附近的行（§4.5「不能一次渲染出来」）----
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportH, setViewportH] = useState(600);
-  const [rowH, setRowH] = useState(ROW_FALLBACK);
-
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
-    ro.observe(el);
-    setViewportH(el.clientHeight);
-    return () => ro.disconnect();
-  }, []);
-
-  // 首行真实高度量一次：行高猜错时滚动条与内容错位。
-  const measureRow = useCallback((el: HTMLDivElement | null) => {
-    const tr = el?.querySelector("tbody tr:not([data-spacer])");
-    const h = tr?.getBoundingClientRect().height;
-    if (h && h > 8) setRowH(h);
-  }, []);
-
-  // 换目录回到顶部并清选中；刷新（同 path 重取）不走这里，滚动与选中原地保留。
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 刻意只对 path 变化生效
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 0 });
-    setScrollTop(0);
-    setSelected(null);
     setEditing(null);
-  }, [path]);
+  }, []);
 
-  const up = path === null ? null : parentPath(path, platform);
+  const parent = path === null ? null : parentPath(path, platform);
+  const up = parent;
+  /** 祖父层：近乎不可见的第三层，整条边可点 = 返回上一级（负责人定）。 */
+  const grand = parent === null ? null : parentPath(parent, platform);
+  /** 层叠只属于列表模式（负责人 2026-09-20 定）：平铺是平面网格，垫层
+   *  透出来只会让边上多出一条莫名其妙的条纹，永远单层、不演推入。 */
+  const layered = viewMode === "list";
 
-  // 隐藏文件按 dotfile 约定过滤（在已加载的页内做；后端分页不知道这条约定）。
-  const visible = hideHidden ? entries.filter((e) => !e.name.startsWith(".")) : entries;
-  const hiddenCount = hideHidden ? entries.length - visible.length : 0;
-
-  const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
-  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
-  const slice = visible.slice(start, end);
-
-  // 滚近已加载末尾就取下一页。
-  useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage && end >= visible.length - OVERSCAN) {
-      void fetchNextPage();
-    }
-  }, [end, visible.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
-
-  const enter = useCallback(
-    (entry: DirEntry) => {
-      if (path === null || entry.kind !== "dir") return;
-      onNavigate(joinPath(path, entry.name, platform));
-    },
-    [path, platform, onNavigate],
+  // 常驻两层：垫层永远是父目录（key 稳定——push 时旧顶层同 key 原地降级，
+  // 位置/压暗由 CSS 过渡接管）；再叠一条可点的「返回」边；pop 的旧顶层
+  // 以 leaving 短暂盖在最上面演滑出。DOM 顺序即层序。
+  const panes: React.ReactNode[] = [];
+  // 当前目录在父层里叫什么（垫层里高亮它，一眼看出「我从哪进来的」）。
+  const currentName =
+    path !== null && parent !== null
+      ? path.slice(parent.length).replace(/^[\\/]/, "") || path
+      : null;
+  const parentName =
+    parent !== null && grand !== null
+      ? parent.slice(grand.length).replace(/^[\\/]/, "") || parent
+      : null;
+  if (layered && grand !== null) {
+    panes.push(
+      <ListPane
+        key={`p:${grand}`}
+        path={grand}
+        platform={platform}
+        onNavigate={onNavigate}
+        pane="deep"
+        className={s.paneDeep}
+        markName={parentName}
+      />,
+      <button
+        key="up-strip"
+        type="button"
+        className={s.upStrip}
+        title={`返回上一级 ${parent}`}
+        aria-label={`返回上一级 ${parent}`}
+        onClick={() => parent !== null && onNavigate(parent)}
+      >
+        <span aria-hidden>‹</span>
+      </button>,
+    );
+  }
+  if (layered && parent !== null) {
+    panes.push(
+      <ListPane
+        key={`p:${parent}`}
+        path={parent}
+        platform={platform}
+        onNavigate={onNavigate}
+        pane="under"
+        className={cx(s.paneMid, grand !== null && s.paneMidShifted)}
+        markName={currentName}
+      />,
+    );
+  }
+  panes.push(
+    <ListPane
+      key={`p:${path}`}
+      path={path}
+      platform={platform}
+      onNavigate={onNavigate}
+      pane="top"
+      className={cx(
+        layered && parent !== null && (grand !== null ? s.paneTop3 : s.paneTop),
+        layered && pushAnim && s.panePushIn,
+      )}
+    />,
   );
-
-  /** 点表头：同键翻方向，异键切键（升序起步）。排序在服务端，翻页也一致。 */
-  const onHeaderClick = (key: string) => {
-    if (key !== "name" && key !== "size" && key !== "mtime") return;
-    const k = key as FileSortKey;
-    setDirSort(dirSort.key === k ? { key: k, desc: !dirSort.desc } : { key: k, desc: false });
-  };
-
-  const columns: readonly Column<DirEntry>[] = [
-    {
-      key: "name",
-      header: "名称",
-      mono: true,
-      render: (e) => (
-        <span className={s.nameCell}>
-          <KindIcon entry={e} />
-          <span>{e.name}</span>
-          {e.target && <span className={s.linkTarget}>→ {e.target}</span>}
-        </span>
-      ),
-    },
-    {
-      key: "size",
-      header: "大小",
-      numeric: true,
-      width: "6.5em",
-      render: (e) => (e.kind === "dir" ? "—" : fmtBytes(e.size_bytes)),
-    },
-    {
-      key: "mtime",
-      header: "修改",
-      numeric: true,
-      width: "9em",
-      render: (e) => fmtMtime(e.mtime_ts),
-    },
-    {
-      key: "mode",
-      header: "权限",
-      mono: true,
-      width: "7em",
-      render: (e) => fmtMode(e.mode),
-    },
-    {
-      key: "owner",
-      header: "属主",
-      mono: true,
-      dim: true,
-      width: "7em",
-      render: (e) => e.user ?? String(e.uid),
-    },
-  ];
+  if (layered && leaving !== null) {
+    panes.push(
+      <ListPane
+        key={`p:${leaving}`}
+        path={leaving}
+        platform={platform}
+        onNavigate={onNavigate}
+        pane="leaving"
+        className={cx(grand !== null ? s.paneTop3 : s.paneTop, s.panePopOut)}
+      />,
+    );
+  }
 
   return (
     <div className={s.fileArea}>
@@ -402,66 +353,12 @@ export function FileList({
           <RefreshCw size={14} />
         </Button>
       </Toolbar>
-      {isFetching && !isPending && <ProgressLine />}
-      <div className={s.scrollWrap}>
-        <div
-          ref={scrollRef}
-          className={s.fileScroll}
-          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-        >
-          {path === null || (isPending && entries.length === 0) ? (
-            <TableSkeleton />
-          ) : error ? (
-            <ErrorState
-              title="读不到这个目录。"
-              detail={(error as { message?: string }).message ?? String(error)}
-              onRetry={refresh}
-            />
-          ) : viewMode === "tiles" ? (
-            <TileGrid
-              entries={visible}
-              pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
-              selected={selected}
-              onSelect={setSelected}
-              onEnterDir={enter}
-            />
-          ) : (
-            <div ref={measureRow}>
-              <Table
-                caption={`目录 ${path} 的内容`}
-                columns={columns}
-                rows={slice}
-                rowKey={(e) => e.name}
-                selectedKey={selected}
-                onSelect={(e) => {
-                  setSelected(e.name);
-                  enter(e);
-                }}
-                onHeaderClick={onHeaderClick}
-                sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
-                empty={<EmptyState title="这个目录是空的" />}
-                leadingRow={
-                  start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
-                }
-                trailingRow={
-                  visible.length - end > 0 && (
-                    <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
-                  )
-                }
-              />
-            </div>
-          )}
-          {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
-          {total > entries.length && !hasNextPage && null}
-          {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
-          {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
-          {total > 0 && (
-            <p className={s.skippedNote}>
-              共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
-            </p>
-          )}
-        </div>
-        <OverlayScrollbar target={scrollRef} />
+      {fetching && <ProgressLine />}
+      <div
+        className={cx(s.scrollWrap, viewSwitching && s.noAnim)}
+        style={{ "--panel-inset": `${panelInset}px` } as React.CSSProperties}
+      >
+        {panes}
       </div>
     </div>
   );

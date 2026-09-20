@@ -59,6 +59,14 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP, HDC, RGBQUAD,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
+use windows_sys::Win32::UI::Shell::{
+    SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, HICON, ICONINFO, PrivateExtractIconsW,
 };
@@ -93,9 +101,166 @@ pub fn icon_png(exe_path: &str) -> io::Result<Vec<u8>> {
 
 /// 取图标并解成 RGBA，不做 PNG 编码。拆出来是为了让测试能直接检查像素。
 pub fn icon_rgba(exe_path: &str, size: i32) -> io::Result<Rgba> {
-    let icon = extract_icon(exe_path, size)?;
+    let icon = extract_icon(exe_path, 0, size)?;
     // SAFETY: icon 由 PrivateExtractIconsW 返回且尚未销毁，借用期不超过本语句。
     unsafe { icon_to_rgba(icon.raw()) }
+}
+
+// ===========================================================================
+// 文件类型图标
+// ===========================================================================
+
+/// 文件类型图标的边长（像素）。
+///
+/// 与进程图标的 32 不同档：类型图标要撑平铺视图里 68 CSS 像素的格子
+/// （`web/src/workspace/TileGrid.tsx`），32 放大到那里明显发糊。64 走
+/// [`extract_icon`] 的精确尺寸请求，源文件里常见的 48 / 256 档都能就近缩过来。
+pub const FILE_ICON_SIZE: i32 = 64;
+
+/// 按**扩展名**取这一类文件的外壳图标，编码成 PNG。
+///
+/// 走 `SHGetFileInfoW` + `SHGFI_USEFILEATTRIBUTES`：给外壳一个**虚构的**文件名
+/// `strixmaid.<ext>`，它只查注册表的扩展名关联，完全不碰磁盘——这正是本函数
+/// 能放在主进程、不经 worker 的原因（不产生任何以调用者身份的文件访问）。
+///
+/// 分两步而不是直接要 `SHGFI_ICON`：
+///
+/// 1. 先 `SHGFI_ICONLOCATION` 拿「图标在哪个文件的第几号」，再用
+///    [`extract_icon`] 按 [`FILE_ICON_SIZE`] **精确尺寸**提取——`SHGFI_ICON`
+///    只有大小两档，具体像素数随系统 DPI 漂移（见模块文档），且大档通常只有
+///    32，对 64 的目标尺寸是二次放大。
+/// 2. 拿不到位置才回落 `SHGFI_ICON | SHGFI_LARGEICON`：由图标处理器
+///    （`IExtractIcon` 的 `Extract` 返回 `S_FALSE` 之外的那类）动态生成的
+///    图标没有「文件 + 序号」这种位置可言，只能要现成的 `HICON`。
+pub fn file_type_icon_png(ext: &str) -> io::Result<Vec<u8>> {
+    // 虚构文件名。扩展名的消毒（拒绝分隔符、`..`、点号）在调用方
+    // `providers/fs/icon` 那一层，这里只负责拼接与提取。
+    shell_type_icon_png(&format!("strixmaid.{ext}"), FILE_ATTRIBUTE_NORMAL)
+}
+
+/// 目录的外壳图标（资源管理器的那只黄色文件夹）。
+///
+/// 同一个虚构名字换成目录属性即可——`SHGFI_USEFILEATTRIBUTES` 下外壳只看
+/// 属性位与扩展名，`FILE_ATTRIBUTE_DIRECTORY` 就是「这是个文件夹」。
+pub fn folder_icon_png() -> io::Result<Vec<u8>> {
+    shell_type_icon_png("strixmaid", FILE_ATTRIBUTE_DIRECTORY)
+}
+
+/// 无扩展名 / 认不出类型的文件的外壳图标（那张白纸）。
+pub fn generic_file_icon_png() -> io::Result<Vec<u8>> {
+    shell_type_icon_png("strixmaid", FILE_ATTRIBUTE_NORMAL)
+}
+
+/// [`file_type_icon_png`] 一族的共同两步：位置精确提取，回落现成 `HICON`。
+fn shell_type_icon_png(fictional_name: &str, attrs: u32) -> io::Result<Vec<u8>> {
+    let _com = ComInit::new();
+
+    // 位置取到了、但那个文件提取失败（比如指向一个已卸载程序留下的路径）时
+    // 继续往下走回落，而不是就此放弃。
+    if let Some((icon_file, index)) = icon_location(fictional_name, attrs)
+        && let Ok(icon) = extract_icon(&icon_file, index, FILE_ICON_SIZE)
+    {
+        // SAFETY: icon 有效且尚未销毁，借用期不超过本语句。
+        let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
+        return encode_png(&rgba);
+    }
+
+    let icon = shell_icon(fictional_name, attrs)?;
+    // SAFETY: 同上。
+    let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
+    encode_png(&rgba)
+}
+
+/// `SHGetFileInfoW` 要求调用线程先初始化 COM（图标处理器是 COM 组件）。
+///
+/// 调用发生在 `spawn_blocking` 的线程池线程上，那里没人替我们初始化过。
+/// `RPC_E_CHANGED_MODE`（线程已按另一种模型初始化）不算失败——COM 已经可用，
+/// 只是不该由我们去 `CoUninitialize`。
+struct ComInit {
+    initialized: bool,
+}
+
+impl ComInit {
+    fn new() -> Self {
+        // SAFETY: 参数按文档——保留参数必须为空，公寓模型 + 关掉 OLE1。
+        let hr = unsafe {
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        // S_OK(0) 与 S_FALSE(1)（重复初始化）都要配对的 CoUninitialize；
+        // 其余（含 RPC_E_CHANGED_MODE）不要。
+        ComInit {
+            initialized: hr == 0 || hr == 1,
+        }
+    }
+}
+
+impl Drop for ComInit {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: 与构造里成功的 CoInitializeEx 恰好配对一次。
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+/// `SHGFI_ICONLOCATION`：这一类文件的图标在哪个文件的第几号资源。
+///
+/// 序号可以是负数（负的资源 id，`PrivateExtractIconsW` 原样认识），照传。
+/// 拿不到位置（处理器动态生成、注册表残缺）返回 `None`，由调用方回落。
+fn icon_location(fictional_name: &str, attrs: u32) -> Option<(String, i32)> {
+    let wide_name = wide::to_wide(fictional_name);
+    let mut info = empty_file_info();
+    // SAFETY: wide_name 以 NUL 结尾且在调用期间存活；info 是可写的 SHFILEINFOW，
+    // 长度如实给出；SHGFI_USEFILEATTRIBUTES 保证不发生文件访问。
+    let ok = unsafe {
+        SHGetFileInfoW(
+            wide_name.as_ptr(),
+            attrs,
+            &raw mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_USEFILEATTRIBUTES | SHGFI_ICONLOCATION,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let path = wide::from_wide_nul(&info.szDisplayName);
+    (!path.is_empty()).then_some((path, info.iIcon))
+}
+
+/// `SHGFI_ICON | SHGFI_LARGEICON`：直接要一个现成的 `HICON`（尺寸随系统，
+/// 通常 32）。回落路径，理由见 [`file_type_icon_png`]。
+fn shell_icon(fictional_name: &str, attrs: u32) -> io::Result<OwnedIcon> {
+    let wide_name = wide::to_wide(fictional_name);
+    let mut info = empty_file_info();
+    // SAFETY: 同 `icon_location`；成功时 info.hIcon 是一个**归调用方销毁**的
+    // 图标句柄，立即交给 OwnedIcon 接管。
+    let ok = unsafe {
+        SHGetFileInfoW(
+            wide_name.as_ptr(),
+            attrs,
+            &raw mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_USEFILEATTRIBUTES | SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if ok == 0 || info.hIcon.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("外壳没有给出 {fictional_name} 的类型图标"),
+        ));
+    }
+    Ok(OwnedIcon(info.hIcon))
+}
+
+/// 全零的 `SHFILEINFOW`。`windows-sys` 的结构体不带 `Default`，逐字段写一遍
+/// 只是把「全零」说得更啰嗦。
+fn empty_file_info() -> SHFILEINFOW {
+    // SAFETY: SHFILEINFOW 是纯 POD（句柄、整数与 u16 数组），全零是合法值。
+    unsafe { std::mem::zeroed() }
 }
 
 // ===========================================================================
@@ -158,8 +323,11 @@ impl Drop for OwnedDc {
 // 取图标
 // ===========================================================================
 
-/// `PrivateExtractIconsW`：从文件里取第 0 个图标，按指定尺寸。
-fn extract_icon(exe_path: &str, size: i32) -> io::Result<OwnedIcon> {
+/// `PrivateExtractIconsW`：从文件里取第 `index` 号图标，按指定尺寸。
+///
+/// `index` 为负是「负的资源 id」语义（与 `ExtractIconEx` 一致），
+/// [`icon_location`] 给出的序号可能就是这种，原样传入。
+fn extract_icon(exe_path: &str, index: i32, size: i32) -> io::Result<OwnedIcon> {
     if exe_path.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "exe 路径为空"));
     }
@@ -170,7 +338,7 @@ fn extract_icon(exe_path: &str, size: i32) -> io::Result<OwnedIcon> {
     let got = unsafe {
         PrivateExtractIconsW(
             wide_path.as_ptr(),
-            0,
+            index,
             size,
             size,
             &raw mut icon,
@@ -540,6 +708,37 @@ mod tests {
     #[test]
     fn 空路径直接拒绝() {
         assert!(icon_png("").is_err());
+    }
+
+    #[test]
+    fn 常见扩展名取得到类型图标() {
+        // .txt 的关联（notepad / 记事本）从 Windows 95 起就在，任何 SKU 都有。
+        let png = file_type_icon_png("txt").expect("txt 的类型图标应当取得到");
+        let (w, h) = 解析_png_头(&png);
+        // 走 ICONLOCATION 精确路径时是 FILE_ICON_SIZE；只在回落路径上才是
+        // 系统大图标档。两者都算通过——回落是设计内的路径，不是缺陷。
+        assert!(
+            (w, h) == (FILE_ICON_SIZE as u32, FILE_ICON_SIZE as u32) || (w == h && w >= 16),
+            "类型图标尺寸不合理：{w}×{h}"
+        );
+    }
+
+    #[test]
+    fn 文件夹与通用文件图标() {
+        let folder = folder_icon_png().expect("文件夹图标应当取得到");
+        assert_eq!(&folder[..4], &[0x89, b'P', b'N', b'G']);
+        let generic = generic_file_icon_png().expect("通用文件图标应当取得到");
+        assert_eq!(&generic[..4], &[0x89, b'P', b'N', b'G']);
+        assert_ne!(folder, generic, "目录属性没有生效：文件夹与文件给了同一张图");
+    }
+
+    #[test]
+    fn 乱造的扩展名也有回落图标() {
+        // 未注册的扩展名走「未知文件」的通用图标，这在 Windows 上是保证的行为：
+        // 资源管理器给未知类型画的就是那张白纸。
+        let png = file_type_icon_png("绝不会注册这个扩展名9f3a1c")
+            .expect("未知扩展名应当回落到通用文件图标");
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
     }
 
     #[test]

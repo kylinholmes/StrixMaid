@@ -182,6 +182,38 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/*
+ * 桌面应用手感（负责人 2026-09-20 定）：把「这是个网页」的痕迹收掉。
+ * - 界面骨架不可选中（Finder 也不让选列表文字）；输入区照常可选；
+ * - 光标默认箭头，只有文本输入是 I 型；
+ * - 图片/链接不可拖出幽灵影；页面不做橡皮筋回弹；
+ * - 选区颜色走主题（浏览器默认那抹蓝最出戏）。
+ * 右键菜单的抑制在 App.tsx（要按目标元素放行输入框与终端）。
+ */
+body {
+  user-select: none;
+  cursor: default;
+  overscroll-behavior: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+  cursor: text;
+}
+
+img,
+svg,
+a {
+  -webkit-user-drag: none;
+}
+
+::selection {
+  background: var(--sel);
+  color: var(--ink);
+}
+
 /* 数字一律等宽对齐 */
 .tnum,
 [data-mono] {

@@ -70,6 +70,24 @@
   flex: 1;
 }
 
+/* 挂载条目两行：标签 + 「可用 · 类型」小字。 */
+.mountLines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+  text-align: left;
+}
+
+.mountSub {
+  font-size: var(--fs-300);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 挂载点占用条：细、不抢眼。 */
 .railUsage {
   height: 3px;
@@ -118,6 +136,14 @@
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden; /* 层叠动画的平移不许露出容器 */
+}
+
+/* 一「层」目录。层叠导航同屏最多两层，DOM 顺序即层序。 */
+.pane {
+  position: absolute;
+  inset: 0;
+  background: var(--ground);
 }
 
 .fileScroll {
@@ -125,36 +151,34 @@
   inset: 0;
   overflow: auto;
   scrollbar-width: none;
+
+  /* 终端面板是浮层：按它的实测高度（FileList 从 store 写进来的变量）
+     给滚动内容留底，最后一行才能滚出折叠条的遮挡。 */
+  padding-bottom: var(--panel-inset, 0px);
 }
 
-.fileScroll::-webkit-scrollbar {
-  display: none;
+/* 地址栏盒子：与 SearchBox 同一套形（负责人定：要像自家控件）。
+   ——此前一次宽正则替换把本节 9 个类整段吞掉、地址栏裸奔浏览器默认样式，
+   此处恢复并升级；教训同 scrollWrap 事故：宽匹配的编辑必须事后 grep 验证。 */
+.pathWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  border: var(--stroke) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  height: var(--row-sm);
+  padding: 0 var(--sp-3);
+  transition: border-color var(--t-color) var(--ease);
 }
 
-.overlayThumb {
-  position: absolute;
-  right: 3px;
-  width: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--line-strong);
-  opacity: 0;
-  transition: opacity var(--t-color) var(--ease);
-  cursor: default;
-  touch-action: none;
+.pathWrap:focus-within {
+  border-color: var(--accent);
 }
 
-.overlayThumb[data-visible] {
-  opacity: 1;
-}
-
-.overlayThumb:hover,
-.overlayThumb[data-dragging] {
-  background: var(--ink-3);
-  opacity: 1;
-}
-
-/* 地址栏：就是一段路径文本，无边框；悬停/聚焦只做底色变化（负责人定），
-   焦点可见性交给全局 :focus-visible。 */
+/* 盒内输入：本体无边无底，一切外观由 pathWrap 承担。 */
 .pathBar {
   font-family: var(--mono);
   font-size: var(--fs-300);
@@ -167,34 +191,25 @@
   min-width: 0;
   flex: 1;
   border: none;
-  border-radius: var(--radius-sm);
   background: none;
-  padding: 2px var(--sp-2);
+  appearance: none;
+  padding: 0;
 }
 
-.pathBar:hover,
 .pathBar:focus {
-  background: var(--surface-2);
   color: var(--ink);
-}
-
-.pathWrap {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  flex: 1;
 }
 
 .pathSugs {
   position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
+  top: calc(100% + 2px);
+  left: calc(-1 * var(--stroke));
+  right: calc(-1 * var(--stroke));
   z-index: 20;
-  margin: 2px 0 0;
+  margin: 0;
   padding: 2px;
   background: var(--surface);
-  border: 1px solid var(--stroke);
+  border: var(--stroke) solid var(--line-strong);
   border-radius: var(--radius-md);
   box-shadow: 0 6px 24px rgb(0 0 0 / 14%);
   max-height: 260px;
@@ -227,6 +242,24 @@
   color: var(--ink);
 }
 
+/* 名称列里的图标位：固定 16px，缩略图与类型图标同占位不跳版。 */
+.iconBox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* 列表行内的小缩略图：裁成方形圆角，与 16px 图标同尺寸。 */
+.thumbMini {
+  width: 16px;
+  height: 16px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
 .nameCell {
   display: inline-flex;
   align-items: center;
@@ -247,17 +280,128 @@
   font-size: var(--fs-300);
 }
 
-.showAllRow {
-  display: flex;
-  justify-content: center;
-  padding: var(--sp-3);
+/* ------------------------- 层叠导航（常驻两层，macOS 手感） ------------------------- */
+
+/* 顶层向右让出一条边，父层从底下透出来；left 参与过渡：push 时旧顶层
+   同 key 降为垫层，left 28→0 + 压暗一起滑过去。 */
+.pane {
+  transition:
+    left var(--t-shape) var(--ease),
+    transform var(--t-shape) var(--ease);
 }
 
-.skippedNote {
-  color: var(--ink-3);
-  font-size: var(--fs-300);
-  padding: var(--sp-2) var(--sp-3);
-  margin: 0;
+/* 垫层上的压暗盖布，随角色淡入淡出。 */
+.pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 8%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-shape) var(--ease);
+}
+
+.paneTop {
+  /* 让出的边要读得出目录名（负责人定）；窄窗按比例缩。 */
+  left: min(208px, 28%);
+  box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
+}
+
+/* 三层时顶层再让出祖父层那条窄边。 */
+.paneTop3 {
+  left: min(236px, 32%);
+  box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
+}
+
+/* 父层：露出的部分整个可交互（点子目录直接切换），轻压暗保证可读。 */
+.paneMid::after {
+  opacity: 1;
+}
+
+.paneMidShifted {
+  left: 28px;
+  box-shadow: -8px 0 18px rgb(0 0 0 / 10%);
+}
+
+/* 祖父层：近乎不可见（重度压暗），本体不可交互，交互交给 upStrip。 */
+.paneDeep {
+  pointer-events: none;
+}
+
+.paneDeep::after {
+  opacity: 1;
+  background: rgb(0 0 0 / 55%);
+}
+
+/* 祖父层那条边：整条可点 = 返回上一级。 */
+.upStrip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: transparent;
+  font-size: var(--fs-500);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.upStrip:hover {
+  color: var(--ink);
+  background: rgb(0 0 0 / 10%);
+}
+
+@keyframes pane-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes pane-out-right {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translateX(110%);
+  }
+}
+
+/* 进子目录：新顶层从右推入。 */
+.panePushIn {
+  animation: pane-in-right var(--t-shape) var(--ease);
+}
+
+/* 回上级：旧顶层盖在最上面滑出。forwards 钉住终态，等状态机把它卸掉。 */
+.panePopOut {
+  animation: pane-out-right var(--t-shape-out) var(--ease) forwards;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane,
+  .pane::after {
+    transition: none;
+  }
+  .panePushIn,
+  .panePopOut {
+    animation: none;
+  }
+}
+
+/* 列表⇄平铺切换的那几帧：层的位移/压暗全部即时生效，不演过渡（负责人定）。
+   放在 .pane / .pane::after 的全部定义之后，特异性递增，压得住。 */
+.noAnim .pane,
+.noAnim .pane::after {
+  transition: none;
+  animation: none;
 }
 
 /* ---------------------------------------------------------------- 终端面板 */

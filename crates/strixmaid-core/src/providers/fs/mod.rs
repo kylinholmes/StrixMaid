@@ -54,6 +54,9 @@ use strixmaid_types::{ApiError, ApiResult};
 
 use super::{Probe, Provider};
 
+pub mod icon;
+pub mod thumb;
+
 #[cfg(windows)]
 pub mod windows;
 
@@ -291,6 +294,22 @@ impl FsProvider {
         tokio::task::spawn_blocking(move || raw_blocking(&file, offset, len))
             .await
             .map_err(|e| ApiError::internal("fs.raw 任务异常").with_detail(e.to_string()))?
+    }
+
+    /// `fs.thumb`：出一张缩略图（roadmap/12 §4.7）。
+    ///
+    /// 解码与缩放都在 worker 内（登录用户身份），出去的只有缩好的小图；
+    /// 三层风险控制见 [`thumb`] 的模块文档。
+    pub async fn thumb(
+        &self,
+        path: &str,
+        roots: &[String],
+        max_px: u32,
+    ) -> ApiResult<strixmaid_types::rpc::FsThumb> {
+        let file = resolve(path, roots)?;
+        tokio::task::spawn_blocking(move || thumb::thumb_blocking(&file, max_px))
+            .await
+            .map_err(|e| ApiError::internal("fs.thumb 任务异常").with_detail(e.to_string()))?
     }
 }
 
@@ -561,7 +580,7 @@ fn kind_of(ft: &std::fs::FileType) -> FileKind {
 }
 
 /// IO 错误 → API 错误。「找不到」与「无权限」是用户可理解的结果，其余按内部错误报。
-fn io_err(path: &Path, e: &std::io::Error) -> ApiError {
+pub(super) fn io_err(path: &Path, e: &std::io::Error) -> ApiError {
     use std::io::ErrorKind;
     match e.kind() {
         ErrorKind::NotFound => ApiError::not_found(format!("{} 不存在", path.display())),
