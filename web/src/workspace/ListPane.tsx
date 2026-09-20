@@ -59,6 +59,8 @@ export interface ListPaneProps {
   onNavigate: (path: string) => void;
   /** 层叠导航的动画类（推入/滑出/垫底），由 FileList 编排。 */
   className?: string;
+  /** 层角色标记（top/under/leaving），测试与调试按它定位。 */
+  pane?: string;
 }
 
 /**
@@ -66,7 +68,7 @@ export interface ListPaneProps {
  * 层叠导航（进目录像 macOS 那样推入新层）要求同屏能渲染两层，
  * 所以这些状态必须住在层内而不是 FileList 里。
  */
-export function ListPane({ path, platform, onNavigate, className }: ListPaneProps) {
+export function ListPane({ path, platform, onNavigate, className, pane }: ListPaneProps) {
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
   const dirSort = useWorkspace((st) => st.dirSort);
@@ -183,7 +185,7 @@ export function ListPane({ path, platform, onNavigate, className }: ListPaneProp
   ];
 
   return (
-    <div className={cx(s.pane, className)}>
+    <div className={cx(s.pane, className)} data-pane={pane}>
       <div
         ref={scrollRef}
         className={s.fileScroll}

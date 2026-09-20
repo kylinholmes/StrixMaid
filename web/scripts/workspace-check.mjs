@@ -270,10 +270,10 @@ async function unixFlow(browser) {
   await page.click("text=proj");
   await page.waitForSelector("text=共 800 项，已加载 500");
   const rows = await page.locator("tbody tr").count();
-  check("虚拟滚动只渲染视口附近的行", rows < 120, `DOM 行数 ${rows}`);
+  check("虚拟滚动只渲染视口附近的行（含常驻垫层）", rows < 140, `DOM 行数 ${rows}`);
   check("skipped 提示", await page.isVisible("text=1 个条目因无权限或已消失被跳过"));
   // 滚到已加载末尾触发下一页，直到 800 全部加载。
-  const bigScroller = page.locator('[class*=fileScroll]').first();
+  const bigScroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await bigScroller.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
   await page.waitForFunction(
     () => document.body.textContent?.includes("共 800 项") && !document.body.textContent?.includes("已加载"),
@@ -282,14 +282,14 @@ async function unixFlow(browser) {
   );
   check("滚动到底自动加载完 800 项", true);
   // 表头点「大小」→ 服务端排序参数带出去。
-  await page.click('th button:has-text("大小")');
+  await page.click('[data-pane="top"] th button:has-text("大小")');
   await page.waitForTimeout(300);
   check(
     "点表头触发服务端排序",
     filesQueries.some((q) => q.sort === "size" && q.path === "/home/kylin/proj"),
     JSON.stringify(filesQueries.at(-1)),
   );
-  await page.click('th button:has-text("名称")');
+  await page.click('[data-pane="top"] th button:has-text("名称")');
   await page.waitForTimeout(300);
 
   // 后退 → 主目录；前进 → 又回来。
@@ -405,7 +405,7 @@ async function unixFlow(browser) {
   await page.waitForSelector('tbody >> text=proj');
   await page.click('tbody >> text=proj');
   await page.waitForSelector("text=共 800 项");
-  const scroller = page.locator(".fileScroll, [class*=fileScroll]").first();
+  const scroller = page.locator('[data-pane="top"] [class*=fileScroll]').first();
   await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.waitForTimeout(500);

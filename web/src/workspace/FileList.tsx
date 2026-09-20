@@ -22,18 +22,14 @@ export interface FileListProps {
   leading?: React.ReactNode;
 }
 
-/** 一次层叠切换：`from` 是让位的那层，方向决定谁在上面怎么动。 */
-interface Layering {
-  from: string;
-  dir: "push" | "pop";
-}
-
 /**
- * 文件区（§4.5）：工具栏（导航/地址栏补全/视图切换）+ 层叠的目录层。
+ * 文件区（§4.5）：工具栏（导航/地址栏补全/视图切换）+ 常驻两层的目录层叠。
  *
- * **层叠导航**（负责人 2026-09-20 要求，macOS 手感）：进入子目录时新层从右
- * 推入、旧层向左略退压暗；返回祖先时顶层滑出还原。跨目录跳转（快速访问、
- * 地址栏）不属于层级关系，直接切换不演。同屏最多两层，动画完只留当前层。
+ * **层叠导航**（负责人 2026-09-20 定，macOS 手感）：**父目录始终垫在下面**，
+ * 顶层向右让出一条边让父层透出来，点那条边即返回。垫层不用维护栈——它永远
+ * 就是 `parentPath(当前)`，推导即可。进子目录时旧顶层**原地降为垫层**（同
+ * key，位置与压暗走 CSS 过渡）、新层从右推入；回上级时顶层滑出、垫层升顶。
+ * 跨层级跳转（快速访问、地址栏）不演动画，直接换层。
  */
 export function FileList({
   path,
@@ -59,31 +55,38 @@ export function FileList({
   /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
   const [editing, setEditing] = useState<string | null>(null);
 
-  // ---- 层叠状态机 ----
-  const [layer, setLayer] = useState<Layering | null>(null);
+  // ---- 层叠状态：方向只决定「演不演」，垫层本身由 parentPath 推导 ----
+  /** 刚发生 push：给新顶层挂一次「从右推入」的入场动画。 */
+  const [pushAnim, setPushAnim] = useState(false);
+  /** 刚发生 pop：被弹掉的那层短暂留在最上面演「滑出」。 */
+  const [leaving, setLeaving] = useState<string | null>(null);
   const prevPath = useRef<string | null>(path);
   // biome-ignore lint/correctness/useExhaustiveDependencies: 只在 path 变化时判定一次方向
   useEffect(() => {
     const old = prevPath.current;
     prevPath.current = path;
-    if (old === null || path === null || old === path) {
-      setLayer(null);
-      return;
+    if (old === null || path === null || old === path) return;
+    // 减少动态：布局照旧两层，动画全免。
+    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    if (isDescendant(path, old, platform)) {
+      setPushAnim(true);
+      setLeaving(null);
+    } else if (isDescendant(old, path, platform)) {
+      setLeaving(old);
+      setPushAnim(false);
+    } else {
+      setPushAnim(false);
+      setLeaving(null);
     }
-    // 减少动态：不止关动画，第二层根本不建（也让端到端测试可确定）。
-    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      setLayer(null);
-      return;
-    }
-    if (isDescendant(path, old, platform)) setLayer({ from: old, dir: "push" });
-    else if (isDescendant(old, path, platform)) setLayer({ from: old, dir: "pop" });
-    else setLayer(null);
   }, [path]);
   useEffect(() => {
-    if (!layer) return;
-    const t = setTimeout(() => setLayer(null), 320);
+    if (!pushAnim && leaving === null) return;
+    const t = setTimeout(() => {
+      setPushAnim(false);
+      setLeaving(null);
+    }, 420);
     return () => clearTimeout(t);
-  }, [layer]);
+  }, [pushAnim, leaving]);
 
   // ---- 地址栏补全：父目录的子目录按前缀过滤 ----
   const [sugs, setSugs] = useState<string[]>([]);
@@ -140,48 +143,55 @@ export function FileList({
     setEditing(null);
   }, []);
 
-  const up = path === null ? null : parentPath(path, platform);
+  const parent = path === null ? null : parentPath(path, platform);
+  const up = parent;
 
-  // 层叠渲染：垫底层在前、动的那层在后（DOM 顺序即层序）。key 稳定，
-  // 动画结束后当前层原地保留，不重挂、不闪。
+  // 常驻两层：垫层永远是父目录（key 稳定——push 时旧顶层同 key 原地降级，
+  // 位置/压暗由 CSS 过渡接管）；再叠一条可点的「返回」边；pop 的旧顶层
+  // 以 leaving 短暂盖在最上面演滑出。DOM 顺序即层序。
   const panes: React.ReactNode[] = [];
-  if (layer?.dir === "push") {
+  if (parent !== null) {
     panes.push(
       <ListPane
-        key={`p:${layer.from}`}
-        path={layer.from}
+        key={`p:${parent}`}
+        path={parent}
         platform={platform}
         onNavigate={onNavigate}
-        className={s.paneUnderPush}
+        pane="under"
+        className={s.paneUnder}
       />,
-      <ListPane
-        key={`p:${path}`}
-        path={path}
-        platform={platform}
-        onNavigate={onNavigate}
-        className={s.panePushIn}
-      />,
+      <button
+        key="back-strip"
+        type="button"
+        className={s.backStrip}
+        title={`返回 ${parent}`}
+        aria-label={`返回上一级 ${parent}`}
+        onClick={() => onNavigate(parent)}
+      >
+        <span aria-hidden>‹</span>
+      </button>,
     );
-  } else if (layer?.dir === "pop") {
+  }
+  panes.push(
+    <ListPane
+      key={`p:${path}`}
+      path={path}
+      platform={platform}
+      onNavigate={onNavigate}
+      pane="top"
+      className={cx(parent !== null && s.paneTop, pushAnim && s.panePushIn)}
+    />,
+  );
+  if (leaving !== null) {
     panes.push(
       <ListPane
-        key={`p:${path}`}
-        path={path}
+        key={`p:${leaving}`}
+        path={leaving}
         platform={platform}
         onNavigate={onNavigate}
-        className={s.paneUnderPop}
+        pane="leaving"
+        className={cx(s.paneTop, s.panePopOut)}
       />,
-      <ListPane
-        key={`p:${layer.from}`}
-        path={layer.from}
-        platform={platform}
-        onNavigate={onNavigate}
-        className={s.panePopOut}
-      />,
-    );
-  } else {
-    panes.push(
-      <ListPane key={`p:${path}`} path={path} platform={platform} onNavigate={onNavigate} />,
     );
   }
 

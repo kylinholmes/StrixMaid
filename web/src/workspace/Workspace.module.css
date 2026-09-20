@@ -135,7 +135,62 @@
   scrollbar-width: none;
 }
 
-/* ------------------------- 层叠导航（macOS 推入手感） ------------------------- */
+/* ------------------------- 层叠导航（常驻两层，macOS 手感） ------------------------- */
+
+/* 顶层向右让出一条边，父层从底下透出来；left 参与过渡：push 时旧顶层
+   同 key 降为垫层，left 28→0 + 压暗一起滑过去。 */
+.pane {
+  transition:
+    left var(--t-shape) var(--ease),
+    transform var(--t-shape) var(--ease);
+}
+
+/* 垫层上的压暗盖布，随角色淡入淡出。 */
+.pane::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 22%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-shape) var(--ease);
+}
+
+.paneTop {
+  left: 28px;
+  box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
+}
+
+.paneUnder {
+  pointer-events: none;
+}
+
+.paneUnder::after {
+  opacity: 1;
+}
+
+/* 父层透出的那条边，整条可点 = 返回上一级。 */
+.backStrip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: transparent;
+  font-size: var(--fs-500);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.backStrip:hover {
+  color: var(--ink-2);
+  background: rgb(0 0 0 / 6%);
+}
 
 @keyframes pane-in-right {
   from {
@@ -151,195 +206,30 @@
     transform: none;
   }
   to {
-    transform: translateX(100%);
+    transform: translateX(110%);
   }
 }
 
-@keyframes pane-under-away {
-  from {
-    transform: none;
-    opacity: 1;
-  }
-  to {
-    transform: translateX(-14%);
-    opacity: 0.55;
-  }
-}
-
-@keyframes pane-under-back {
-  from {
-    transform: translateX(-14%);
-    opacity: 0.55;
-  }
-  to {
-    transform: none;
-    opacity: 1;
-  }
-}
-
-/* 进子目录：新层从右推入，左缘投影强调「叠在上面」。 */
+/* 进子目录：新顶层从右推入。 */
 .panePushIn {
   animation: pane-in-right var(--t-shape) var(--ease);
-  box-shadow: -14px 0 28px rgb(0 0 0 / 16%);
 }
 
-/* 回祖先：顶层滑出让位。forwards 钉住终态，等状态机把它卸掉。 */
+/* 回上级：旧顶层盖在最上面滑出。forwards 钉住终态，等状态机把它卸掉。 */
 .panePopOut {
   animation: pane-out-right var(--t-shape-out) var(--ease) forwards;
-  box-shadow: -14px 0 28px rgb(0 0 0 / 16%);
   pointer-events: none;
-}
-
-/* 垫底的旧层：向左略退并压暗，动画期间不可交互。 */
-.paneUnderPush {
-  animation: pane-under-away var(--t-shape) var(--ease) forwards;
-  pointer-events: none;
-}
-
-.paneUnderPop {
-  animation: pane-under-back var(--t-shape-out) var(--ease);
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .pane,
+  .pane::after {
+    transition: none;
+  }
   .panePushIn,
-  .panePopOut,
-  .paneUnderPush,
-  .paneUnderPop {
+  .panePopOut {
     animation: none;
   }
-}
-
-.fileScroll::-webkit-scrollbar {
-  display: none;
-}
-
-.overlayThumb {
-  position: absolute;
-  right: 3px;
-  width: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--line-strong);
-  opacity: 0;
-  transition: opacity var(--t-color) var(--ease);
-  cursor: default;
-  touch-action: none;
-}
-
-.overlayThumb[data-visible] {
-  opacity: 1;
-}
-
-.overlayThumb:hover,
-.overlayThumb[data-dragging] {
-  background: var(--ink-3);
-  opacity: 1;
-}
-
-/* 地址栏：就是一段路径文本，无边框；悬停/聚焦只做底色变化（负责人定），
-   焦点可见性交给全局 :focus-visible。 */
-.pathBar {
-  font-family: var(--mono);
-  font-size: var(--fs-300);
-  color: var(--ink-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* 不用 direction:rtl 的「尾部优先」技巧：它会把 /home 显示成 home/。
-     长路径截尾部，完整路径在 title 里。 */
-  min-width: 0;
-  flex: 1;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  padding: 2px var(--sp-2);
-}
-
-.pathBar:hover,
-.pathBar:focus {
-  background: var(--surface-2);
-  color: var(--ink);
-}
-
-.pathWrap {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  flex: 1;
-}
-
-.pathSugs {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  margin: 2px 0 0;
-  padding: 2px;
-  background: var(--surface);
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-md);
-  box-shadow: 0 6px 24px rgb(0 0 0 / 14%);
-  max-height: 260px;
-  overflow-y: auto;
-}
-
-.pathSug {
-  display: block;
-  width: 100%;
-  text-align: left;
-  font-family: var(--mono);
-  font-size: var(--fs-300);
-  color: var(--ink-2);
-  border: none;
-  background: none;
-  border-radius: var(--radius-sm);
-  padding: var(--sp-2);
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pathSug:hover {
-  background: var(--surface-2);
-}
-
-.pathSugActive {
-  background: var(--sel);
-  color: var(--ink);
-}
-
-.nameCell {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.kindDir {
-  color: var(--ink-2);
-}
-
-.kindFile {
-  color: var(--ink-3);
-}
-
-.linkTarget {
-  color: var(--ink-3);
-  font-size: var(--fs-300);
-}
-
-.showAllRow {
-  display: flex;
-  justify-content: center;
-  padding: var(--sp-3);
-}
-
-.skippedNote {
-  color: var(--ink-3);
-  font-size: var(--fs-300);
-  padding: var(--sp-2) var(--sp-3);
-  margin: 0;
 }
 
 /* ---------------------------------------------------------------- 终端面板 */
