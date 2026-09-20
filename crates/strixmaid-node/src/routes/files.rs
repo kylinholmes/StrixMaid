@@ -28,6 +28,7 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse as _, Response};
 use futures::StreamExt as _;
+use strixmaid_core::providers::fs;
 use strixmaid_core::providers::fs::icon::FileTypeIcons;
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
@@ -81,7 +82,58 @@ pub fn router(state: FilesState) -> OpenApiRouter<()> {
         .routes(routes!(read_file))
         .routes(routes!(raw_file))
         .routes(routes!(type_icon))
+        .routes(routes!(path_icon))
         .with_state(state)
+}
+
+/// 具体条目的系统图标（按路径，macOS）
+///
+/// `.app` 这类 bundle 显示应用自己的图标而不是文件夹，符号链接解析到目标。
+/// 只有 macOS 提供（`NSWorkspace iconForFile:`），其余平台一律 404；
+/// 为什么 Windows 不开这条路见 `providers/fs/icon` 的文档。
+#[utoipa::path(
+    get,
+    path = "/files/icon-path",
+    tag = "files",
+    params(FilePathQuery),
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "这个条目的系统图标（响应体是原始 PNG 字节）", content_type = "image/png", body = String),
+        (status = 400, description = "路径不合法（相对路径、含 `..` 或控制字符）", body = ApiError),
+        (status = 401, description = "未认证", body = ApiError),
+        (status = 403, description = "路径在 files.allowed_roots 之外", body = ApiError),
+        (status = 404, description = "本平台不提供按路径取图标（macOS 之外）", body = ApiError),
+    ),
+)]
+pub async fn path_icon(
+    State(st): State<FilesState>,
+    Extension(_session): Extension<Session>,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Response> {
+    // 展示范围与 /files 其余端点同一份配置、同一套函数。worker 里由 fs
+    // provider 校验，这条不经 worker，就在这里用同一对 normalize/is_allowed
+    // ——`..` 先被消解再比较，按路径段判断（字符串前缀会把 /home2 误进 /home）。
+    let normalized = fs::normalize(&q.path)?;
+    if !fs::is_allowed(&normalized, &st.allowed_roots) {
+        return Err(ApiError::permission_denied(format!(
+            "路径 {} 不在允许浏览的范围内（files.allowed_roots）",
+            normalized.display()
+        ))
+        .into());
+    }
+    let normalized = normalized
+        .to_str()
+        .ok_or_else(|| ApiError::invalid_request("路径不是合法 UTF-8"))?;
+    let png = st.type_icons.path_icon_png(normalized).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            // 具体应用的图标随应用更新换，比类型图标勤一档：一小时。
+            (header::CACHE_CONTROL, "max-age=3600"),
+        ],
+        png.as_slice().to_vec(),
+    )
+        .into_response())
 }
 
 /// 文件类型图标

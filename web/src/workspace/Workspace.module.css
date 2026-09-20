@@ -151,6 +151,10 @@
   inset: 0;
   overflow: auto;
   scrollbar-width: none;
+
+  /* 终端面板是浮层：按它的实测高度（FileList 从 store 写进来的变量）
+     给滚动内容留底，最后一行才能滚出折叠条的遮挡。 */
+  padding-bottom: var(--panel-inset, 0px);
 }
 
 /* 地址栏盒子：与 SearchBox 同一套形（负责人定：要像自家控件）。
@@ -372,6 +376,14 @@
   .panePopOut {
     animation: none;
   }
+}
+
+/* 列表⇄平铺切换的那几帧：层的位移/压暗全部即时生效，不演过渡（负责人定）。
+   放在 .pane / .pane::after 的全部定义之后，特异性递增，压得住。 */
+.noAnim .pane,
+.noAnim .pane::after {
+  transition: none;
+  animation: none;
 }
 
 /* ---------------------------------------------------------------- 终端面板 */

@@ -277,44 +277,92 @@ pub fn file_type_icon_png(ext: &str, size: u32) -> Option<Vec<u8>> {
     let _pool = Pool::new();
     // SAFETY: 整条链路的对象生命周期由 pool 与显式 release 管理，
     // 各消息的签名与选择子一一对应，见各处注释。
-    unsafe { icon_png_inner(&c_ext, size) }
+    unsafe {
+        let ns_ext = ns_string(&c_ext)?;
+        let image = image_for_uttype(sel(c"typeWithFilenameExtension:"), ns_ext, ns_ext)?;
+        render_png(image, size)
+    }
 }
 
-unsafe fn icon_png_inner(c_ext: &CStr, size: u32) -> Option<Vec<u8>> {
-    unsafe {
-        let ns_ext = msg_id_cstr(
-            cls(c"NSString")?,
-            sel(c"stringWithUTF8String:"),
-            c_ext.as_ptr(),
-        );
-        if ns_ext.is_null() {
-            return None;
-        }
-        let workspace = msg_id(cls(c"NSWorkspace")?, sel(c"sharedWorkspace"));
-        if workspace.is_null() {
-            return None;
-        }
+/// 目录的系统图标（Finder 的那只蓝色文件夹）。UTI `public.folder`。
+pub fn folder_icon_png(size: u32) -> Option<Vec<u8>> {
+    icon_for_identifier(c"public.folder", c"'fldr'", size)
+}
 
-        // 首选 UTType 路线（macOS 12+）；老系统回落到废弃但仍在的
-        // iconForFileType:。先 respondsToSelector: 再发消息——对老系统直接发
-        // 未知选择子是崩溃，不是错误返回。
+/// 无扩展名 / 认不出类型的文件的系统图标（白纸）。UTI `public.data`。
+pub fn generic_file_icon_png(size: u32) -> Option<Vec<u8>> {
+    icon_for_identifier(c"public.data", c"'docu'", size)
+}
+
+/// 按**真实路径**取图标：`iconForFile:`。
+///
+/// 与按类型那三条不同，这条会读路径指向的东西（bundle 的 `Info.plist`
+/// 与图标文件、自定义文件夹图标），给的是 Finder 里那个**具体条目**的图
+/// ——`.app` 显示应用自己的图标而不是文件夹，符号链接解析到目标。
+/// 路径不存在或不可读时 AppKit 给通用图标，不报错；身份与展示范围的
+/// 把关在调用方（`providers/fs/icon` 与 `routes/files.rs`）。
+pub fn file_icon_png(path: &str, size: u32) -> Option<Vec<u8>> {
+    let c_path = CString::new(path).ok()?;
+    let _pool = Pool::new();
+    // SAFETY: 同 file_type_icon_png。
+    unsafe {
+        let ns_path = ns_string(&c_path)?;
+        let workspace = shared_workspace()?;
+        let image = msg_id_id(workspace, sel(c"iconForFile:"), ns_path);
+        if image.is_null() {
+            return None;
+        }
+        render_png(image, size)
+    }
+}
+
+/// 按固定 UTI 取图标（文件夹 / 通用文件这类**身份已知**的类型）。
+/// `hfs_fallback` 是老系统（没有 UTType）用的 HFS 类型码串，如 `'fldr'`。
+fn icon_for_identifier(identifier: &CStr, hfs_fallback: &CStr, size: u32) -> Option<Vec<u8>> {
+    let _pool = Pool::new();
+    // SAFETY: 同 file_type_icon_png。
+    unsafe {
+        let ns_id = ns_string(identifier)?;
+        let ns_hfs = ns_string(hfs_fallback)?;
+        let image = image_for_uttype(sel(c"typeWithIdentifier:"), ns_id, ns_hfs)?;
+        render_png(image, size)
+    }
+}
+
+unsafe fn ns_string(s: &CStr) -> Option<Id> {
+    // SAFETY: s 以 NUL 结尾；返回值 autoreleased，归当前 pool。
+    let ns = unsafe { msg_id_cstr(cls(c"NSString")?, sel(c"stringWithUTF8String:"), s.as_ptr()) };
+    (!ns.is_null()).then_some(ns)
+}
+
+unsafe fn shared_workspace() -> Option<Id> {
+    // SAFETY: 类与选择子都存在于 AppKit。
+    let ws = unsafe { msg_id(cls(c"NSWorkspace")?, sel(c"sharedWorkspace")) };
+    (!ws.is_null()).then_some(ws)
+}
+
+/// UTType 路线（macOS 12+）取 `NSImage`；老系统回落到废弃但仍在的
+/// `iconForFileType:`（参数用 `fallback_arg`：扩展名或 HFS 类型码串）。
+///
+/// 先 `respondsToSelector:` 再发消息——对老系统直接发未知选择子是崩溃，
+/// 不是错误返回。
+unsafe fn image_for_uttype(uttype_sel: Sel, uttype_arg: Id, fallback_arg: Id) -> Option<Id> {
+    unsafe {
+        let workspace = shared_workspace()?;
         let icon_for_content_type = sel(c"iconForContentType:");
         let mut image: Id = std::ptr::null_mut();
         if msg_bool_sel(workspace, sel(c"respondsToSelector:"), icon_for_content_type) != 0
             && let Some(uttype_cls) = cls(c"UTType")
         {
-            let uttype = msg_id_id(uttype_cls, sel(c"typeWithFilenameExtension:"), ns_ext);
+            let uttype = msg_id_id(uttype_cls, uttype_sel, uttype_arg);
             if !uttype.is_null() {
                 image = msg_id_id(workspace, icon_for_content_type, uttype);
             }
         }
         if image.is_null() {
-            image = msg_id_id(workspace, sel(c"iconForFileType:"), ns_ext);
+            image = msg_id_id(workspace, sel(c"iconForFileType:"), fallback_arg);
         }
-        if image.is_null() {
-            return None;
-        }
-        render_png(image, size)
+        (!image.is_null()).then_some(image)
     }
 }
 
@@ -454,8 +502,41 @@ mod tests {
     }
 
     #[test]
-    fn 含_nul_的扩展名直接拒绝() {
+    fn 文件夹与通用文件图标() {
+        if !available() {
+            eprintln!("本环境没有窗口服务器连接（CI / SSH），跳过");
+            return;
+        }
+        for (名字, png) in [
+            ("文件夹", folder_icon_png(64)),
+            ("通用文件", generic_file_icon_png(64)),
+        ] {
+            let png = png.unwrap_or_else(|| panic!("{名字}图标应当取得到"));
+            assert_eq!(解析_png_头(&png), (64, 64), "{名字}图标尺寸不对");
+        }
+    }
+
+    #[test]
+    fn 按路径取_bundle_的图标() {
+        if !available() {
+            eprintln!("本环境没有窗口服务器连接（CI / SSH），跳过");
+            return;
+        }
+        // Finder 在任何 macOS 上都在。它的图标与通用文件夹不同——
+        // 这正是「按路径」区别于「按类型」的全部意义，必须断言出来。
+        let finder = file_icon_png("/System/Library/CoreServices/Finder.app", 64)
+            .expect("Finder 的图标应当取得到");
+        assert_eq!(解析_png_头(&finder), (64, 64));
+        let folder = folder_icon_png(64).expect("文件夹图标应当取得到");
+        assert_ne!(finder, folder, ".app 给的还是通用文件夹，说明走错了路");
+        // 不存在的路径 AppKit 给通用图标而不是报错——如实接受，这不是错误。
+        assert!(file_icon_png("/绝不存在/的路径.app", 32).is_some());
+    }
+
+    #[test]
+    fn 含_nul_的输入直接拒绝() {
         assert!(file_type_icon_png("tx\0t", 32).is_none());
+        assert!(file_icon_png("/tmp/\0x", 32).is_none());
     }
 
     #[test]

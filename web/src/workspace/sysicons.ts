@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { authHeaders } from "@/api/client";
+import type { Platform } from "./path";
 
 /**
  * 系统文件类型图标（roadmap/12 §8 未决 8）：按扩展名向 `GET /files/icon/{ext}`
@@ -18,9 +19,18 @@ import { authHeaders } from "@/api/client";
  * 见 `providers/fs/icon.rs`），404 就整个会话不再来问。
  */
 
-/** 会话级缓存：扩展名 → object URL；`null` 是负缓存（这一类真的取不到）。 */
+/** 保留 key：目录（与后端 `providers/fs/icon.rs` 的常量一致）。 */
+export const DIR_KEY = "$dir";
+/** 保留 key：无扩展名 / 认不出类型的文件。 */
+export const GENERIC_FILE_KEY = "$file";
+
+/** 会话级缓存：类型 key → object URL；`null` 是负缓存（这一类真的取不到）。 */
 const cache = new Map<string, string | null>();
 const inflight = new Map<string, Promise<string | null>>();
+
+/** 按路径的会话级缓存（macOS 的 bundle / 符号链接，见 `usePathIcon`）。 */
+const pathCache = new Map<string, string | null>();
+const pathInflight = new Map<string, Promise<string | null>>();
 
 /** 平台探测的结论。`null` = 还没问过或上次因网络/未登录没问成，可以再试。 */
 let availability: Promise<boolean> | null = null;
@@ -105,35 +115,111 @@ export function fetchTypeIcon(ext: string): Promise<string | null> {
 }
 
 /**
- * React 侧入口：`name` 是文件名（目录与符号链接传 `null`），返回系统图标的
- * object URL 或 `null`。命中会话缓存时首帧即有值，不闪内置图标。
+ * 一个具体条目的系统图标（按路径，只有 macOS 后端有货）：`.app` 显示应用
+ * 自己的图标，符号链接解析到目标。同一探测把门：Linux 会话零请求；
+ * **Windows 后端也会 404**（那边按路径要碰磁盘，见后端文档），所以调用方
+ * 必须只在 unix 平台上传路径进来——探测通过 + unix 平台 ⇒ macOS。
  */
-export function useSysIcon(name: string | null): string | null {
-  const ext = name === null ? null : extOf(name);
+export function fetchPathIcon(path: string): Promise<string | null> {
+  const hit = pathCache.get(path);
+  if (hit !== undefined) return Promise.resolve(hit);
+  const going = pathInflight.get(path);
+  if (going) return going;
+
+  const p = (async () => {
+    try {
+      if (!(await probe())) return null;
+      const headers = authHeaders();
+      if (!headers) return null;
+      const resp = await fetch(`/api/v1/files/icon-path?path=${encodeURIComponent(path)}`, {
+        headers,
+      });
+      // 404 是确定性的「这条路没有」（非 macOS），负缓存；网络错误留给下次。
+      if (!resp.ok) {
+        if (resp.status === 404 || resp.status === 403) pathCache.set(path, null);
+        return null;
+      }
+      const url = URL.createObjectURL(await resp.blob());
+      pathCache.set(path, url);
+      return url;
+    } catch {
+      return null;
+    } finally {
+      pathInflight.delete(path);
+    }
+  })();
+  pathInflight.set(path, p);
+  return p;
+}
+
+/** 通用的「异步取 → 会话缓存 → 状态」钩子骨架。 */
+function useIconUrl(
+  key: string | null,
+  store: Map<string, string | null>,
+  fetcher: (key: string) => Promise<string | null>,
+): string | null {
   const [url, setUrl] = useState<string | null>(() =>
-    ext === null ? null : (cache.get(ext) ?? null),
+    key === null ? null : (store.get(key) ?? null),
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: store 与 fetcher 是模块级常量，不进依赖
   useEffect(() => {
-    if (ext === null) {
+    if (key === null) {
       setUrl(null);
       return;
     }
     let live = true;
-    void fetchTypeIcon(ext).then((u) => {
+    void fetcher(key).then((u) => {
       if (live) setUrl(u);
     });
     return () => {
       live = false;
     };
-  }, [ext]);
+  }, [key]);
 
-  return ext === null ? null : url;
+  return key === null ? null : url;
+}
+
+/**
+ * React 侧入口：`key` 是类型 key——扩展名（`extOf` 的产物）、[`DIR_KEY`] 或
+ * [`GENERIC_FILE_KEY`]；`null` = 不取。命中会话缓存时首帧即有值，不闪内置图标。
+ */
+export function useSysIcon(key: string | null): string | null {
+  return useIconUrl(key, cache, fetchTypeIcon);
+}
+
+/** React 侧入口：按路径取（见 [`fetchPathIcon`] 的适用面）。 */
+export function usePathIcon(path: string | null): string | null {
+  return useIconUrl(path, pathCache, fetchPathIcon);
+}
+
+/**
+ * 一个目录项该用哪两把钥匙取系统图标（列表与平铺共用这份判定）：
+ *
+ * - `pathKey`：按路径取（优先）。只给 unix 平台上的「带扩展名的目录」
+ *   （macOS bundle：`.app`、`.framework`……）与符号链接——探测通过 + unix
+ *   平台 ⇒ 后端是 macOS，`iconForFile:` 给的是这个条目的真身。
+ * - `typeKey`：按类型取（回落 / 常规）。目录 → [`DIR_KEY`]，文件 → 扩展名
+ *   或 [`GENERIC_FILE_KEY`]；符号链接没有类型 key（回落到链条形状）。
+ */
+export function sysIconKeys(
+  kind: string,
+  name: string,
+  fullPath: string | null,
+  platform: Platform,
+): { pathKey: string | null; typeKey: string | null } {
+  const bundleLike = kind === "symlink" || (kind === "dir" && extOf(name) !== null);
+  return {
+    pathKey: platform === "unix" && bundleLike ? fullPath : null,
+    typeKey: kind === "dir" ? DIR_KEY : kind === "file" ? (extOf(name) ?? GENERIC_FILE_KEY) : null,
+  };
 }
 
 /** 测试用：清掉模块级状态（缓存与探测结论都是会话级单例）。 */
 export function resetForTest(): void {
   cache.clear();
   inflight.clear();
+  pathCache.clear();
+  pathInflight.clear();
   availability = null;
 }

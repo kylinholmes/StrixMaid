@@ -45,6 +45,19 @@ export function FileList({
   const toggleHidden = useWorkspace((st) => st.toggleHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
   const setViewMode = useWorkspace((st) => st.setViewMode);
+  const panelInset = useWorkspace((st) => st.panelInset);
+
+  // 列表⇄平铺切换是布局重构不是导航，层叠位移不许演过渡（负责人定）：
+  // 切换后的几帧内给层挂上「免动效」类，等类名变化都落地了再摘掉。
+  const [viewSwitching, setViewSwitching] = useState(false);
+  const prevView = useRef(viewMode);
+  useEffect(() => {
+    if (prevView.current === viewMode) return;
+    prevView.current = viewMode;
+    setViewSwitching(true);
+    const t = setTimeout(() => setViewSwitching(false), 80);
+    return () => clearTimeout(t);
+  }, [viewMode]);
 
   const qc = useQueryClient();
   const fetching = useIsFetching({ queryKey: ["dir", path] }) > 0;
@@ -341,7 +354,12 @@ export function FileList({
         </Button>
       </Toolbar>
       {fetching && <ProgressLine />}
-      <div className={s.scrollWrap}>{panes}</div>
+      <div
+        className={cx(s.scrollWrap, viewSwitching && s.noAnim)}
+        style={{ "--panel-inset": `${panelInset}px` } as React.CSSProperties}
+      >
+        {panes}
+      </div>
     </div>
   );
 }

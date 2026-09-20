@@ -59,7 +59,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP, HDC, RGBQUAD,
 };
-use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -135,10 +135,27 @@ pub const FILE_ICON_SIZE: i32 = 64;
 pub fn file_type_icon_png(ext: &str) -> io::Result<Vec<u8>> {
     // 虚构文件名。扩展名的消毒（拒绝分隔符、`..`、点号）在调用方
     // `providers/fs/icon` 那一层，这里只负责拼接与提取。
-    let fictional = format!("strixmaid.{ext}");
+    shell_type_icon_png(&format!("strixmaid.{ext}"), FILE_ATTRIBUTE_NORMAL)
+}
+
+/// 目录的外壳图标（资源管理器的那只黄色文件夹）。
+///
+/// 同一个虚构名字换成目录属性即可——`SHGFI_USEFILEATTRIBUTES` 下外壳只看
+/// 属性位与扩展名，`FILE_ATTRIBUTE_DIRECTORY` 就是「这是个文件夹」。
+pub fn folder_icon_png() -> io::Result<Vec<u8>> {
+    shell_type_icon_png("strixmaid", FILE_ATTRIBUTE_DIRECTORY)
+}
+
+/// 无扩展名 / 认不出类型的文件的外壳图标（那张白纸）。
+pub fn generic_file_icon_png() -> io::Result<Vec<u8>> {
+    shell_type_icon_png("strixmaid", FILE_ATTRIBUTE_NORMAL)
+}
+
+/// [`file_type_icon_png`] 一族的共同两步：位置精确提取，回落现成 `HICON`。
+fn shell_type_icon_png(fictional_name: &str, attrs: u32) -> io::Result<Vec<u8>> {
     let _com = ComInit::new();
 
-    if let Some((icon_file, index)) = icon_location(&fictional) {
+    if let Some((icon_file, index)) = icon_location(fictional_name, attrs) {
         if let Ok(icon) = extract_icon(&icon_file, index, FILE_ICON_SIZE) {
             // SAFETY: icon 有效且尚未销毁，借用期不超过本语句。
             let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
@@ -148,7 +165,7 @@ pub fn file_type_icon_png(ext: &str) -> io::Result<Vec<u8>> {
         // 继续走回落，而不是就此放弃。
     }
 
-    let icon = shell_icon(&fictional)?;
+    let icon = shell_icon(fictional_name, attrs)?;
     // SAFETY: 同上。
     let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
     encode_png(&rgba)
@@ -193,7 +210,7 @@ impl Drop for ComInit {
 ///
 /// 序号可以是负数（负的资源 id，`PrivateExtractIconsW` 原样认识），照传。
 /// 拿不到位置（处理器动态生成、注册表残缺）返回 `None`，由调用方回落。
-fn icon_location(fictional_name: &str) -> Option<(String, i32)> {
+fn icon_location(fictional_name: &str, attrs: u32) -> Option<(String, i32)> {
     let wide_name = wide::to_wide(fictional_name);
     let mut info = empty_file_info();
     // SAFETY: wide_name 以 NUL 结尾且在调用期间存活；info 是可写的 SHFILEINFOW，
@@ -201,7 +218,7 @@ fn icon_location(fictional_name: &str) -> Option<(String, i32)> {
     let ok = unsafe {
         SHGetFileInfoW(
             wide_name.as_ptr(),
-            FILE_ATTRIBUTE_NORMAL,
+            attrs,
             &raw mut info,
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_USEFILEATTRIBUTES | SHGFI_ICONLOCATION,
@@ -216,7 +233,7 @@ fn icon_location(fictional_name: &str) -> Option<(String, i32)> {
 
 /// `SHGFI_ICON | SHGFI_LARGEICON`：直接要一个现成的 `HICON`（尺寸随系统，
 /// 通常 32）。回落路径，理由见 [`file_type_icon_png`]。
-fn shell_icon(fictional_name: &str) -> io::Result<OwnedIcon> {
+fn shell_icon(fictional_name: &str, attrs: u32) -> io::Result<OwnedIcon> {
     let wide_name = wide::to_wide(fictional_name);
     let mut info = empty_file_info();
     // SAFETY: 同 `icon_location`；成功时 info.hIcon 是一个**归调用方销毁**的
@@ -224,7 +241,7 @@ fn shell_icon(fictional_name: &str) -> io::Result<OwnedIcon> {
     let ok = unsafe {
         SHGetFileInfoW(
             wide_name.as_ptr(),
-            FILE_ATTRIBUTE_NORMAL,
+            attrs,
             &raw mut info,
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_USEFILEATTRIBUTES | SHGFI_ICON | SHGFI_LARGEICON,
@@ -704,6 +721,15 @@ mod tests {
             (w, h) == (FILE_ICON_SIZE as u32, FILE_ICON_SIZE as u32) || (w == h && w >= 16),
             "类型图标尺寸不合理：{w}×{h}"
         );
+    }
+
+    #[test]
+    fn 文件夹与通用文件图标() {
+        let folder = folder_icon_png().expect("文件夹图标应当取得到");
+        assert_eq!(&folder[..4], &[0x89, b'P', b'N', b'G']);
+        let generic = generic_file_icon_png().expect("通用文件图标应当取得到");
+        assert_eq!(&generic[..4], &[0x89, b'P', b'N', b'G']);
+        assert_ne!(folder, generic, "目录属性没有生效：文件夹与文件给了同一张图");
     }
 
     #[test]

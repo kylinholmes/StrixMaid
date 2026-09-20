@@ -7,7 +7,7 @@ import { fileIconUrl, folderIconUrl } from "./icons";
 import { OverlayScrollbar } from "./OverlayScrollbar";
 import { joinPath, type Platform } from "./path";
 import { useWorkspace } from "./store";
-import { useSysIcon } from "./sysicons";
+import { sysIconKeys, usePathIcon, useSysIcon } from "./sysicons";
 import { TileGrid } from "./TileGrid";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -35,13 +35,25 @@ function fmtMtime(ts: number): string {
   return sameYear ? md : `${d.getFullYear()}-${md}`;
 }
 
-function KindIcon({ entry }: { entry: DirEntry }) {
-  // 系统真图标（§8 未决 8）优先，其次内置图标集（§4.7），最后通用形状。
-  // hook 必须无条件调用，因此放在 symlink 的早退之前；目录不问系统
-  // （内置集的分类文件夹比系统那张千篇一律的蓝色文件夹信息量大）。
-  const sys = useSysIcon(entry.kind === "file" ? entry.name : null);
-  if (entry.kind === "symlink") return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
-  const src = entry.kind === "dir" ? folderIconUrl(entry.name) : (sys ?? fileIconUrl(entry.name));
+function KindIcon({
+  entry,
+  fullPath,
+  platform,
+}: {
+  entry: DirEntry;
+  fullPath: string | null;
+  platform: Platform;
+}) {
+  // 系统真图标全面接管（负责人 2026-09-20 定：Win/Mac 的图标都从系统读，
+  // 文件夹也是）：bundle/链接按路径取真身 > 按类型取 > 内置集 > 通用形状。
+  // 两个 hook 都无条件调用，早退在其后。
+  const { pathKey, typeKey } = sysIconKeys(entry.kind, entry.name, fullPath, platform);
+  const pathIcon = usePathIcon(pathKey);
+  const typeIcon = useSysIcon(typeKey);
+  const sys = pathIcon ?? typeIcon;
+  if (entry.kind === "symlink" && sys === null)
+    return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
+  const src = sys ?? (entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name));
   if (src)
     return (
       <img
@@ -143,7 +155,11 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
       mono: true,
       render: (e) => (
         <span className={s.nameCell}>
-          <KindIcon entry={e} />
+          <KindIcon
+            entry={e}
+            fullPath={path === null ? null : joinPath(path, e.name, platform)}
+            platform={platform}
+          />
           <span>{e.name}</span>
           {e.target && <span className={s.linkTarget}>→ {e.target}</span>}
         </span>
@@ -198,6 +214,7 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
         ) : viewMode === "tiles" ? (
           <TileGrid
             entries={visible}
+            platform={platform}
             pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
             selected={selected ?? markName ?? null}
             onSelect={setSelected}

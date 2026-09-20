@@ -71,6 +71,12 @@ const cwdCommands = [];
 /** /api/v1/files 收到的完整查询参数（排序/分页的断言点）。 */
 const filesQueries = [];
 
+/** 1×1 红色 PNG：图标与缩略图的 mock 响应共用。 */
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 async function mockApi(page, { platform, osId }) {
   const maps = listings(platform, true);
   let terminalSeq = 0;
@@ -129,22 +135,10 @@ async function mockApi(page, { platform, osId }) {
       const page = limit === undefined ? list : list.slice(offset, offset + limit);
       return json({ path: qpath, entries: page, skipped: found.skipped, total });
     }
-    if (p.includes("/files/icon/")) {
-      // 系统文件类型图标（按扩展名）：与缩略图同一张 1×1 PNG 即可，
-      // 断言只看 <img src="blob:">。
-      const png = Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-        "base64",
-      );
-      return route.fulfill({ status: 200, contentType: "image/png", body: png });
-    }
-    if (p.endsWith("/files/raw")) {
-      // 1×1 红色 PNG。
-      const png = Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-        "base64",
-      );
-      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    if (p.includes("/files/icon/") || p.endsWith("/files/icon-path") || p.endsWith("/files/raw")) {
+      // 系统类型图标（按扩展名 / $dir / $file）、按路径的 bundle 图标、
+      // 缩略图原始字节：同一张 1×1 PNG 即可，断言只看 <img src="blob:">。
+      return route.fulfill({ status: 200, contentType: "image/png", body: PNG_1X1 });
     }
     if (p.endsWith("/terminals/shells")) {
       return json([
@@ -395,6 +389,12 @@ async function unixFlow(browser) {
     timeout: 5000,
   });
   check("列表行用上系统类型图标（/files/icon）", true);
+  // 终端面板是浮层：文件滚动区按面板实测高度留底，最后一行不被盖住。
+  const panelInset = await page.evaluate(() => {
+    const el = document.querySelector('[data-pane="top"] [class*=fileScroll]');
+    return el ? Number.parseFloat(getComputedStyle(el).paddingBottom) : 0;
+  });
+  check("文件区为终端浮层留出底部空白", panelInset >= 20, `padding-bottom=${panelInset}`);
 
   // 再开一个标签 + 切换（此前已有自动 zsh + 下拉 bash）。
   await page.click('[aria-label="新建终端"]');

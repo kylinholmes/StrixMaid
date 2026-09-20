@@ -2,7 +2,8 @@ import { File, Folder, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cx } from "@/lib/cx";
 import { fileIconUrl, folderIconUrl } from "./icons";
-import { useSysIcon } from "./sysicons";
+import type { Platform } from "./path";
+import { sysIconKeys, usePathIcon, useSysIcon } from "./sysicons";
 import { fetchThumb, thumbEligible } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
@@ -37,27 +38,34 @@ function useLazyThumb(path: string, eligible: boolean) {
 function Tile({
   entry,
   path,
+  platform,
   selected,
   onOpen,
   onSelect,
 }: {
   entry: DirEntry;
   path: string;
+  platform: Platform;
   selected: boolean;
   onOpen: () => void;
   onSelect: () => void;
 }) {
   const { ref, url } = useLazyThumb(path, thumbEligible(entry));
-  // 优先级：缩略图 > 系统真图标 > 内置图标集 > 通用形状（与 KindIcon 一致）。
-  const sys = useSysIcon(entry.kind === "file" ? entry.name : null);
-  const builtin =
-    entry.kind === "dir"
+  // 优先级：缩略图 > 按路径的系统真身 > 按类型的系统图标 > 内置集 > 通用形状
+  // （判定与 ListPane 的 KindIcon 共用 sysIconKeys）。
+  const { pathKey, typeKey } = sysIconKeys(entry.kind, entry.name, path, platform);
+  const pathIcon = usePathIcon(pathKey);
+  const typeIcon = useSysIcon(typeKey);
+  const src =
+    pathIcon ??
+    typeIcon ??
+    (entry.kind === "dir"
       ? folderIconUrl(entry.name)
       : entry.kind === "file"
-        ? (sys ?? fileIconUrl(entry.name))
-        : null;
-  const icon = builtin ? (
-    <img src={builtin} width={68} height={68} alt="" />
+        ? fileIconUrl(entry.name)
+        : null);
+  const icon = src ? (
+    <img src={src} width={68} height={68} alt="" />
   ) : entry.kind === "dir" ? (
     <Folder size={44} strokeWidth={1.2} className={s.kindDir} />
   ) : entry.kind === "symlink" ? (
@@ -88,6 +96,7 @@ export interface TileGridProps {
   entries: readonly DirEntry[];
   /** 条目名 → 完整路径（平台感知的拼接在上层做好）。 */
   pathOf: (e: DirEntry) => string;
+  platform: Platform;
   selected: string | null;
   onSelect: (name: string) => void;
   /** 打开一个目录（文件暂无动作）。 */
@@ -95,7 +104,14 @@ export interface TileGridProps {
 }
 
 /** 平铺图标视图（§4.5 的第二种视图）。图片出缩略图（§4.7），其余用类型图标。 */
-export function TileGrid({ entries, pathOf, selected, onSelect, onEnterDir }: TileGridProps) {
+export function TileGrid({
+  entries,
+  pathOf,
+  platform,
+  selected,
+  onSelect,
+  onEnterDir,
+}: TileGridProps) {
   return (
     <div className={s.tileGrid}>
       {entries.map((e) => (
@@ -103,6 +119,7 @@ export function TileGrid({ entries, pathOf, selected, onSelect, onEnterDir }: Ti
           key={e.name}
           entry={e}
           path={pathOf(e)}
+          platform={platform}
           selected={selected === e.name}
           onSelect={() => onSelect(e.name)}
           onOpen={() => {

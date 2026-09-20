@@ -386,5 +386,12 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
      守护进程形态下 AppKit 行为不确定，误开的代价是挂住，宁严勿宽。
    - **Linux**：不做（未决 3 的图标主题问题原样在），恒 404。
    - 缓存照搬 `IconCache`（TTL/负缓存/single-flight），不预热（类型集合事先
-     不可知）。前端 `sysicons.ts` 先拿 `txt` 探测一次，404 就整个会话不再问；
-     文件优先系统图标、回落内置集，目录仍走内置集（分类文件夹信息量更大）。
+     不可知）。前端 `sysicons.ts` 先拿 `txt` 探测一次，404 就整个会话不再问。
+   - **覆盖面（负责人 2026-09-20 追加：Win/Mac 的图标都从系统读，文件夹也是）**：
+     目录与无扩展名文件走保留 key `$dir` / `$file`（`$` 被扩展名消毒拒绝，
+     保留名撞不上真实类型）；macOS 另有 `GET /files/icon-path?path=`——
+     `.app` 这类 bundle 与符号链接按路径 `iconForFile:` 取**这一个条目**的
+     真身（Zed.app 显示 Zed 的 logo）。Windows 不开按路径这条：那是一次以
+     服务进程身份的磁盘访问，与「类型图标不碰磁盘所以可以不经 worker」的
+     前提相抵触；展示范围用与 `/files` 同一对 `normalize`/`is_allowed` 把关。
+     内置图标集降为回落（Linux 的主力）。

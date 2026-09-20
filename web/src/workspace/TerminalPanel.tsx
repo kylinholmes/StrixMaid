@@ -33,8 +33,19 @@ export function TerminalPanel() {
   const setActive = useWorkspace((st) => st.setActive);
   const setPanelHeight = useWorkspace((st) => st.setPanelHeight);
   const setPanelCollapsed = useWorkspace((st) => st.setPanelCollapsed);
+  const setPanelInset = useWorkspace((st) => st.setPanelInset);
   const limit = useWorkspace(atTabLimit);
   const creating = useRef(false);
+  // 面板是浮层，文件区按它的实测高度留底部空白（store.panelInset 的文档）。
+  const sectionRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setPanelInset(el.offsetHeight));
+    ro.observe(el);
+    setPanelInset(el.offsetHeight);
+    return () => ro.disconnect();
+  }, [setPanelInset]);
   /** 上一次开终端失败的原因。开成功或再点一次时清掉。 */
   const [createError, setCreateError] = useState<string | null>(null);
   const [shellMenu, setShellMenu] = useDismiss();
@@ -163,6 +174,7 @@ export function TerminalPanel() {
 
   return (
     <section
+      ref={sectionRef}
       className={cx(s.panel, collapsed && s.panelCollapsed)}
       style={collapsed ? undefined : { height }}
       aria-label="终端面板"
