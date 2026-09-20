@@ -23,6 +23,14 @@ export interface TableProps<T> {
   caption: string;
   /** 行数为 0 时渲染的内容 */
   empty?: ReactNode;
+  /** 表头可点（服务端排序等）。给了它，表头渲染成按钮并回调列 key。 */
+  onHeaderClick?: (key: string) => void;
+  /** 当前排序状态，用于表头的方向指示。仅在 `onHeaderClick` 存在时有意义。 */
+  sortedBy?: { key: string; desc: boolean };
+  /** 表体前的额外行（虚拟滚动的上撑高行等），原样塞进 tbody 顶部。 */
+  leadingRow?: ReactNode;
+  /** 表体后的额外行（虚拟滚动的下撑高行、加载中行等）。 */
+  trailingRow?: ReactNode;
 }
 
 export function Table<T>({
@@ -33,6 +41,10 @@ export function Table<T>({
   onSelect,
   caption,
   empty,
+  onHeaderClick,
+  sortedBy,
+  leadingRow,
+  trailingRow,
 }: TableProps<T>) {
   return (
     <table className={s.table}>
@@ -42,13 +54,30 @@ export function Table<T>({
       <thead>
         <tr>
           {columns.map((c) => (
-            <th key={c.key} className={c.numeric ? s.num : undefined} style={{ width: c.width }}>
-              {c.header}
+            <th
+              key={c.key}
+              className={c.numeric ? s.num : undefined}
+              style={{ width: c.width }}
+              aria-sort={
+                sortedBy?.key === c.key ? (sortedBy.desc ? "descending" : "ascending") : undefined
+              }
+            >
+              {onHeaderClick ? (
+                <button type="button" className={s.sortable} onClick={() => onHeaderClick(c.key)}>
+                  {c.header}
+                  {sortedBy?.key === c.key && (
+                    <span aria-hidden>{sortedBy.desc ? " ↓" : " ↑"}</span>
+                  )}
+                </button>
+              ) : (
+                c.header
+              )}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
+        {leadingRow}
         {rows.length === 0 && empty ? (
           <tr className={s.empty}>
             <td colSpan={columns.length}>{empty}</td>
@@ -87,6 +116,7 @@ export function Table<T>({
             );
           })
         )}
+        {trailingRow}
       </tbody>
     </table>
   );

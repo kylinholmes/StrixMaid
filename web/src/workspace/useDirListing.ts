@@ -1,36 +1,60 @@
-import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect } from "react";
+import { keepPreviousData, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo } from "react";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 
 export type DirListing = components["schemas"]["DirListing"];
+export type DirEntry = components["schemas"]["DirEntryInfo"];
+export type FileSortKey = components["schemas"]["FileSortKey"];
+
+/** 一页多少条（roadmap/12 §4.5 的后端分页）。普通目录一页装完，与旧行为无异。 */
+export const PAGE_SIZE = 500;
+
+export interface DirSort {
+  key: FileSortKey;
+  desc: boolean;
+}
 
 /**
- * 取一个目录的列表，附带 §4.8 的两条刷新路：
+ * 分页取一个目录，附带 §4.8 的两条刷新路：
  *
- * 1. **焦点刷新**：窗口重新获得焦点 / 标签页重新可见时自动重取。目录变化通常
- *    正是使用者自己在下面的终端里造成的，他做完就会看向文件区；
- * 2. **手动刷新**：`refresh()`，给一个位置固定的按钮用。
+ * 1. **焦点刷新**：窗口重新获得焦点 / 标签页重新可见时自动重取（300ms 去重
+ *    ——两个事件几毫秒内先后触发，各刷一次等于把在途请求取消重发）；
+ * 2. **手动刷新**：`refresh()`。
  *
- * 不做推送（inotify 三平台三套实现，代价与收益不匹配——§4.8 的决定）。
- *
- * `placeholderData: keepPreviousData`：刷新与导航时旧列表留在原地，配
- * `ProgressLine` 表示「正在刷新」，而不是闪一下骨架屏——这也是「刷新保住
- * 滚动位置」的一半（另一半是列表容器不重挂）。
+ * 排序在**服务端**做（`sort`/`order`），分页在排序之后切——客户端排序在
+ * 分页面前是错的：本页排得再好也只是全量的一个错误切片。
  */
-export function useDirListing(path: string | null) {
+export function useDirListing(path: string | null, sort: DirSort) {
   const qc = useQueryClient();
-  const query = useQuery({
-    queryKey: ["dir", path],
+  const queryKey = ["dir", path, sort.key, sort.desc] as const;
+
+  const query = useInfiniteQuery({
+    queryKey,
     enabled: path !== null,
     placeholderData: keepPreviousData,
-    queryFn: async (): Promise<DirListing> => {
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<DirListing> => {
       if (path === null) throw new Error("unreachable");
       const { data, error } = await api.GET("/api/v1/files", {
-        params: { query: { path } },
+        params: {
+          query: {
+            path,
+            limit: PAGE_SIZE,
+            offset: pageParam,
+            sort: sort.key,
+            order: sort.desc ? "desc" : "asc",
+          },
+        },
       });
       if (error) throw error;
       return data;
+    },
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + (p.entries?.length ?? 0), 0);
+      // 老服务端没有 total（也不分页）：一页即全部。
+      if (last.total === undefined || last.total === null) return undefined;
+      return loaded < last.total ? loaded : undefined;
     },
   });
 
@@ -40,8 +64,6 @@ export function useDirListing(path: string | null) {
 
   useEffect(() => {
     if (path === null) return;
-    // 切回标签页时 focus 与 visibilitychange 几毫秒内先后触发，
-    // 各刷一次等于把在途请求取消再重发——300ms 内只认第一发。
     let last = 0;
     const onFocus = () => {
       if (document.visibilityState !== "visible") return;
@@ -58,5 +80,24 @@ export function useDirListing(path: string | null) {
     };
   }, [path, refresh]);
 
-  return { ...query, refresh };
+  const entries = useMemo(
+    () => (query.data?.pages ?? []).flatMap((p) => p.entries ?? []),
+    [query.data],
+  );
+  const firstPage = query.data?.pages[0];
+  const total = firstPage?.total ?? entries.length;
+  const skipped = firstPage?.skipped ?? 0;
+
+  return {
+    entries,
+    total,
+    skipped,
+    isPending: query.isPending,
+    isFetching: query.isFetching,
+    error: query.error,
+    hasNextPage: query.hasNextPage,
+    isFetchingNextPage: query.isFetchingNextPage,
+    fetchNextPage: query.fetchNextPage,
+    refresh,
+  };
 }

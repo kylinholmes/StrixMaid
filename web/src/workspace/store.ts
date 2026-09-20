@@ -48,6 +48,10 @@ interface WorkspaceState {
   railCollapsed: boolean;
   /** 隐藏以 `.` 开头的条目（dotfile 约定，三平台一致处理）。 */
   hideHidden: boolean;
+  /** 文件区视图：列表 / 平铺图标（§4.5）。 */
+  viewMode: "list" | "tiles";
+  /** 文件列表的排序状态（服务端排序的参数）。 */
+  dirSort: { key: "name" | "size" | "mtime"; desc: boolean };
 
   addTab(tab: Tab): void;
   removeTab(id: string): void;
@@ -62,6 +66,8 @@ interface WorkspaceState {
   setPanelCollapsed(collapsed: boolean): void;
   toggleRail(): void;
   toggleHidden(): void;
+  setViewMode(mode: "list" | "tiles"): void;
+  setDirSort(sort: { key: "name" | "size" | "mtime"; desc: boolean }): void;
 }
 
 /**
@@ -87,6 +93,8 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   panelCollapsed: false,
   railCollapsed: false,
   hideHidden: false,
+  viewMode: "list",
+  dirSort: { key: "name", desc: false },
 
   addTab: (tab) => set((s) => ({ tabs: [...s.tabs, tab], activeId: tab.id })),
 
@@ -130,4 +138,6 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setPanelCollapsed: (collapsed) => set({ panelCollapsed: collapsed }),
   toggleRail: () => set((s) => ({ railCollapsed: !s.railCollapsed })),
   toggleHidden: () => set((s) => ({ hideHidden: !s.hideHidden })),
+  setViewMode: (mode) => set({ viewMode: mode }),
+  setDirSort: (sort) => set({ dirSort: sort }),
 }));

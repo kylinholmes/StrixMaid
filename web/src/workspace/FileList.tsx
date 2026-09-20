@@ -9,14 +9,14 @@ import {
   Link2,
   RefreshCw,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { components } from "@/api/schema";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   type Column,
   EmptyState,
   ErrorState,
   ProgressLine,
+  Segmented,
   Table,
   TableSkeleton,
   Toolbar,
@@ -25,13 +25,14 @@ import {
 import { fmtBytes } from "@/lib/fmt";
 import { joinPath, type Platform, parentPath } from "./path";
 import { useWorkspace } from "./store";
-import { useDirListing } from "./useDirListing";
+import { TileGrid } from "./TileGrid";
+import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
 
-type DirEntry = components["schemas"]["DirEntryInfo"];
-
-/** 默认渲染的行数上限；普通目录远小于它，只有 WinSxS 这类目录会碰到。 */
-const RENDER_CAP = 500;
+/** 虚拟滚动的行高兜底值；真实值在首行渲染后量出。 */
+const ROW_FALLBACK = 28;
+/** 视口外多渲染几行，滚动时不露白。 */
+const OVERSCAN = 12;
 
 /** `0o644` → `rw-r--r--`。Windows 上是合成值（`providers/fs/windows.rs`），照样能读。 */
 export function fmtMode(mode: number): string {
@@ -72,7 +73,7 @@ export interface FileListProps {
 }
 
 /**
- * 文件只读列表（§4.5 的列表视图）。平铺图标、缩略图、分页都在 D 期。
+ * 文件区（§4.5）：列表视图（虚拟滚动 + 服务端分页排序）与平铺图标视图。
  *
  * 目录项导航一律走 [`joinPath`]——Windows 驱动器根的 `name` 就是完整路径,
  * `joinPath` 知道这件事，组件里不手写拼接。
@@ -87,42 +88,91 @@ export function FileList({
   onForward,
   leading,
 }: FileListProps) {
-  const { data, error, isPending, isFetching, refresh } = useDirListing(path);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [showAll, setShowAll] = useState(false);
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const toggleHidden = useWorkspace((st) => st.toggleHidden);
+  const viewMode = useWorkspace((st) => st.viewMode);
+  const setViewMode = useWorkspace((st) => st.setViewMode);
+  const dirSort = useWorkspace((st) => st.dirSort);
+  const setDirSort = useWorkspace((st) => st.setDirSort);
+
+  const {
+    entries,
+    total,
+    skipped,
+    error,
+    isPending,
+    isFetching,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+    refresh,
+  } = useDirListing(path, dirSort);
+
+  const [selected, setSelected] = useState<string | null>(null);
   /** 地址栏编辑中的值；`null` = 未在编辑，跟随 `path` 显示。 */
   const [editing, setEditing] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // ---- 虚拟滚动：只渲染视口附近的行（§4.5「不能一次渲染出来」）----
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(600);
+  const [rowH, setRowH] = useState(ROW_FALLBACK);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    ro.observe(el);
+    setViewportH(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
+  // 首行真实高度量一次：行高猜错时滚动条与内容错位。
+  const measureRow = useCallback((el: HTMLDivElement | null) => {
+    const tr = el?.querySelector("tbody tr:not([data-spacer])");
+    const h = tr?.getBoundingClientRect().height;
+    if (h && h > 8) setRowH(h);
+  }, []);
 
   // 换目录回到顶部并清选中；刷新（同 path 重取）不走这里，滚动与选中原地保留。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 刻意只对 path 变化生效
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
+    setScrollTop(0);
     setSelected(null);
-    setShowAll(false);
     setEditing(null);
   }, [path]);
 
   const up = path === null ? null : parentPath(path, platform);
 
-  // 隐藏文件按 dotfile 约定过滤（后端不区分平台的 hidden 属性，前端也不猜）。
-  const hiddenCount = hideHidden
-    ? (data?.entries ?? []).filter((e) => e.name.startsWith(".")).length
-    : 0;
-  // 大目录兜底（D 期的分页 + 虚拟滚动到位前）：一次渲染上万行会把页面卡死，
-  // 默认只渲染前 RENDER_CAP 行，其余点「显示全部」明确换取。
-  const allRows = hideHidden
-    ? (data?.entries ?? []).filter((e) => !e.name.startsWith("."))
-    : (data?.entries ?? []);
-  const capped = !showAll && allRows.length > RENDER_CAP;
-  const visibleRows = capped ? allRows.slice(0, RENDER_CAP) : allRows;
+  // 隐藏文件按 dotfile 约定过滤（在已加载的页内做；后端分页不知道这条约定）。
+  const visible = hideHidden ? entries.filter((e) => !e.name.startsWith(".")) : entries;
+  const hiddenCount = hideHidden ? entries.length - visible.length : 0;
 
-  const enter = (entry: DirEntry) => {
-    if (path === null) return;
-    if (entry.kind !== "dir") return;
-    onNavigate(joinPath(path, entry.name, platform));
+  const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
+  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
+  const slice = visible.slice(start, end);
+
+  // 滚近已加载末尾就取下一页。
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && end >= visible.length - OVERSCAN) {
+      void fetchNextPage();
+    }
+  }, [end, visible.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  const enter = useCallback(
+    (entry: DirEntry) => {
+      if (path === null || entry.kind !== "dir") return;
+      onNavigate(joinPath(path, entry.name, platform));
+    },
+    [path, platform, onNavigate],
+  );
+
+  /** 点表头：同键翻方向，异键切键（升序起步）。排序在服务端，翻页也一致。 */
+  const onHeaderClick = (key: string) => {
+    if (key !== "name" && key !== "size" && key !== "mtime") return;
+    const k = key as FileSortKey;
+    setDirSort(dirSort.key === k ? { key: k, desc: !dirSort.desc } : { key: k, desc: false });
   };
 
   const columns: readonly Column<DirEntry>[] = [
@@ -211,6 +261,15 @@ export function FileList({
           spellCheck={false}
         />
         <ToolbarSpacer />
+        <Segmented
+          label="文件视图"
+          options={[
+            { value: "list", label: "列表" },
+            { value: "tiles", label: "平铺" },
+          ]}
+          value={viewMode}
+          onChange={setViewMode}
+        />
         <Button
           iconOnly
           size="sm"
@@ -225,8 +284,12 @@ export function FileList({
         </Button>
       </Toolbar>
       {isFetching && !isPending && <ProgressLine />}
-      <div ref={scrollRef} className={s.fileScroll}>
-        {path === null || (isPending && !data) ? (
+      <div
+        ref={scrollRef}
+        className={s.fileScroll}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      >
+        {path === null || (isPending && entries.length === 0) ? (
           <TableSkeleton />
         ) : error ? (
           <ErrorState
@@ -234,32 +297,48 @@ export function FileList({
             detail={(error as { message?: string }).message ?? String(error)}
             onRetry={refresh}
           />
+        ) : viewMode === "tiles" ? (
+          <TileGrid
+            entries={visible}
+            pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
+            selected={selected}
+            onSelect={setSelected}
+            onEnterDir={enter}
+          />
         ) : (
-          <>
+          <div ref={measureRow}>
             <Table
               caption={`目录 ${path} 的内容`}
               columns={columns}
-              rows={visibleRows}
+              rows={slice}
               rowKey={(e) => e.name}
               selectedKey={selected}
               onSelect={(e) => {
                 setSelected(e.name);
                 enter(e);
               }}
+              onHeaderClick={onHeaderClick}
+              sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
               empty={<EmptyState title="这个目录是空的" />}
+              leadingRow={
+                start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
+              }
+              trailingRow={
+                visible.length - end > 0 && (
+                  <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
+                )
+              }
             />
-            {capped && (
-              <div className={s.showAllRow}>
-                <Button size="sm" onClick={() => setShowAll(true)}>
-                  共 {allRows.length} 项，已显示前 {RENDER_CAP} 项——显示全部
-                </Button>
-              </div>
-            )}
-          </>
+          </div>
         )}
+        {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
+        {total > entries.length && !hasNextPage && null}
         {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
-        {data && (data.skipped ?? 0) > 0 && (
-          <p className={s.skippedNote}>{data.skipped} 个条目因无权限或已消失被跳过</p>
+        {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
+        {total > 0 && (
+          <p className={s.skippedNote}>
+            共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
+          </p>
         )}
       </div>
     </div>

@@ -81,3 +81,17 @@
   height: auto;
   padding: 0;
 }
+
+/* 可排序表头：按钮外观退化成普通表头文字，方向指示由组件渲染。 */
+.sortable {
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sortable:hover {
+  color: var(--ink);
+}
