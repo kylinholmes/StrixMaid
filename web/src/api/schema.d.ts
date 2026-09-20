@@ -2545,6 +2545,16 @@ export interface components {
             last_active_ts: number;
             /**
              * Format: int32
+             * @description worker 内 shell 进程的 pid。
+             *
+             *     给前端在拿不到 OSC 7 时按 `GET /api/v1/processes/{pid}` 轮询 cwd 用
+             *     （`docs/roadmap/12-workspace.md` §4.4 的兜底路径）。已知的坑也记在那里：
+             *     PowerShell 的 `Set-Location` 不改进程 cwd，macOS 的进程 cwd 恒为空。
+             * @example 4242
+             */
+            pid: number;
+            /**
+             * Format: int32
              * @description 当前行数。
              * @example 32
              */

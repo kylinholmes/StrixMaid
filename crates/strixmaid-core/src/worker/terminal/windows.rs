@@ -154,7 +154,15 @@ struct Terminal {
     reaper: Option<JoinHandle<Option<TermExit>>>,
     /// 已经在 `close` 里处理过。
     closed: bool,
+    /// 本条目的「代」。pid 是**会被系统复用的**：`close` 先摘表再等收尸，
+    /// 这个窗口里新开的终端可能拿到同一个 pid 并插进表里。收尸任务与
+    /// 保留期清理只认代号相同的条目，免得把新终端误标 `closed`、
+    /// 误关它的伪控制台（那等于无声杀掉一个无辜的终端）。
+    serial: u64,
 }
+
+/// [`Terminal::serial`] 的来源：进程内单调递增，永不复用。
+static NEXT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Drop for Terminal {
     fn drop(&mut self) {
@@ -245,17 +253,35 @@ impl TerminalTable {
             .await
             .map_err(|e| ApiError::internal("建立终端通道失败").with_detail(e.to_string()))?;
 
+        // 解构成局部变量：下面的 async 块要按字段拿走一部分，整体捕获会把
+        // `job` / `pcon` 一起拖进任务里。
+        let Spawned {
+            pid,
+            process,
+            job,
+            pcon,
+            out_read,
+            in_write,
+        } = spawned;
+
         let sock = Arc::new(worker_side);
-        let pid = spawned.pid;
-        let pumps = vec![
-            tokio::spawn(pump_console_to_socket(spawned.out_read, sock.clone(), pid)),
-            tokio::spawn(pump_socket_to_console(spawned.in_write, sock, pid)),
-        ];
+        let input = tokio::spawn(pump_socket_to_console(in_write, sock.clone(), pid));
+        let input_abort = input.abort_handle();
+        let output = tokio::spawn(async move {
+            pump_console_to_socket(out_read, sock, pid).await;
+            // 输出泵结束 = shell 没了（或主进程侧没了）。命名管道没有半关，
+            // 而通道由两个泵共享（`Arc`）：输入泵还停在「等主进程的键盘输入」上，
+            // 不停掉它，worker 侧就永远不放手，主进程也就永远读不到断开——
+            // 「让主进程读到 EOF」全靠最后一个持有者放手这一件事。
+            input_abort.abort();
+        });
+        let pumps = vec![output, input];
 
         // 收尸任务持 `Weak`：强引用会让「表」和「任务」互相钉住，
         // dispatcher 析构时表就不会被 drop，`Terminal::drop` 里的清理也就不会跑。
         let weak = Arc::downgrade(&self.inner);
-        let reaper = tokio::spawn(reap(weak, pid, spawned.process, self.linger));
+        let serial = NEXT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reaper = tokio::spawn(reap(weak, pid, serial, process, self.linger));
 
         let result = TermOpenResult {
             pid,
@@ -266,11 +292,12 @@ impl TerminalTable {
         self.inner.lock().await.insert(
             pid,
             Terminal {
-                job: Arc::new(spawned.job),
-                pcon: Some(spawned.pcon),
+                job: Arc::new(job),
+                pcon: Some(pcon),
                 pumps,
                 reaper: Some(reaper),
                 closed: false,
+                serial,
             },
         );
         tracing::info!(
@@ -350,6 +377,7 @@ impl TerminalTable {
 async fn reap(
     table: Weak<Mutex<HashMap<u32, Terminal>>>,
     pid: u32,
+    serial: u64,
     process: Owned,
     linger: Duration,
 ) -> Option<TermExit> {
@@ -391,20 +419,33 @@ async fn reap(
 
     if let Some(table) = table.upgrade() {
         let mut lingering = false;
-        if let Some(term) = table.lock().await.get_mut(&pid) {
+        let mut pcon = None;
+        // 只认代号相同的条目：`close` 摘表后到这里之间，这个 pid 可能已被
+        // 系统复用、被一个**新**终端插进表里——动它就是误伤（见 `Terminal::serial`）。
+        if let Some(term) = table.lock().await.get_mut(&pid)
+            && term.serial == serial
+        {
             term.closed = true;
+            // shell 已经退出，但 ConPTY **不会**因此关闭输出管道——EOF 只在
+            // `ClosePseudoConsole` 之后出现。立刻关掉伪控制台，输出泵才会读到
+            // BrokenPipe 收工并放掉通道，主进程才能及时看到 EOF、来取退出码。
+            // 不关的话，要等下面的保留期清理经由 `Terminal::drop` 顺带把它关掉：
+            // 终端在列表里多装几十秒的活，退出码也因条目先过期而丢失
+            // （`roadmap/12-workspace.md` §2.1 实测到的正是这个）。
+            pcon = term.pcon.take();
             lingering = true;
         }
+        // 在锁外关闭：`ClosePseudoConsole` 要等 conhost 排空输出，可能短暂阻塞。
+        drop(pcon);
         if lingering {
             // 条目的正常出口是 `term.close` 来取；这里只兜主进程一直不来的异常
-            // 路径。只清 `closed` 的条目：万一这个 pid 已被一个新终端占用
-            // （新条目 `closed = false`），不能把人家误删。
+            // 路径。同样只清代号相同的条目，不能把复用了 pid 的新终端误删。
             let weak = Arc::downgrade(&table);
             tokio::spawn(async move {
                 tokio::time::sleep(linger).await;
                 let Some(table) = weak.upgrade() else { return };
                 let mut guard = table.lock().await;
-                if guard.get(&pid).is_some_and(|t| t.closed) {
+                if guard.get(&pid).is_some_and(|t| t.closed && t.serial == serial) {
                     guard.remove(&pid);
                     tracing::debug!(pid, "退出状态无人来取，条目过期清除");
                 }
@@ -827,10 +868,10 @@ async fn pump_console_to_socket(out_read: Owned, sink: Arc<IpcChannel>, pid: u32
         }
     }
     let _ = reader.await;
-    // 让主进程读到 EOF——那是它判断「shell 退出了」的唯一信号。
-    // 命名管道没有半关，靠的是这条通道的 worker 侧被 drop（泵结束即最后一个
-    // 持有者放手）时整条管道断开，主进程的读返回 ERROR_BROKEN_PIPE，
-    // `framing::read_frame` 已把它等同于干净 EOF。
+    // 让主进程读到 EOF——那是它判断「shell 退出了」的唯一信号。命名管道没有
+    // 半关，整条管道要等 worker 侧的两个持有者都放手才断开：本泵返回后，
+    // `open` 里包着它的任务会把输入泵也停掉（见那里的说明），主进程的读随即
+    // 返回 ERROR_BROKEN_PIPE，主进程侧的泵把它等同于干净 EOF。
     tracing::debug!(pid, "终端输出泵结束");
 }
 
