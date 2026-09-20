@@ -62,21 +62,56 @@ const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 /// JPEG 输出质量。80 在 256 px 这个尺度上看不出与 95 的差别，体积却只有一半。
 const JPEG_QUALITY: u8 = 80;
 
-/// 本模块认得的扩展名。认不出的不尝试解码——省得把一个 `.bin`
-/// 喂进解码器去试格式。
-///
-/// HEIC / HEIF **不在其中**：纯 Rust 生态里没有可用的解码器，
-/// 而为它引 libheif（C）正是本模块的三层防线要避免的东西。
-/// 这类文件如实没有缩略图，回落系统类型图标。
-pub fn supported(file: &Path) -> bool {
-    let ext = file
-        .extension()
+/// 取小写扩展名。
+fn ext_of(file: &Path) -> String {
+    file.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// 纯 Rust 解码器认得的扩展名。认不出的不尝试解码——省得把一个 `.bin`
+/// 喂进解码器去试格式。
+fn rust_decodable(file: &Path) -> bool {
     matches!(
-        ext.as_str(),
+        ext_of(file).as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
     )
+}
+
+/// **只有 macOS**：借系统解码器（ImageIO，经 [`crate::platform::appkit`]）
+/// 处理纯 Rust 确实解不了的格式。目前只有 HEIC / HEIF 一类。
+///
+/// # 为什么对 HEIC 破一次例
+///
+/// HEIC 的图像项是 **HEVC 编码**的，而且容器里没有可捡的现成预览——实测
+/// Apple 的 HEIC 只有 `hvc1` 瓦片加一个 `grid`，连 JPEG 编码的项都没有，
+/// 所以 JPEG 那条「零解码」的便宜路在这里不存在。纯 Rust 生态至今没有
+/// HEVC 解码器（AV1 有 rav1d，HEVC 没有——能力不是问题，专利格局把生态的
+/// 投入都改道去了 AV1）。可选项只有三个：不支持、引 libheif（C++ 的 HEVC
+/// 解码器，正是三层防线要挡的那一类，还会破坏 musl 静态链接）、或者借系统的。
+///
+/// 借系统这条**风险最小**：ImageIO 是 C 写的、历史上有过 CVE，这点不隐瞒，
+/// 但它是 Finder、预览、快速查看在**同一批文件**上天天跑的同一个解码器——
+/// 用户的 Mac 本来就在解这些文件，我们没有引入一个新的攻击面，只是复用了
+/// 已经在那儿的那个。而 libheif 是往进程里请一个**新的** C++ 解码器。
+///
+/// 仍然只对 HEIC 开：别的格式纯 Rust 解得了，就走纯 Rust。
+fn system_decodable(file: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(ext_of(file).as_str(), "heic" | "heif")
+            && crate::platform::appkit::available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+/// 本机能不能给这个文件出缩略图（两条路任一认得即可）。
+pub fn supported(file: &Path) -> bool {
+    rust_decodable(file) || system_decodable(file)
 }
 
 /// 出一张缩略图。同步、阻塞，调用方负责 `spawn_blocking`。
@@ -101,6 +136,13 @@ pub fn thumb_blocking(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
             "{} 不是支持的图片格式",
             file.display()
         )));
+    }
+
+    // 纯 Rust 解不了、但系统解得了的（macOS 的 HEIC）：整个文件交给系统
+    // 解码器，拿回像素再走本模块统一的编码判据。ImageIO 自己会应用方向，
+    // 所以这里报 1（正立）——再转一次就转过头了。
+    if !rust_decodable(file) {
+        return system_thumb(file, max_px);
     }
 
     let bytes = std::fs::read(file).map_err(|e| io_err(file, &e))?;
@@ -130,6 +172,35 @@ pub fn thumb_blocking(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
     std::panic::catch_unwind(|| decode_and_scale(&bytes, max_px, orientation)).map_err(|_| {
         ApiError::invalid_request(format!("{} 解码失败（图片已损坏）", file.display()))
     })?
+}
+
+/// 借系统解码器出缩略图（见 [`system_decodable`]）。
+///
+/// 只有解码这一步借系统，缩放由系统顺手做了（它画进多大的位图就是多大），
+/// **编码仍走 [`encode_thumb`]**——PNG 还是 JPEG 只有一处判据。
+fn system_thumb(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = file.to_str().ok_or_else(|| {
+            ApiError::invalid_request(format!("{} 的路径不是合法 UTF-8", file.display()))
+        })?;
+        let (w, h, rgba) = crate::platform::appkit::decode_rgba(path, max_px).ok_or_else(|| {
+            ApiError::invalid_request(format!("{} 系统解码器也解不了", file.display()))
+        })?;
+        let img = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| {
+            ApiError::internal("系统解码器给出的像素缓冲与尺寸对不上")
+        })?;
+        // ImageIO 解码时已经把 EXIF 方向应用过了，这里报正立。
+        encode_thumb(&image::DynamicImage::ImageRgba8(img), 1)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = max_px;
+        Err(ApiError::invalid_request(format!(
+            "{} 不是支持的图片格式",
+            file.display()
+        )))
+    }
 }
 
 /// 解码 + 缩放 + 编码。与 [`thumb_blocking`] 分开是为了让 `catch_unwind`
@@ -169,23 +240,30 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
     } else {
         img.thumbnail(max_px, max_px)
     };
-    let (tw, th) = (small.width(), small.height());
+    encode_thumb(&small, orientation)
+}
 
-    let has_alpha = small.color().has_alpha();
+/// 缩好的图 → `FsThumb`。**格式判据只有这一处**，两条解码路共用。
+///
+/// 判据不是「声明里有没有 alpha 通道」而是「**真的用到了没有**」：
+/// 系统解码器一律给 RGBA，截图导出的 PNG 也常是全不透明的 RGBA——
+/// 按声明判会把一张 20 KB 的照片编成 150 KB 的 PNG。
+fn encode_thumb(img: &image::DynamicImage, orientation: u8) -> ApiResult<FsThumb> {
+    let (tw, th) = (img.width(), img.height());
+    let transparent = img.color().has_alpha()
+        && img.to_rgba8().pixels().any(|p| p.0[3] != 255);
+
     let mut out = Vec::with_capacity(64 * 1024);
-    let mime = if has_alpha {
-        small
-            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+    let mime = if transparent {
+        img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .map_err(|e| ApiError::internal("缩略图编码失败").with_detail(e.to_string()))?;
         "image/png"
     } else {
         // 转成 RGB8 再编：JPEG 编码器不接受带 alpha 的输入，
-        // 而上面的分支已经把真有 alpha 的挑走了。
-        let rgb = small.to_rgb8();
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            Cursor::new(&mut out),
-            JPEG_QUALITY,
-        );
+        // 而上面的分支已经把真有透明的挑走了。
+        let rgb = img.to_rgb8();
+        let mut enc =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut out), JPEG_QUALITY);
         enc.encode_image(&rgb)
             .map_err(|e| ApiError::internal("缩略图编码失败").with_detail(e.to_string()))?;
         "image/jpeg"
@@ -526,14 +604,64 @@ mod tests {
     #[test]
     fn 不支持的扩展名直接拒绝() {
         let dir = TempDir::new("ext");
-        let f = dir.join("x.heic");
-        std::fs::write(&f, b"whatever").unwrap();
-        // HEIC 没有纯 Rust 解码器，如实拒绝而不是喂进解码器碰运气。
-        assert!(thumb_blocking(&f, 256).is_err());
-        assert!(!supported(&f));
+        for bad in ["x.txt", "x.pdf", "x.svg", "x.mp4", "x"] {
+            let f = dir.join(bad);
+            std::fs::write(&f, b"whatever").unwrap();
+            // 认不出的不喂进解码器碰运气。
+            assert!(!supported(&f), "{bad} 不该被当成图片");
+            assert!(thumb_blocking(&f, 256).is_err(), "{bad} 应当报错");
+        }
         for ok in ["a.jpg", "a.JPEG", "a.png", "a.gif", "a.webp", "a.bmp"] {
             assert!(supported(Path::new(ok)), "{ok} 应当支持");
         }
+    }
+
+    #[test]
+    fn heic_只在_macos_且有窗口服务器时支持() {
+        // HEIC 的图像项是 HEVC 编码的、容器里也没有可捡的 JPEG 预览，
+        // 所以它是唯一一个借系统解码器的格式，见 `system_decodable`。
+        let heic = Path::new("a.heic");
+        assert!(!rust_decodable(heic), "纯 Rust 解不了 HEIC");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            supported(heic),
+            crate::platform::appkit::available(),
+            "macOS 上支持与否应当跟着窗口服务器连接走"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(!supported(heic), "macOS 之外没有这条路");
+    }
+
+    #[test]
+    fn 系统解码器出得了_heic_缩略图() {
+        if !system_decodable(Path::new("x.heic")) {
+            eprintln!("本平台 / 本环境没有系统解码器这条路，跳过");
+            return;
+        }
+        // 桌面图片是任何 macOS 上都有的 HEIC 样本；没有就跳过（精简系统）。
+        let 样本 = ["/System/Library/Desktop Pictures/Mac Blue.heic"]
+            .into_iter()
+            .map(Path::new)
+            .find(|p| p.is_file());
+        let Some(src) = 样本 else {
+            eprintln!("本机没有可用的 HEIC 样本，跳过");
+            return;
+        };
+        let t = thumb_blocking(src, 256).expect("HEIC 应当出得了缩略图");
+        assert!(t.width.max(t.height) <= 256, "{}×{} 超尺寸", t.width, t.height);
+        assert!(!t.embedded, "HEIC 没有内嵌预览可捡，只能是解码出来的");
+        assert_eq!(t.orientation, 1, "ImageIO 已应用方向，不该再让前端转一次");
+        let bytes = hex::decode(&t.data_hex).unwrap();
+        assert!(bytes.len() <= FS_THUMB_MAX_BYTES);
+        // 解出来的必须是一张能再读回去的图，且不是一片空白。
+        let back = image::load_from_memory(&bytes).expect("输出应当是合法图片");
+        assert_eq!((back.width(), back.height()), (t.width, t.height));
+        let rgb = back.to_rgb8();
+        let 首像素 = rgb.pixels().next().unwrap().0;
+        assert!(
+            rgb.pixels().any(|p| p.0 != 首像素),
+            "整张图一个颜色，多半是画失败了"
+        );
     }
 
     #[test]

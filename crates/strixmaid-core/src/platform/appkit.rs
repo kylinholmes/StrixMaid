@@ -155,6 +155,14 @@ unsafe fn msg_usize(obj: Id, sel: Sel) -> NSUInteger {
     unsafe { msg_send!(NSUInteger,)(obj, sel) }
 }
 
+/// 返回 `NSSize`（= `CGSize`，两个 f64）的消息。
+///
+/// 两个平台都走普通 `objc_msgSend` 而不是 `objc_msgSend_stret`：同构浮点
+/// 聚合在 arm64 走 v0/v1、在 x86_64 走 xmm0/xmm1，都不是内存返回。
+unsafe fn msg_size(obj: Id, sel: Sel) -> CGSize {
+    unsafe { msg_send!(CGSize,)(obj, sel) }
+}
+
 unsafe fn msg_ptr(obj: Id, sel: Sel) -> *const u8 {
     unsafe { msg_send!(*const u8,)(obj, sel) }
 }
@@ -313,6 +321,137 @@ pub fn file_icon_png(path: &str, size: u32) -> Option<Vec<u8>> {
             return None;
         }
         render_png(image, size)
+    }
+}
+
+/// 借系统解码器把一张图解成 RGBA 像素，最长边不超过 `max_px`（不放大）。
+///
+/// 存在的唯一理由是 **HEIC**：它的图像项是 HEVC 编码的，容器里也没有 JPEG
+/// 预览可捡（实测 Apple 的 HEIC 只有 `hvc1` 瓦片 + `grid`），而纯 Rust 生态
+/// 至今没有 HEVC 解码器——细节见 `providers/fs/thumb.rs` 的模块文档。
+///
+/// **只返回像素，不编码**：编成 PNG 还是 JPEG 由 `providers/fs/thumb` 统一
+/// 决定，那里已经有一套判据（看有没有真的用到 alpha），不要在这里开第二处。
+///
+/// 返回 `(宽, 高, RGBA 紧凑缓冲)`。解不了返回 `None`——`NSImage` 对认不出的
+/// 文件就是返回 nil，不报错。
+pub fn decode_rgba(path: &str, max_px: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let c_path = CString::new(path).ok()?;
+    let _pool = Pool::new();
+    // SAFETY: 对象生命周期由 pool 与显式 release 管理；各消息签名见 msg_* 包装。
+    unsafe {
+        let ns_path = ns_string(&c_path)?;
+        let image = msg_id_id(
+            msg_id(cls(c"NSImage")?, sel(c"alloc")),
+            sel(c"initWithContentsOfFile:"),
+            ns_path,
+        );
+        if image.is_null() {
+            return None;
+        }
+        let out = decode_rgba_inner(image, max_px);
+        // alloc/init 出来的归我们释放。
+        msg_void(image, sel(c"release"));
+        out
+    }
+}
+
+/// [`decode_rgba`] 的中段，拆出来让 `image` 的 release 只在一处成对。
+///
+/// # Safety
+///
+/// `image` 必须是有效的 `NSImage`。
+unsafe fn decode_rgba_inner(image: Id, max_px: u32) -> Option<(u32, u32, Vec<u8>)> {
+    unsafe {
+        // `[img size]` 给的是点（point）不是像素，但对文件来源的位图两者一致。
+        let size = msg_size(image, sel(c"size"));
+        let (w, h) = (size.width, size.height);
+        if !(w >= 1.0 && h >= 1.0) || w > 100_000.0 || h > 100_000.0 {
+            return None;
+        }
+        // 等比缩到 max_px 以内；本来就小的不放大（与纯 Rust 那条路一致）。
+        let scale = (f64::from(max_px) / w.max(h)).min(1.0);
+        let tw = (w * scale).round().max(1.0) as u32;
+        let th = (h * scale).round().max(1.0) as u32;
+
+        let rep = msg_init_bitmap(
+            msg_id(cls(c"NSBitmapImageRep")?, sel(c"alloc")),
+            sel(
+                c"initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:",
+            ),
+            std::ptr::null_mut(),
+            tw as NSInteger,
+            th as NSInteger,
+            8,
+            4,
+            1,
+            0,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        );
+        if rep.is_null() {
+            return None;
+        }
+        let out = draw_and_read(image, rep, tw, th);
+        msg_void(rep, sel(c"release"));
+        out
+    }
+}
+
+/// 把 `image` 画满 `rep` 并把像素按紧凑 RGBA 读出来。
+///
+/// # Safety
+///
+/// `image` 与 `rep` 必须有效，`rep` 的尺寸必须是 `tw`×`th`、RGBA8 交错。
+unsafe fn draw_and_read(image: Id, rep: Id, tw: u32, th: u32) -> Option<(u32, u32, Vec<u8>)> {
+    unsafe {
+        let ctx_cls = cls(c"NSGraphicsContext")?;
+        let ctx = msg_id_id(ctx_cls, sel(c"graphicsContextWithBitmapImageRep:"), rep);
+        if ctx.is_null() {
+            return None;
+        }
+        msg_void(ctx_cls, sel(c"saveGraphicsState"));
+        msg_void_id(ctx_cls, sel(c"setCurrentContext:"), ctx);
+        msg_draw_in_rect(
+            image,
+            sel(c"drawInRect:fromRect:operation:fraction:"),
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: f64::from(tw),
+                    height: f64::from(th),
+                },
+            },
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: 0.0,
+                    height: 0.0,
+                },
+            },
+            SOURCE_OVER,
+            1.0,
+        );
+        msg_void(ctx_cls, sel(c"restoreGraphicsState"));
+
+        // **必须按 bytesPerRow 逐行拷**：AppKit 会为对齐在行尾留填充，
+        // 直接整块拷会得到一张逐行错位、越往下越斜的图。
+        let data = msg_ptr(rep, sel(c"bitmapData"));
+        if data.is_null() {
+            return None;
+        }
+        let stride = msg_usize(rep, sel(c"bytesPerRow"));
+        let row = tw as usize * 4;
+        if stride < row {
+            return None;
+        }
+        let mut buf = Vec::with_capacity(row * th as usize);
+        for y in 0..th as usize {
+            let line = std::slice::from_raw_parts(data.add(y * stride), row);
+            buf.extend_from_slice(line);
+        }
+        Some((tw, th, buf))
     }
 }
 

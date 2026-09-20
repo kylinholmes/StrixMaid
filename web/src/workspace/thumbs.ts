@@ -14,8 +14,17 @@ import type { DirEntry } from "./useDirListing";
  * 同一条路，见 `api/client.ts` 的 `authHeaders`）。
  */
 
-/** 服务端出得了缩略图的扩展名（与 `providers/fs/thumb.rs` 的 `supported` 对齐）。 */
-const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+/**
+ * 服务端**可能**出得了缩略图的扩展名（与 `providers/fs/thumb.rs` 的
+ * `supported` 对齐）。
+ *
+ * `heic` / `heif` 只有 macOS 后端解得了（借系统解码器），而前端分不出
+ * mac 与 linux（`Platform` 只有 unix/windows）。仍然把它们列进来：代价是
+ * Linux 后端上每个 HEIC 文件换回一个 400 并落一条负缓存，而懒加载只对
+ * **进了视口的**条目发请求，一屏最多几十个，之后不再重试。反过来把它们
+ * 排除掉的代价是 mac 上永远看不到 iPhone 照片的预览图——那才是真损失。
+ */
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif"]);
 
 /**
  * 这个条目该不该出缩略图。
