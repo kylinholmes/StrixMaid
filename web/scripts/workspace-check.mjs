@@ -210,7 +210,7 @@ async function mockApi(page, { platform, osId }) {
 }
 
 async function unixFlow(browser) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ reducedMotion: "reduce" });
   page.on("pageerror", (e) => check("页面无未捕获异常", false, String(e)));
   await mockApi(page, { platform: "unix", osId: "ubuntu" });
   await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
@@ -422,7 +422,7 @@ async function unixFlow(browser) {
 }
 
 async function windowsFlow(browser) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ reducedMotion: "reduce" });
   await mockApi(page, { platform: "windows", osId: "windows" });
   await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
   filesRequests.length = 0;

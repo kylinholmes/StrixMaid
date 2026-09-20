@@ -118,6 +118,14 @@
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden; /* 层叠动画的平移不许露出容器 */
+}
+
+/* 一「层」目录。层叠导航同屏最多两层，DOM 顺序即层序。 */
+.pane {
+  position: absolute;
+  inset: 0;
+  background: var(--ground);
 }
 
 .fileScroll {
@@ -125,6 +133,80 @@
   inset: 0;
   overflow: auto;
   scrollbar-width: none;
+}
+
+/* ------------------------- 层叠导航（macOS 推入手感） ------------------------- */
+
+@keyframes pane-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes pane-out-right {
+  from {
+    transform: none;
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pane-under-away {
+  from {
+    transform: none;
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-14%);
+    opacity: 0.55;
+  }
+}
+
+@keyframes pane-under-back {
+  from {
+    transform: translateX(-14%);
+    opacity: 0.55;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* 进子目录：新层从右推入，左缘投影强调「叠在上面」。 */
+.panePushIn {
+  animation: pane-in-right var(--t-shape) var(--ease);
+  box-shadow: -14px 0 28px rgb(0 0 0 / 16%);
+}
+
+/* 回祖先：顶层滑出让位。forwards 钉住终态，等状态机把它卸掉。 */
+.panePopOut {
+  animation: pane-out-right var(--t-shape-out) var(--ease) forwards;
+  box-shadow: -14px 0 28px rgb(0 0 0 / 16%);
+  pointer-events: none;
+}
+
+/* 垫底的旧层：向左略退并压暗，动画期间不可交互。 */
+.paneUnderPush {
+  animation: pane-under-away var(--t-shape) var(--ease) forwards;
+  pointer-events: none;
+}
+
+.paneUnderPop {
+  animation: pane-under-back var(--t-shape-out) var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panePushIn,
+  .panePopOut,
+  .paneUnderPush,
+  .paneUnderPop {
+    animation: none;
+  }
 }
 
 .fileScroll::-webkit-scrollbar {

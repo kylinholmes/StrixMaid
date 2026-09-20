@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   guessHome,
+  isDescendant,
   isDriveRoot,
   isVirtualRoot,
   joinPath,
@@ -67,4 +68,21 @@ describe("splitForCompletion", () => {
       prefix: "ky",
     }));
   it("windows 裸盘符不补", () => expect(splitForCompletion("C:", "windows")).toBeNull());
+});
+
+describe("isDescendant", () => {
+  it("unix 直接与隔代子目录", () => {
+    expect(isDescendant("/a/b", "/a", "unix")).toBe(true);
+    expect(isDescendant("/a/b/c", "/a", "unix")).toBe(true);
+    expect(isDescendant("/a", "/a", "unix")).toBe(false);
+    expect(isDescendant("/ab", "/a", "unix")).toBe(false);
+    expect(isDescendant("/a", "/a/b", "unix")).toBe(false);
+    expect(isDescendant("/a/b", "/", "unix")).toBe(true);
+  });
+  it("windows 大小写不敏感 + 虚拟根", () => {
+    expect(isDescendant("C:\\Users\\kylin", "c:\\users", "windows")).toBe(true);
+    expect(isDescendant("C:\\Users", "C:\\", "windows")).toBe(true);
+    expect(isDescendant("C:\\", "\\", "windows")).toBe(true);
+    expect(isDescendant("D:\\x", "C:\\", "windows")).toBe(false);
+  });
 });
