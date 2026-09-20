@@ -147,6 +147,9 @@ export function FileList({
   const up = parent;
   /** 祖父层：近乎不可见的第三层，整条边可点 = 返回上一级（负责人定）。 */
   const grand = parent === null ? null : parentPath(parent, platform);
+  /** 层叠只属于列表模式（负责人 2026-09-20 定）：平铺是平面网格，垫层
+   *  透出来只会让边上多出一条莫名其妙的条纹，永远单层、不演推入。 */
+  const layered = viewMode === "list";
 
   // 常驻两层：垫层永远是父目录（key 稳定——push 时旧顶层同 key 原地降级，
   // 位置/压暗由 CSS 过渡接管）；再叠一条可点的「返回」边；pop 的旧顶层
@@ -161,7 +164,7 @@ export function FileList({
     parent !== null && grand !== null
       ? parent.slice(grand.length).replace(/^[\\/]/, "") || parent
       : null;
-  if (grand !== null) {
+  if (layered && grand !== null) {
     panes.push(
       <ListPane
         key={`p:${grand}`}
@@ -184,7 +187,7 @@ export function FileList({
       </button>,
     );
   }
-  if (parent !== null) {
+  if (layered && parent !== null) {
     panes.push(
       <ListPane
         key={`p:${parent}`}
@@ -205,12 +208,12 @@ export function FileList({
       onNavigate={onNavigate}
       pane="top"
       className={cx(
-        parent !== null && (grand !== null ? s.paneTop3 : s.paneTop),
-        pushAnim && s.panePushIn,
+        layered && parent !== null && (grand !== null ? s.paneTop3 : s.paneTop),
+        layered && pushAnim && s.panePushIn,
       )}
     />,
   );
-  if (leaving !== null) {
+  if (layered && leaving !== null) {
     panes.push(
       <ListPane
         key={`p:${leaving}`}
