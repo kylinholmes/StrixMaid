@@ -3,7 +3,7 @@ import { cx } from "@/lib/cx";
 import { fileIconUrl, folderIconUrl } from "./icons";
 import type { Platform } from "./path";
 import { entrySubject, useEntryIcon } from "./sysicons";
-import { thumbEligible, useLazyThumb } from "./thumbs";
+import { orientationTransform, thumbEligible, useLazyThumb } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
 
@@ -22,7 +22,7 @@ function Tile({
   onOpen: () => void;
   onSelect: () => void;
 }) {
-  const { ref, url } = useLazyThumb<HTMLDivElement>(path, thumbEligible(entry));
+  const { ref, thumb } = useLazyThumb<HTMLDivElement>(path, thumbEligible(entry));
   // 优先级：缩略图 > 系统真图标（按路径/按类型，判定在 iconKeysOf 里编译期
   // 穷尽）> 内置集 > 通用形状，与 ListPane 的 KindIcon 完全一致。
   const sys = useEntryIcon(entrySubject(entry, path), platform);
@@ -54,7 +54,16 @@ function Tile({
       }}
     >
       <div ref={ref} className={s.tileIcon}>
-        {url ? <img src={url} alt="" loading="lazy" /> : icon}
+        {thumb ? (
+          <img
+            src={thumb.url}
+            alt=""
+            loading="lazy"
+            style={{ transform: orientationTransform(thumb.orientation) }}
+          />
+        ) : (
+          icon
+        )}
       </div>
       <span className={s.tileName}>{entry.name}</span>
     </button>

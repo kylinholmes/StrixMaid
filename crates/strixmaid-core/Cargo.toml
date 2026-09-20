@@ -12,6 +12,26 @@ async-trait = "0.1.92"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 futures = "0.3.34"
 hex = "0.4.3"
+# 缩略图的解码与缩放（roadmap/12 §4.7，2026-09-21 负责人定：服务端出真缩略图）。
+#
+# 这条依赖推翻了 §4.7 原先「worker 不进图片解码库」的决定，理由与代价都写在
+# `providers/fs/thumb.rs` 的模块文档里，一句话：相机直出的照片动辄 20 MiB，
+# 「下发原图让浏览器缩」在真实照片目录上等于没有缩略图。
+#
+# 风险按三层压：① 相机 JPEG 走 EXIF 内嵌预览，**根本不解码**；② 真要解码时
+# 先读文件头拿尺寸，像素数超限直接拒绝；③ 解码器本身是纯 Rust（zune-jpeg /
+# png / image-webp），越界即 panic 而不是可利用的内存破坏，且跑在 worker
+# 的登录用户身份下、被 `catch_unwind` 兜住。
+#
+# default-features = false：只开真的会遇到的五种格式。开全（tiff/hdr/exr/pnm…）
+# 会把二进制推向 15 MiB 的体积门槛，且那些格式的解码器是最少被人审的那批。
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "bmp",
+] }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

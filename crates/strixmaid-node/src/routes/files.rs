@@ -33,7 +33,10 @@ use strixmaid_core::providers::fs::icon::FileTypeIcons;
 use strixmaid_core::session::Session;
 use strixmaid_types::ApiError;
 use strixmaid_types::file::{DirListing, FileContent, FileListQuery, FilePathQuery};
-use strixmaid_types::rpc::{self, FS_RAW_MAX_CHUNK, FsListParams, FsParams, FsRawChunk, FsRawParams};
+use strixmaid_types::rpc::{
+    self, FS_RAW_MAX_CHUNK, FS_THUMB_MAX_PX, FsListParams, FsParams, FsRawChunk, FsRawParams,
+    FsThumb, FsThumbParams,
+};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -83,7 +86,61 @@ pub fn router(state: FilesState) -> OpenApiRouter<()> {
         .routes(routes!(raw_file))
         .routes(routes!(type_icon))
         .routes(routes!(path_icon))
+        .routes(routes!(thumb))
         .with_state(state)
+}
+
+/// 图片缩略图
+///
+/// 在会话的 worker 内缩好再下发（roadmap/12 §4.7，2026-09-21 改判）：
+/// 一张 20 MiB 的照片出去的只有几 KB。相机 JPEG 走 EXIF 内嵌预览、完全不解码；
+/// 其余真解码缩放，带像素数上限与 panic 兜底。
+#[utoipa::path(
+    get,
+    path = "/files/thumb",
+    tag = "files",
+    params(FilePathQuery),
+    security(("bearer" = [])),
+    responses(
+        // body 用 `String` 表达二进制体的理由见 `processes::icon`。
+        (status = 200, description = "缩略图（原始 JPEG / PNG 字节）", content_type = "image/jpeg", body = String),
+        (status = 400, description = "路径不合法、不是图片、格式不支持或图片已损坏", body = ApiError),
+        (status = 401, description = "未认证，或会话的 worker 已退出", body = ApiError),
+        (status = 403, description = "无权限读取，或路径在 files.allowed_roots 之外", body = ApiError),
+        (status = 404, description = "文件不存在", body = ApiError),
+    ),
+)]
+pub async fn thumb(
+    State(st): State<FilesState>,
+    Extension(session): Extension<Session>,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Response> {
+    let thumb: FsThumb = exec::call(
+        &st.auth,
+        &session,
+        Privilege::User,
+        rpc::FS_THUMB,
+        FsThumbParams {
+            path: q.path,
+            allowed_roots: (*st.allowed_roots).clone(),
+            max_px: FS_THUMB_MAX_PX,
+        },
+    )
+    .await?;
+    let bytes = hex::decode(&thumb.data_hex)
+        .map_err(|e| ApiError::internal("缩略图不是合法 hex").with_detail(e.to_string()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, thumb.mime.clone()),
+            // 内容随文件变，而 URL 里只有路径：短缓存 + 前端自己的会话级
+            // object URL 缓存足够，改了图刷新页面就能看到新的。
+            (header::CACHE_CONTROL, "max-age=60".to_owned()),
+            // EXIF 方向交给前端转（服务端转就得解码，见 FsThumb::orientation）。
+            ("x-thumb-orientation".parse().unwrap(), thumb.orientation.to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// 具体条目的系统图标（按路径，macOS）

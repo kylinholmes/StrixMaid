@@ -137,8 +137,18 @@ async function mockApi(page, { platform, osId }) {
     }
     if (p.includes("/files/icon/") || p.endsWith("/files/icon-path") || p.endsWith("/files/raw")) {
       // 系统类型图标（按扩展名 / $dir / $file）、按路径的 bundle 图标、
-      // 缩略图原始字节：同一张 1×1 PNG 即可，断言只看 <img src="blob:">。
+      // 原始字节：同一张 1×1 PNG 即可，断言只看 <img src="blob:">。
       return route.fulfill({ status: 200, contentType: "image/png", body: PNG_1X1 });
+    }
+    if (p.endsWith("/files/thumb")) {
+      // 服务端缩好的缩略图（§4.7 改判后的那条路）。方向头一并给上：
+      // 前端要按它转，给 6（顺时针 90°）才能断言真的读了这个头。
+      return route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: { "x-thumb-orientation": "6" },
+        body: PNG_1X1,
+      });
     }
     if (p.endsWith("/terminals/shells")) {
       return json([
@@ -380,6 +390,16 @@ async function unixFlow(browser) {
     timeout: 5000,
   });
   check("列表行的图片出小缩略图", true);
+  // EXIF 方向必须真的被用上：mock 给的是 6（顺时针 90°）。
+  const rotated = await page.evaluate(() => {
+    const img = document.querySelector('[data-pane="top"] [class*=thumbMini]');
+    return img ? getComputedStyle(img).transform : "";
+  });
+  check(
+    "缩略图按 EXIF 方向旋转",
+    rotated.startsWith("matrix") && rotated !== "matrix(1, 0, 0, 1, 0, 0)",
+    rotated,
+  );
 
   // 平铺视图 + 缩略图：logo.png 出图，目录出图标。
   await page.getByRole("button", { name: "平铺", exact: true }).click();

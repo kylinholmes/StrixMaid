@@ -9,7 +9,7 @@ import { joinPath, type Platform } from "./path";
 import { useWorkspace } from "./store";
 import { entrySubject, useEntryIcon } from "./sysicons";
 import { TileGrid } from "./TileGrid";
-import { thumbEligible, useLazyThumb } from "./thumbs";
+import { orientationTransform, thumbEligible, useLazyThumb } from "./thumbs";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
 
@@ -48,13 +48,22 @@ function KindIcon({
   // 图标优先级与平铺完全一致：缩略图 > 系统真图标（判定在 iconKeysOf 里
   // 编译期穷尽）> 内置集 > 通用形状。缩略图懒加载——虚拟滚动已把行数限在
   // 视口附近，进入视口的行才发 /files/raw。
-  const { ref, url: thumb } = useLazyThumb<HTMLSpanElement>(
+  const { ref, thumb } = useLazyThumb<HTMLSpanElement>(
     fullPath ?? "",
     fullPath !== null && thumbEligible(entry),
   );
   const sys = useEntryIcon(entrySubject(entry, fullPath), platform);
   const inner = (() => {
-    if (thumb) return <img className={s.thumbMini} src={thumb} alt="" loading="lazy" />;
+    if (thumb)
+      return (
+        <img
+          className={s.thumbMini}
+          src={thumb.url}
+          alt=""
+          loading="lazy"
+          style={{ transform: orientationTransform(thumb.orientation) }}
+        />
+      );
     if (entry.kind === "symlink" && sys === null)
       return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
     const src = sys ?? (entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name));

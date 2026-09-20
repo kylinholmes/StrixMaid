@@ -385,11 +385,20 @@ fn register_fs(d: &mut Dispatcher) {
         }
     });
 
+    let f = fs.clone();
     d.register_fn(rpc::FS_RAW, move |v| {
-        let f = fs.clone();
+        let f = f.clone();
         async move {
             let q: rpc::FsRawParams = params(rpc::FS_RAW, v)?;
             result(f.raw(&q.path, &q.allowed_roots, q.offset, q.len).await?)
+        }
+    });
+
+    d.register_fn(rpc::FS_THUMB, move |v| {
+        let f = fs.clone();
+        async move {
+            let q: rpc::FsThumbParams = params(rpc::FS_THUMB, v)?;
+            result(f.thumb(&q.path, &q.allowed_roots, q.max_px).await?)
         }
     });
 }
