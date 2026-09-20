@@ -67,10 +67,16 @@ export function TerminalPanel() {
           );
           return;
         }
-        // 列表接口才有 shell 等元数据；此处用默认名，附着后标题无关紧要。
+        // 列表接口才有 shell / pid 等元数据（cwd 联动要用 pid 与 shell 方言）。
         const { data: list } = await api.GET("/api/v1/terminals");
         const info = list?.find((t) => t.id === data.id);
-        addTab({ id: data.id, title: info ? titleOf(info.shell) : "shell", status: "live" });
+        addTab({
+          id: data.id,
+          title: info ? titleOf(info.shell) : "shell",
+          status: "live",
+          shell: info?.shell,
+          pid: info?.pid,
+        });
         setPanelCollapsed(false);
       } finally {
         creating.current = false;

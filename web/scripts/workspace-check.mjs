@@ -55,6 +55,7 @@ function listings(platform, big) {
       skipped: 0,
     },
     "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
+    "/home/kylin/docs": { entries: makeEntries(2, "d"), skipped: 0 },
     "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
     "/etc": { entries: [{ ...makeEntries(1)[0], name: "nginx.conf" }], skipped: 0 },
   };
@@ -62,6 +63,9 @@ function listings(platform, big) {
 
 /** POST /terminals 收到的 shell 参数（无则 null），按序记录。 */
 const postedShells = [];
+
+/** 终端 WS 收到的 cd 命令行（反向联动的断言点）。 */
+const cwdCommands = [];
 
 async function mockApi(page, { platform, osId }) {
   const maps = listings(platform, true);
@@ -109,7 +113,11 @@ async function mockApi(page, { platform, osId }) {
       return json([
         { path: "/bin/zsh", name: "zsh", default: true },
         { path: "/bin/bash", name: "bash", default: false },
+        { path: "/usr/local/bin/pwsh", name: "pwsh", default: false },
       ]);
+    }
+    if (/\/processes\/\d+$/.test(p)) {
+      return json({ cwd: "/home/kylin" });
     }
     if (p.endsWith("/terminals") && method === "POST") {
       const body = route.request().postDataJSON() ?? {};
@@ -134,21 +142,42 @@ async function mockApi(page, { platform, osId }) {
     return json({ code: "not_found", message: p }, 404);
   });
 
-  // 终端 WS：回显打字；`exit 42` 回车 → 发 exit 帧并关闭。控制面 /ws 直接晾着。
+  // 终端 WS：回显打字；整行收齐后当命令处理——`cd` 更新 cwd 并发 OSC 7
+  // （pwsh 除外：演「没有 OSC 7」的退化路径），`exit 42` 发 exit 帧并关闭。
   await page.routeWebSocket(/\/ws\/terminal\//, (ws) => {
+    const tid = new URL(ws.url()).pathname.split("/").pop();
+    const shell = liveTerminals.get(tid)?.shell ?? "/bin/zsh";
+    const emitsOsc7 = !shell.includes("pwsh");
+    let cwd = "/home/kylin";
+    const osc7 = () => {
+      if (emitsOsc7) ws.send(Buffer.from(`\x1b]7;file://mock${cwd}\x07`));
+    };
     let lineBuf = "";
     ws.onMessage((msg) => {
       if (typeof msg === "string") return; // resize 帧
       const text = Buffer.from(msg).toString();
-      lineBuf += text;
       ws.send(Buffer.from(text.replace(/\r/g, "\r\n"))); // 极简回显
-      if (lineBuf.includes("exit 42\r")) {
-        ws.send(JSON.stringify({ t: "exit", reason: "exited", code: 42 }));
-        ws.close();
+      lineBuf += text;
+      let nl = lineBuf.search(/[\r\n]/);
+      while (nl >= 0) {
+        const line = lineBuf.slice(0, nl).trim();
+        lineBuf = lineBuf.slice(nl + 1);
+        nl = lineBuf.search(/[\r\n]/);
+        if (line === "exit 42") {
+          ws.send(JSON.stringify({ t: "exit", reason: "exited", code: 42 }));
+          ws.close();
+          return;
+        }
+        if (line.startsWith("cd ")) {
+          cwdCommands.push({ tid, line });
+          cwd = line.slice(3).replace(/^['"]|['"]$/g, "");
+          osc7();
+        }
       }
     });
-    // 附着即回放一个横幅，模拟 shell 提示符。
+    // 附着即回放提示符 + 初始 OSC 7（真 bash 的第一个提示符就带）。
     ws.send(Buffer.from("mock-shell $ "));
+    osc7();
   });
   await page.routeWebSocket(/\/ws$/, () => {});
 }
@@ -249,6 +278,41 @@ async function unixFlow(browser) {
   await page.waitForTimeout(300);
   const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
   check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
+
+  // ---- C 期：cwd 双向联动（当前活动标签是 bash，mock 会发 OSC 7）----
+
+  // 正向：终端里 cd → 文件区跟过去。
+  await page.click(".xterm");
+  await page.keyboard.type("cd /home/kylin/proj");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("text=已显示前 500 项", { timeout: 5000 });
+  check(
+    "终端 cd 后文件区跟随（OSC 7）",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
+  );
+
+  // 反向：文件区导航 → 给当前终端发 cd。
+  await page.click("text=主目录");
+  await page.waitForSelector("text=docs");
+  await page.click("text=docs");
+  await page.waitForSelector("text=d0000.txt");
+  check(
+    "文件区进目录给终端发了 cd",
+    cwdCommands.some((c) => c.line === "cd '/home/kylin/docs'"),
+    cwdCommands.map((c) => c.line).join(" | "),
+  );
+
+  // PowerShell 退化路径：无 OSC 7 → 不联动 + 界面说明（绝不轮询旧值）。
+  await page.click('[aria-label="选择 shell 新建终端"]');
+  await page.getByRole("button", { name: "pwsh", exact: true }).click();
+  await page.waitForSelector("text=PowerShell 不跟随目录", { timeout: 5000 });
+  check("PowerShell 无 OSC 7 时显示说明", true);
+  check(
+    "PowerShell 的 cwd 未被轮询采信（文件区不动）",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/docs",
+  );
+  await page.locator('[aria-label^="关闭"]').last().click();
+  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 1);
 
   // 第二个标签 + 切换。
   await page.click('[aria-label="新建终端"]');

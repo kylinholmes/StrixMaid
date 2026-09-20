@@ -36,6 +36,16 @@ export interface TermSocketHandlers {
 
 import { SESSION_TOKEN_KEY } from "@/session/token";
 
+/**
+ * 活着的终端连接登记表：`终端 id → 当前 TermSocket`。
+ *
+ * 反向联动（文件区进目录 → 给当前标签发 `cd`）发生在工作区层，而 socket
+ * 的生命周期在各标签组件手里——用一张模块级的表把「往某个终端写字节」
+ * 开放出去，比把 socket 提进全局 store 干净（socket 不是可渲染状态）。
+ * 由 TerminalTab 在连接/断开时登记与摘除。
+ */
+export const termSockets = new Map<string, TermSocket>();
+
 export class TermSocket {
   private ws: WebSocket | null = null;
   private exited = false;

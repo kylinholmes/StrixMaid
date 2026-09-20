@@ -22,6 +22,14 @@ export interface Tab {
   status: "live" | "disconnected" | "exited";
   /** `exited` 时的展示文字，如 `已退出 (code 42)`。 */
   exitLabel?: string;
+  /** 实际启动的 shell 路径（cwd 联动要按方言组 `cd` 命令、判可不可轮询）。 */
+  shell?: string;
+  /** worker 内 shell 的 pid（cwd 兜底轮询的目标）。 */
+  pid?: number;
+  /** 这个终端报出的当前目录（OSC 7 或轮询）。不知道就没有——宁可空着不可指错。 */
+  cwd?: string;
+  /** 收到过 OSC 7。此后轮询永久停用：shell 亲口说的比进程属性可信。 */
+  osc7?: boolean;
 }
 
 /** 每会话终端上限（`TerminalConfig::max_per_session` 的默认值）。UI 自己算，不等后端 409。 */
@@ -48,6 +56,8 @@ interface WorkspaceState {
   markDisconnected(id: string): void;
   markLive(id: string): void;
   setCwd(path: string): void;
+  /** 某个终端报出了自己的 cwd（`viaOsc7` 标记来源；OSC 7 一旦出现即压过轮询）。 */
+  setTabCwd(id: string, path: string, viaOsc7: boolean): void;
   setPanelHeight(px: number): void;
   setPanelCollapsed(collapsed: boolean): void;
   toggleRail(): void;
@@ -106,6 +116,11 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   markLive: (id) => set((s) => ({ tabs: transition(s.tabs, id, { status: "live" }) })),
 
   setCwd: (path) => set({ cwd: path }),
+
+  setTabCwd: (id, path, viaOsc7) =>
+    set((s) => ({
+      tabs: transition(s.tabs, id, viaOsc7 ? { cwd: path, osc7: true } : { cwd: path }),
+    })),
   // 上限留出 160px 给文件区工具栏：面板长过容器会把自己的拖把手和标签栏
   // 顶出可视区，只剩一个看不见的焦点元素能缩回来。
   setPanelHeight: (px) =>
