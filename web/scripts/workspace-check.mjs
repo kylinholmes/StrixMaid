@@ -330,26 +330,21 @@ async function unixFlow(browser) {
   const echoed = await page.evaluate(() => document.querySelector(".xterm")?.textContent ?? "");
   check("键入得到回显", echoed.includes("echo hi"), echoed.slice(0, 80));
 
-  // ---- C 期：cwd 双向联动（当前活动标签是 bash，mock 会发 OSC 7）----
-
-  // 正向：终端里 cd → 文件区跟过去。
+  // ---- 目录同步已按负责人决定移除：终端 cd 不影响文件区、导航不注入 cd ----
   await page.click(".xterm");
   await page.keyboard.type("cd /home/kylin/proj");
   await page.keyboard.press("Enter");
-  await page.waitForSelector("text=共 800 项", { timeout: 5000 });
+  await page.waitForTimeout(600);
   check(
-    "终端 cd 后文件区跟随（OSC 7）",
-    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/proj",
+    "终端 cd 不再牵动文件区",
+    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin",
   );
-
-  // 反向：文件区导航 → 给当前终端发 cd。
-  await page.click("text=主目录");
-  await page.waitForSelector("text=docs");
-  await page.click("text=docs");
+  await page.click('tbody >> text=docs');
   await page.waitForSelector("text=d0000.txt");
+  await page.waitForTimeout(300);
   check(
-    "文件区进目录给终端发了 cd",
-    cwdCommands.some((c) => c.line === "cd '/home/kylin/docs'"),
+    "文件区导航不再向终端注入 cd",
+    !cwdCommands.some((c) => c.line.includes("docs")),
     cwdCommands.map((c) => c.line).join(" | "),
   );
 
@@ -360,21 +355,6 @@ async function unixFlow(browser) {
   check("平铺视图的图片条目出缩略图", true);
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await page.waitForSelector("text=d0000.txt");
-
-  // PowerShell 退化路径：无 OSC 7 → 不联动 + 界面说明（绝不轮询旧值）。
-  await page.click('[aria-label="选择 shell 新建终端"]');
-  await page.getByRole("button", { name: "pwsh", exact: true }).click();
-  await page.waitForSelector("text=PowerShell 未报告工作目录", { timeout: 6000 });
-  check("PowerShell 无 OSC 7 时显示可关闭说明", true);
-  await page.click('[aria-label="关闭提示"]');
-  await page.waitForTimeout(150);
-  check("说明条可关闭", !(await page.isVisible("text=PowerShell 未报告工作目录")));
-  check(
-    "PowerShell 的 cwd 未被轮询采信（文件区不动）",
-    (await page.inputValue('[aria-label="路径，回车跳转"]')) === "/home/kylin/docs",
-  );
-  await page.locator('[aria-label^="关闭"]').last().click();
-  await page.waitForFunction(() => document.querySelectorAll(".xterm").length === 1);
 
   // 第二个标签 + 切换。
   await page.click('[aria-label="新建终端"]');
@@ -410,7 +390,9 @@ async function unixFlow(browser) {
 
   // 刷新保住滚动位置（§7-3）：进大目录、滚下去、焦点刷新、位置不动。
   await page.click('[aria-label="折叠终端面板"]');
-  await page.click("text=proj");
+  await page.click("text=主目录");
+  await page.waitForSelector('tbody >> text=proj');
+  await page.click('tbody >> text=proj');
   await page.waitForSelector("text=共 800 项");
   const scroller = page.locator(".fileScroll, [class*=fileScroll]").first();
   await scroller.evaluate((el) => el.scrollTo({ top: 1500 }));

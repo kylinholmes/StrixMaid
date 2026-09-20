@@ -24,6 +24,7 @@ import {
 } from "@/components";
 import { fmtBytes } from "@/lib/fmt";
 import { fileIconUrl, folderIconUrl } from "./icons";
+import { OverlayScrollbar } from "./OverlayScrollbar";
 import { joinPath, type Platform, parentPath } from "./path";
 import { useWorkspace } from "./store";
 import { TileGrid } from "./TileGrid";
@@ -297,62 +298,65 @@ export function FileList({
         </Button>
       </Toolbar>
       {isFetching && !isPending && <ProgressLine />}
-      <div
-        ref={scrollRef}
-        className={s.fileScroll}
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      >
-        {path === null || (isPending && entries.length === 0) ? (
-          <TableSkeleton />
-        ) : error ? (
-          <ErrorState
-            title="读不到这个目录。"
-            detail={(error as { message?: string }).message ?? String(error)}
-            onRetry={refresh}
-          />
-        ) : viewMode === "tiles" ? (
-          <TileGrid
-            entries={visible}
-            pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
-            selected={selected}
-            onSelect={setSelected}
-            onEnterDir={enter}
-          />
-        ) : (
-          <div ref={measureRow}>
-            <Table
-              caption={`目录 ${path} 的内容`}
-              columns={columns}
-              rows={slice}
-              rowKey={(e) => e.name}
-              selectedKey={selected}
-              onSelect={(e) => {
-                setSelected(e.name);
-                enter(e);
-              }}
-              onHeaderClick={onHeaderClick}
-              sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
-              empty={<EmptyState title="这个目录是空的" />}
-              leadingRow={
-                start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
-              }
-              trailingRow={
-                visible.length - end > 0 && (
-                  <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
-                )
-              }
+      <div className={s.scrollWrap}>
+        <div
+          ref={scrollRef}
+          className={s.fileScroll}
+          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        >
+          {path === null || (isPending && entries.length === 0) ? (
+            <TableSkeleton />
+          ) : error ? (
+            <ErrorState
+              title="读不到这个目录。"
+              detail={(error as { message?: string }).message ?? String(error)}
+              onRetry={refresh}
             />
-          </div>
-        )}
-        {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
-        {total > entries.length && !hasNextPage && null}
-        {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
-        {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
-        {total > 0 && (
-          <p className={s.skippedNote}>
-            共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
-          </p>
-        )}
+          ) : viewMode === "tiles" ? (
+            <TileGrid
+              entries={visible}
+              pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
+              selected={selected}
+              onSelect={setSelected}
+              onEnterDir={enter}
+            />
+          ) : (
+            <div ref={measureRow}>
+              <Table
+                caption={`目录 ${path} 的内容`}
+                columns={columns}
+                rows={slice}
+                rowKey={(e) => e.name}
+                selectedKey={selected}
+                onSelect={(e) => {
+                  setSelected(e.name);
+                  enter(e);
+                }}
+                onHeaderClick={onHeaderClick}
+                sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
+                empty={<EmptyState title="这个目录是空的" />}
+                leadingRow={
+                  start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
+                }
+                trailingRow={
+                  visible.length - end > 0 && (
+                    <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
+                  )
+                }
+              />
+            </div>
+          )}
+          {isFetchingNextPage && <p className={s.skippedNote}>正在加载更多……</p>}
+          {total > entries.length && !hasNextPage && null}
+          {hiddenCount > 0 && <p className={s.skippedNote}>{hiddenCount} 个隐藏条目未显示</p>}
+          {skipped > 0 && <p className={s.skippedNote}>{skipped} 个条目因无权限或已消失被跳过</p>}
+          {total > 0 && (
+            <p className={s.skippedNote}>
+              共 {total} 项{entries.length < total ? `，已加载 ${entries.length}` : ""}
+            </p>
+          )}
+        </div>
+        <OverlayScrollbar target={scrollRef} />
       </div>
     </div>
   );

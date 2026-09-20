@@ -113,13 +113,48 @@
   flex: 1;
 }
 
-.fileScroll {
-  overflow: auto;
+/* 原生滚动条藏掉，右缘用自绘的悬浮细条（OverlayScrollbar）。 */
+.scrollWrap {
+  position: relative;
   flex: 1;
   min-height: 0;
 }
 
-/* 地址栏：平时长得像一段路径文本，聚焦才现出输入框的形。 */
+.fileScroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.fileScroll::-webkit-scrollbar {
+  display: none;
+}
+
+.overlayThumb {
+  position: absolute;
+  right: 3px;
+  width: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+  opacity: 0;
+  transition: opacity var(--t-color) var(--ease);
+  cursor: default;
+  touch-action: none;
+}
+
+.overlayThumb[data-visible] {
+  opacity: 1;
+}
+
+.overlayThumb:hover,
+.overlayThumb[data-dragging] {
+  background: var(--ink-3);
+  opacity: 1;
+}
+
+/* 地址栏：就是一段路径文本，无边框；悬停/聚焦只做底色变化（负责人定），
+   焦点可见性交给全局 :focus-visible。 */
 .pathBar {
   font-family: var(--mono);
   font-size: var(--fs-300);
@@ -131,21 +166,16 @@
      长路径截尾部，完整路径在 title 里。 */
   min-width: 0;
   flex: 1;
-  border: 1px solid transparent;
+  border: none;
   border-radius: var(--radius-sm);
   background: none;
   padding: 2px var(--sp-2);
 }
 
-.pathBar:hover {
-  border-color: var(--line);
-}
-
+.pathBar:hover,
 .pathBar:focus {
-  border-color: var(--stroke);
-  background: var(--surface);
+  background: var(--surface-2);
   color: var(--ink);
-  outline: none;
 }
 
 .nameCell {
