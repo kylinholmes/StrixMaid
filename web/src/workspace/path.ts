@@ -60,3 +60,14 @@ export function parentPath(path: string, p: Platform): string | null {
   const cut = trimmed.lastIndexOf("/");
   return cut <= 0 ? "/" : trimmed.slice(0, cut);
 }
+
+/**
+ * 按平台猜会话用户的主目录。API 不下发 home（`SessionInfo` 没有这个字段），
+ * 而快速访问只需要一个**大概率对**的起点：猜错时文件区会明确报错，
+ * 用户仍可从根导航——比为此新增一个端点便宜。
+ */
+export function guessHome(osId: string | undefined, username: string, uid: number): string {
+  if (platformOf(osId) === "windows") return `C:\\Users\\${username}`;
+  if (osId?.toLowerCase() === "macos") return uid === 0 ? "/var/root" : `/Users/${username}`;
+  return uid === 0 ? "/root" : `/home/${username}`;
+}

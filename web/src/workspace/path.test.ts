@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isDriveRoot, isVirtualRoot, joinPath, parentPath, platformOf } from "./path";
+import { guessHome, isDriveRoot, isVirtualRoot, joinPath, parentPath, platformOf } from "./path";
 
 describe("platformOf", () => {
   it("识别 windows", () => expect(platformOf("windows")).toBe("windows"));
@@ -34,4 +34,11 @@ describe("root 判定", () => {
   it("虚拟根", () => expect(isVirtualRoot("\\", "windows")).toBe(true));
   it("驱动器根", () => expect(isDriveRoot("C:\\", "windows")).toBe(true));
   it("普通名不是驱动器根", () => expect(isDriveRoot("Users", "windows")).toBe(false));
+});
+
+describe("guessHome", () => {
+  it("windows", () => expect(guessHome("windows", "kylin", 1000)).toBe("C:\\Users\\kylin"));
+  it("macos", () => expect(guessHome("macos", "kylin", 501)).toBe("/Users/kylin"));
+  it("linux 普通用户", () => expect(guessHome("ubuntu", "alice", 1000)).toBe("/home/alice"));
+  it("linux root", () => expect(guessHome("ubuntu", "root", 0)).toBe("/root"));
 });

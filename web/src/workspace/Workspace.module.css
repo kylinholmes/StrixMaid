@@ -175,9 +175,9 @@
   min-height: 0;
 }
 
-/* 折叠成一条底栏。 */
+/* 折叠成一条底栏（高度由组件在折叠时不下发 height 来实现，这里不用 !important）。 */
 .panelCollapsed {
-  height: auto !important;
+  height: auto;
 }
 
 .dragHandle {
