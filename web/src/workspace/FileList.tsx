@@ -150,6 +150,11 @@ export function FileList({
   // 位置/压暗由 CSS 过渡接管）；再叠一条可点的「返回」边；pop 的旧顶层
   // 以 leaving 短暂盖在最上面演滑出。DOM 顺序即层序。
   const panes: React.ReactNode[] = [];
+  // 当前目录在父层里叫什么（垫层里高亮它，一眼看出「我从哪进来的」）。
+  const currentName =
+    path !== null && parent !== null
+      ? path.slice(parent.length).replace(/^[\\/]/, "") || path
+      : null;
   if (parent !== null) {
     panes.push(
       <ListPane
@@ -159,17 +164,8 @@ export function FileList({
         onNavigate={onNavigate}
         pane="under"
         className={s.paneUnder}
+        markName={currentName}
       />,
-      <button
-        key="back-strip"
-        type="button"
-        className={s.backStrip}
-        title={`返回 ${parent}`}
-        aria-label={`返回上一级 ${parent}`}
-        onClick={() => onNavigate(parent)}
-      >
-        <span aria-hidden>‹</span>
-      </button>,
     );
   }
   panes.push(

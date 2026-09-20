@@ -150,46 +150,21 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: rgb(0 0 0 / 22%);
+  background: rgb(0 0 0 / 8%);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-shape) var(--ease);
 }
 
 .paneTop {
-  left: 28px;
+  /* 让出的边要读得出目录名（负责人定）；窄窗按比例缩。 */
+  left: min(208px, 28%);
   box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
 }
 
-.paneUnder {
-  pointer-events: none;
-}
-
+/* 垫层露出的部分整个可交互：点父层的子目录直接切换过去。 */
 .paneUnder::after {
   opacity: 1;
-}
-
-/* 父层透出的那条边，整条可点 = 返回上一级。 */
-.backStrip {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 28px;
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: transparent;
-  font-size: var(--fs-500);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-
-.backStrip:hover {
-  color: var(--ink-2);
-  background: rgb(0 0 0 / 6%);
 }
 
 @keyframes pane-in-right {

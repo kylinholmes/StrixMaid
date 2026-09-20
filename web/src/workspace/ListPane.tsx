@@ -61,6 +61,8 @@ export interface ListPaneProps {
   className?: string;
   /** 层角色标记（top/under/leaving），测试与调试按它定位。 */
   pane?: string;
+  /** 垫层用：高亮这一项（当前目录在父层里的名字），用户没自己选中时生效。 */
+  markName?: string | null;
 }
 
 /**
@@ -68,7 +70,7 @@ export interface ListPaneProps {
  * 层叠导航（进目录像 macOS 那样推入新层）要求同屏能渲染两层，
  * 所以这些状态必须住在层内而不是 FileList 里。
  */
-export function ListPane({ path, platform, onNavigate, className, pane }: ListPaneProps) {
+export function ListPane({ path, platform, onNavigate, className, pane, markName }: ListPaneProps) {
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
   const dirSort = useWorkspace((st) => st.dirSort);
@@ -203,7 +205,7 @@ export function ListPane({ path, platform, onNavigate, className, pane }: ListPa
           <TileGrid
             entries={visible}
             pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
-            selected={selected}
+            selected={selected ?? markName ?? null}
             onSelect={setSelected}
             onEnterDir={enter}
           />
@@ -214,7 +216,7 @@ export function ListPane({ path, platform, onNavigate, className, pane }: ListPa
               columns={columns}
               rows={slice}
               rowKey={(e) => e.name}
-              selectedKey={selected}
+              selectedKey={selected ?? markName}
               onSelect={(e) => {
                 setSelected(e.name);
                 enter(e);
