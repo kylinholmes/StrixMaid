@@ -242,6 +242,24 @@
   color: var(--ink);
 }
 
+/* 名称列里的图标位：固定 16px，缩略图与类型图标同占位不跳版。 */
+.iconBox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* 列表行内的小缩略图：裁成方形圆角，与 16px 图标同尺寸。 */
+.thumbMini {
+  width: 16px;
+  height: 16px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
 .nameCell {
   display: inline-flex;
   align-items: center;

@@ -375,6 +375,12 @@ async function unixFlow(browser) {
     cwdCommands.map((c) => c.line).join(" | "),
   );
 
+  // 列表视图的小缩略图：logo.png 的图标位换成 16px 预览图。
+  await page.waitForSelector('[data-pane="top"] [class*=thumbMini][src^="blob:"]', {
+    timeout: 5000,
+  });
+  check("列表行的图片出小缩略图", true);
+
   // 平铺视图 + 缩略图：logo.png 出图，目录出图标。
   await page.getByRole("button", { name: "平铺", exact: true }).click();
   await page.waitForSelector('[class*=tileGrid]');

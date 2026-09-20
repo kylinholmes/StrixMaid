@@ -558,6 +558,75 @@ mod tests {
         );
     }
 
+    /// 缩略图的数据通路（`/files/raw` → worker `fs.raw`）走**真帧通道**验证：
+    /// 大于单块上限的文件分块取回后必须逐字节一致。此前只有 `raw_blocking`
+    /// 的单元测试与前端 mock，「fake-worker 盲区」（fs.read 5MiB 纸面上限
+    /// 那次）的教训就是分块 / 帧上限这类约束必须在真通道上试过一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fs_raw_大文件经真通道分块取回且字节一致() {
+        use strixmaid_types::rpc::{FS_RAW_MAX_CHUNK, FsRawChunk};
+
+        // 约 600 KiB（> 两个 256 KiB 块），带 PNG 魔数让 MIME 判定有据可依。
+        let dir = std::env::temp_dir().join(format!("strixmaid-raw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("大图.png");
+        let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        data.extend((0..600 * 1024u32).map(|i| (i % 251) as u8));
+        std::fs::write(&file, &data).unwrap();
+
+        let (main_side, worker_side) = crate::session::channel::IpcChannel::pair().unwrap();
+        let d = default_dispatcher().await;
+        tokio::spawn(async move {
+            let _ = crate::worker::serve(worker_side, Arc::new(d)).await;
+        });
+        let handle = crate::session::WorkerHandle::connect(main_side, -1, None)
+            .await
+            .expect("进程内 worker 握手失败");
+
+        // 与 routes/files.rs 的流式转发同一套走法：按上一块的实际长度推进偏移。
+        let root = dir.to_string_lossy().into_owned();
+        let path = file.to_string_lossy().into_owned();
+        let mut got: Vec<u8> = Vec::new();
+        let mut chunks = 0;
+        loop {
+            let value = handle
+                .call(
+                    rpc::FS_RAW,
+                    serde_json::json!({
+                        "path": path,
+                        "allowed_roots": [root],
+                        "offset": got.len() as u64,
+                        "len": FS_RAW_MAX_CHUNK,
+                    }),
+                )
+                .await
+                .expect("fs.raw 经真通道调用失败");
+            let chunk: FsRawChunk = serde_json::from_value(value).unwrap();
+            assert_eq!(chunk.total_bytes, data.len() as u64);
+            if got.is_empty() {
+                assert_eq!(chunk.mime, "image/png", "PNG 的 MIME 判定不对");
+            }
+            let bytes = hex::decode(&chunk.data_hex).unwrap();
+            assert!(
+                bytes.len() as u64 <= u64::from(FS_RAW_MAX_CHUNK),
+                "单块超过上限：{} 字节",
+                bytes.len()
+            );
+            if bytes.is_empty() {
+                break;
+            }
+            got.extend(bytes);
+            chunks += 1;
+            if got.len() as u64 >= chunk.total_bytes {
+                break;
+            }
+        }
+        assert!(chunks >= 3, "600 KiB 至少该分三块，实际 {chunks} 块");
+        assert_eq!(got, data, "分块重组后的字节与原文件不一致");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn 参数不合协议报_internal_而不是_invalid_request() {
         let d = default_dispatcher().await;

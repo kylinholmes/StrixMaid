@@ -1,39 +1,11 @@
 import { File, Folder, Link2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 import { cx } from "@/lib/cx";
 import { fileIconUrl, folderIconUrl } from "./icons";
 import type { Platform } from "./path";
 import { entrySubject, useEntryIcon } from "./sysicons";
-import { fetchThumb, thumbEligible } from "./thumbs";
+import { thumbEligible, useLazyThumb } from "./thumbs";
 import type { DirEntry } from "./useDirListing";
 import s from "./Workspace.module.css";
-
-/** 进入视口才取缩略图：一个几百张图的目录不该在打开瞬间全量拉取。 */
-function useLazyThumb(path: string, eligible: boolean) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!eligible) return;
-    const el = ref.current;
-    if (!el) return;
-    let live = true;
-    const io = new IntersectionObserver((io_entries) => {
-      if (!io_entries.some((e) => e.isIntersecting)) return;
-      io.disconnect();
-      void fetchThumb(path).then((u) => {
-        if (live && u) setUrl(u);
-      });
-    });
-    io.observe(el);
-    return () => {
-      live = false;
-      io.disconnect();
-    };
-  }, [path, eligible]);
-
-  return { ref, url };
-}
 
 function Tile({
   entry,
@@ -50,7 +22,7 @@ function Tile({
   onOpen: () => void;
   onSelect: () => void;
 }) {
-  const { ref, url } = useLazyThumb(path, thumbEligible(entry));
+  const { ref, url } = useLazyThumb<HTMLDivElement>(path, thumbEligible(entry));
   // 优先级：缩略图 > 系统真图标（按路径/按类型，判定在 iconKeysOf 里编译期
   // 穷尽）> 内置集 > 通用形状，与 ListPane 的 KindIcon 完全一致。
   const sys = useEntryIcon(entrySubject(entry, path), platform);

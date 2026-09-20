@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { authHeaders } from "@/api/client";
 import type { DirEntry } from "./useDirListing";
 
@@ -26,6 +27,36 @@ export function thumbEligible(e: DirEntry): boolean {
 /** path → object URL。会话级缓存：同一目录反复进出不重取。 */
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string | null>>();
+
+/**
+ * 进入视口才取缩略图（列表与平铺共用）：一个几百张图的目录不该在打开瞬间
+ * 全量拉取。把返回的 `ref` 挂到条目的图标容器上。
+ */
+export function useLazyThumb<T extends HTMLElement>(path: string, eligible: boolean) {
+  const ref = useRef<T | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!eligible) return;
+    const el = ref.current;
+    if (!el) return;
+    let live = true;
+    const io = new IntersectionObserver((ioEntries) => {
+      if (!ioEntries.some((e) => e.isIntersecting)) return;
+      io.disconnect();
+      void fetchThumb(path).then((u) => {
+        if (live && u) setUrl(u);
+      });
+    });
+    io.observe(el);
+    return () => {
+      live = false;
+      io.disconnect();
+    };
+  }, [path, eligible]);
+
+  return { ref, url: eligible ? url : null };
+}
 
 /** 取一个文件的缩略图 object URL；失败返回 `null`（显示通用图标，不重试轰炸）。 */
 export function fetchThumb(path: string): Promise<string | null> {

@@ -9,6 +9,7 @@ import { joinPath, type Platform } from "./path";
 import { useWorkspace } from "./store";
 import { entrySubject, useEntryIcon } from "./sysicons";
 import { TileGrid } from "./TileGrid";
+import { thumbEligible, useLazyThumb } from "./thumbs";
 import { type DirEntry, type FileSortKey, useDirListing } from "./useDirListing";
 import s from "./Workspace.module.css";
 
@@ -44,26 +45,38 @@ function KindIcon({
   fullPath: string | null;
   platform: Platform;
 }) {
-  // 系统真图标全面接管（负责人 2026-09-20 定：Win/Mac 的图标都从系统读，
-  // 文件夹也是）：bundle/链接按路径取真身 > 按类型取 > 内置集 > 通用形状。
-  // 主体→图标源的判定在 sysicons.ts 的 iconKeysOf 里编译期穷尽，这里只组主体。
+  // 图标优先级与平铺完全一致：缩略图 > 系统真图标（判定在 iconKeysOf 里
+  // 编译期穷尽）> 内置集 > 通用形状。缩略图懒加载——虚拟滚动已把行数限在
+  // 视口附近，进入视口的行才发 /files/raw。
+  const { ref, url: thumb } = useLazyThumb<HTMLSpanElement>(
+    fullPath ?? "",
+    fullPath !== null && thumbEligible(entry),
+  );
   const sys = useEntryIcon(entrySubject(entry, fullPath), platform);
-  if (entry.kind === "symlink" && sys === null)
-    return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
-  const src = sys ?? (entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name));
-  if (src)
-    return (
-      <img
-        src={src}
-        width={16}
-        height={16}
-        alt={entry.kind === "dir" ? "目录" : ""}
-        aria-hidden={entry.kind !== "dir"}
-      />
-    );
-  if (entry.kind === "dir")
-    return <Folder size={14} strokeWidth={1.5} className={s.kindDir} aria-label="目录" />;
-  return <File size={14} strokeWidth={1.5} className={s.kindFile} aria-hidden="true" />;
+  const inner = (() => {
+    if (thumb) return <img className={s.thumbMini} src={thumb} alt="" loading="lazy" />;
+    if (entry.kind === "symlink" && sys === null)
+      return <Link2 size={14} strokeWidth={1.5} aria-label="符号链接" />;
+    const src = sys ?? (entry.kind === "dir" ? folderIconUrl(entry.name) : fileIconUrl(entry.name));
+    if (src)
+      return (
+        <img
+          src={src}
+          width={16}
+          height={16}
+          alt={entry.kind === "dir" ? "目录" : ""}
+          aria-hidden={entry.kind !== "dir"}
+        />
+      );
+    if (entry.kind === "dir")
+      return <Folder size={14} strokeWidth={1.5} className={s.kindDir} aria-label="目录" />;
+    return <File size={14} strokeWidth={1.5} className={s.kindFile} aria-hidden="true" />;
+  })();
+  return (
+    <span ref={ref} className={s.iconBox}>
+      {inner}
+    </span>
+  );
 }
 
 export interface ListPaneProps {
