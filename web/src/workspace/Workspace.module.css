@@ -1,0 +1,284 @@
+/* 工作区（roadmap/12 §4.1）：左快速访问栏 + 文件区铺底 + 终端面板浮层。 */
+
+.workspace {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- 快速访问 */
+
+.rail {
+  width: 216px;
+  border-right: 1px solid var(--stroke);
+  padding: var(--sp-3);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.railCollapsed {
+  width: 0;
+  padding: 0;
+  border-right: none;
+  overflow: hidden;
+}
+
+.railGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.railLabel {
+  font-size: var(--fs-300);
+  color: var(--ink-3);
+  padding: var(--sp-2) var(--sp-2) 2px;
+}
+
+.railItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-400);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.railItem:hover {
+  background: var(--surface-2);
+}
+
+.railItemActive {
+  background: var(--sel);
+}
+
+.railItemName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* 挂载点占用条：细、不抢眼。 */
+.railUsage {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin: 0 var(--sp-2) var(--sp-2);
+}
+
+.railUsage > i {
+  display: block;
+  height: 100%;
+  background: var(--ink-3);
+}
+
+/* 上次见过、这次没了的挂载：灰显 + 标注，不凭空消失（§4.2）。 */
+.railStale {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.staleTag {
+  font-size: var(--fs-300);
+  color: var(--ink-3);
+}
+
+/* ---------------------------------------------------------------- 文件区 */
+
+.main {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fileArea {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.fileScroll {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.pathBar {
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径优先露出结尾——那才是「我在哪」 */
+  text-align: left;
+  min-width: 0;
+  flex: 1;
+}
+
+.nameCell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.kindDir {
+  color: var(--ink-2);
+}
+
+.kindFile {
+  color: var(--ink-3);
+}
+
+.linkTarget {
+  color: var(--ink-3);
+  font-size: var(--fs-300);
+}
+
+.skippedNote {
+  color: var(--ink-3);
+  font-size: var(--fs-300);
+  padding: var(--sp-2) var(--sp-3);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 终端面板 */
+
+/* 浮在文件区之上，不挤压它（§4.1）。 */
+.panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--stroke);
+  box-shadow: 0 -6px 24px rgb(0 0 0 / 12%);
+  min-height: 0;
+}
+
+/* 折叠成一条底栏。 */
+.panelCollapsed {
+  height: auto !important;
+}
+
+.dragHandle {
+  height: 5px;
+  cursor: row-resize;
+  flex: none;
+  /* 摸得到但看不见：hover 时露出一条线 */
+}
+
+.dragHandle:hover,
+.dragHandle:active {
+  background: var(--line-strong);
+}
+
+.tabBar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  overflow-x: auto;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--fs-300);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.tabActive {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.tabExited {
+  color: var(--ink-3);
+}
+
+.tabClose {
+  display: inline-flex;
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  padding: 1px;
+  border-radius: var(--radius-sm);
+}
+
+.tabClose:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.terminals {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.termHost {
+  position: absolute;
+  inset: 0;
+  padding: var(--sp-2);
+}
+
+.termHidden {
+  visibility: hidden;
+}
+
+/* 退出/断线横幅：盖在终端内容之上、不清掉内容（§4.3）。 */
+.termBanner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border-top: 1px solid var(--stroke);
+  font-size: var(--fs-300);
+  color: var(--ink-2);
+}
+
+.panelEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--ink-3);
+  font-size: var(--fs-400);
+  gap: var(--sp-3);
+}
