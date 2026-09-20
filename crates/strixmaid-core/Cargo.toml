@@ -24,7 +24,7 @@ hex = "0.4.3"
 # 的登录用户身份下、被 `catch_unwind` 兜住。
 #
 # default-features = false：只开真的会遇到的五种格式。开全（tiff/hdr/exr/pnm…）
-# 会把二进制推向 15 MiB 的体积门槛，且那些格式的解码器是最少被人审的那批。
+# 平白多几百 KB，且那些格式的解码器是最少被人审的那批。
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",

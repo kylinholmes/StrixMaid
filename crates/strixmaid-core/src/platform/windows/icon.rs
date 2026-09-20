@@ -155,14 +155,14 @@ pub fn generic_file_icon_png() -> io::Result<Vec<u8>> {
 fn shell_type_icon_png(fictional_name: &str, attrs: u32) -> io::Result<Vec<u8>> {
     let _com = ComInit::new();
 
-    if let Some((icon_file, index)) = icon_location(fictional_name, attrs) {
-        if let Ok(icon) = extract_icon(&icon_file, index, FILE_ICON_SIZE) {
-            // SAFETY: icon 有效且尚未销毁，借用期不超过本语句。
-            let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
-            return encode_png(&rgba);
-        }
-        // 位置指向的文件提取失败（比如指向了一个已卸载程序留下的路径）：
-        // 继续走回落，而不是就此放弃。
+    // 位置取到了、但那个文件提取失败（比如指向一个已卸载程序留下的路径）时
+    // 继续往下走回落，而不是就此放弃。
+    if let Some((icon_file, index)) = icon_location(fictional_name, attrs)
+        && let Ok(icon) = extract_icon(&icon_file, index, FILE_ICON_SIZE)
+    {
+        // SAFETY: icon 有效且尚未销毁，借用期不超过本语句。
+        let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
+        return encode_png(&rgba);
     }
 
     let icon = shell_icon(fictional_name, attrs)?;

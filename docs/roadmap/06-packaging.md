@@ -180,7 +180,14 @@ GitHub Actions，`.github/workflows/ci.yml`：
 ## 5. 验收
 
 1. 在一台干净的 Ubuntu 24.04 与一台 Rocky 9 上，仅解压 tar.gz 并运行 `install.sh`，`systemctl start strixmaid` 后 `curl 127.0.0.1:9700/api/v1/health` 返回 200；`/api/v1/capabilities` 的 `helper = true`。
-2. `strixmaid` 静态二进制 ≤ 15 MiB，`strixmaid-agent` ≤ 8 MiB，`strixmaid-helper` ≤ 1 MiB（release，`design.md` Q3）。
+2. `strixmaid` 静态二进制 ≤ **18 MiB**，`strixmaid-agent` ≤ 8 MiB，`strixmaid-helper` ≤ 1 MiB（release，`design.md` Q3）。
+
+   > **15 → 18 MiB（2026-09-21，负责人定）**。服务端缩略图要一套图片解码器
+   > （roadmap/12 §4.7 的改判），musl 静态链接后是 15.96 MiB，越过了原门槛
+   > 0.22 MiB。可选的三条路里：砍格式（去掉 gif/bmp 实测只省 66 KB，不够且
+   > 丢功能）、为解码器单独降优化档（省得有限、影响缩略图速度）、抬门槛。
+   > 负责人选第三条——门槛本来就是「别让它悄悄变胖」的护栏而不是硬性指标，
+   > 18 MiB 仍留出约 2 MiB 余量，涨到那里仍会红。
 3. Alpine 容器内（无 glibc）`strixmaid-agent` 可运行并采集（helper 不可用属预期，Agent 不需要它）。
 
 ## 6. 未决问题
