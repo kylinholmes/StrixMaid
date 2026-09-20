@@ -145,6 +145,8 @@ export function FileList({
 
   const parent = path === null ? null : parentPath(path, platform);
   const up = parent;
+  /** 祖父层：近乎不可见的第三层，整条边可点 = 返回上一级（负责人定）。 */
+  const grand = parent === null ? null : parentPath(parent, platform);
 
   // 常驻两层：垫层永远是父目录（key 稳定——push 时旧顶层同 key 原地降级，
   // 位置/压暗由 CSS 过渡接管）；再叠一条可点的「返回」边；pop 的旧顶层
@@ -155,6 +157,33 @@ export function FileList({
     path !== null && parent !== null
       ? path.slice(parent.length).replace(/^[\\/]/, "") || path
       : null;
+  const parentName =
+    parent !== null && grand !== null
+      ? parent.slice(grand.length).replace(/^[\\/]/, "") || parent
+      : null;
+  if (grand !== null) {
+    panes.push(
+      <ListPane
+        key={`p:${grand}`}
+        path={grand}
+        platform={platform}
+        onNavigate={onNavigate}
+        pane="deep"
+        className={s.paneDeep}
+        markName={parentName}
+      />,
+      <button
+        key="up-strip"
+        type="button"
+        className={s.upStrip}
+        title={`返回上一级 ${parent}`}
+        aria-label={`返回上一级 ${parent}`}
+        onClick={() => parent !== null && onNavigate(parent)}
+      >
+        <span aria-hidden>‹</span>
+      </button>,
+    );
+  }
   if (parent !== null) {
     panes.push(
       <ListPane
@@ -163,7 +192,7 @@ export function FileList({
         platform={platform}
         onNavigate={onNavigate}
         pane="under"
-        className={s.paneUnder}
+        className={cx(s.paneMid, grand !== null && s.paneMidShifted)}
         markName={currentName}
       />,
     );
@@ -175,7 +204,10 @@ export function FileList({
       platform={platform}
       onNavigate={onNavigate}
       pane="top"
-      className={cx(parent !== null && s.paneTop, pushAnim && s.panePushIn)}
+      className={cx(
+        parent !== null && (grand !== null ? s.paneTop3 : s.paneTop),
+        pushAnim && s.panePushIn,
+      )}
     />,
   );
   if (leaving !== null) {
@@ -186,7 +218,7 @@ export function FileList({
         platform={platform}
         onNavigate={onNavigate}
         pane="leaving"
-        className={cx(s.paneTop, s.panePopOut)}
+        className={cx(grand !== null ? s.paneTop3 : s.paneTop, s.panePopOut)}
       />,
     );
   }

@@ -162,9 +162,53 @@
   box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
 }
 
-/* 垫层露出的部分整个可交互：点父层的子目录直接切换过去。 */
-.paneUnder::after {
+/* 三层时顶层再让出祖父层那条窄边。 */
+.paneTop3 {
+  left: min(236px, 32%);
+  box-shadow: -10px 0 22px rgb(0 0 0 / 14%);
+}
+
+/* 父层：露出的部分整个可交互（点子目录直接切换），轻压暗保证可读。 */
+.paneMid::after {
   opacity: 1;
+}
+
+.paneMidShifted {
+  left: 28px;
+  box-shadow: -8px 0 18px rgb(0 0 0 / 10%);
+}
+
+/* 祖父层：近乎不可见（重度压暗），本体不可交互，交互交给 upStrip。 */
+.paneDeep {
+  pointer-events: none;
+}
+
+.paneDeep::after {
+  opacity: 1;
+  background: rgb(0 0 0 / 55%);
+}
+
+/* 祖父层那条边：整条可点 = 返回上一级。 */
+.upStrip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: transparent;
+  font-size: var(--fs-500);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.upStrip:hover {
+  color: var(--ink);
+  background: rgb(0 0 0 / 10%);
 }
 
 @keyframes pane-in-right {

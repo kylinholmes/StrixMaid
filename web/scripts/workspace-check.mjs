@@ -54,6 +54,7 @@ function listings(platform, big) {
       entries: [dir("proj"), dir("docs"), dir(".config"), { ...makeEntries(1)[0], name: ".bashrc" }, ...makeEntries(4)],
       skipped: 0,
     },
+    "/home": { entries: [dir("kylin")], skipped: 0 },
     "/home/kylin/proj": { entries: makeEntries(big ? 800 : 6, "p"), skipped: 1 },
     "/home/kylin/docs": { entries: [{ ...makeEntries(1)[0], name: "logo.png" }, ...makeEntries(2, "d")], skipped: 0 },
     "/": { entries: [dir("etc"), dir("home")], skipped: 0 },
