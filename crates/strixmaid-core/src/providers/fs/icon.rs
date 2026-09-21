@@ -339,6 +339,11 @@ fn extract(key: &str) -> Option<Vec<u8>> {
     match key {
         DIR_KEY => appkit::folder_icon_png(FILE_ICON_SIZE),
         GENERIC_FILE_KEY => appkit::generic_file_icon_png(FILE_ICON_SIZE),
+        // 左栏那几个保留 key 在 macOS 上不走这里（`iconKeysOf` 在 unix 平台
+        // 给 pathKey，按路径取的才是真身）。不拦的话它们会落到下一条、被当成
+        // 扩展名交给 UTType——UTType 对未知扩展名照样给一张通用图，于是成了
+        // 「200 + 一张错图」而不是 404。
+        k if RESERVED_KEYS.contains(&k) => None,
         ext => appkit::file_type_icon_png(ext, FILE_ICON_SIZE),
     }
 }
@@ -475,6 +480,21 @@ mod tests {
         assert_ne!(downloads, desktop, "下载与桌面不该是同一张图");
         assert_ne!(drive, dir, "磁盘不该画成文件夹");
         assert_ne!(downloads, dir, "下载不该退回成通用文件夹");
+    }
+
+    /// 左栏的保留 key 只在 Windows 上有货，别的平台一律 404。
+    ///
+    /// 在 macOS（有窗口服务器时）这条是真的回归护栏：漏掉 `extract` 里那条
+    /// 拦截的话，`$downloads` 会被当成扩展名拿去查 UTType 并拿回一张通用图。
+    /// Linux 上 `available()` 为假，恒过。
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn 左栏保留_key_在非_windows_上一律_404() {
+        let icons = FileTypeIcons::new();
+        for k in [HOME_KEY, DOWNLOADS_KEY, DRIVE_KEY, COMPUTER_KEY] {
+            let err = icons.icon_png(k).await.expect_err(k);
+            assert_eq!(err.code, ErrorCode::NotFound, "{k}");
+        }
     }
 
     #[tokio::test]
