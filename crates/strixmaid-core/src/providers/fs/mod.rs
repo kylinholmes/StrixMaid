@@ -205,6 +205,20 @@ fn group_name(gid: u32) -> Option<String> {
 #[cfg(unix)]
 struct EntryMapper;
 
+/// 链接**目标**的类型；非链接返回 `None`。
+///
+/// Unix 上没有「链接声明了自己指向目录」这种信息（`lstat` 只说这是个链接），
+/// 只能跟过去 `stat` 一次——因此**每个符号链接多一次系统调用**，普通目录里
+/// 符号链接是少数，`/usr/bin` 这种全是链接的目录会翻倍。取不到（断链、
+/// 成环、无权限）返回 `None`，不猜。
+#[cfg(unix)]
+fn target_kind_of(kind: FileKind, path: &Path) -> Option<FileKind> {
+    if kind != FileKind::Symlink {
+        return None;
+    }
+    std::fs::metadata(path).ok().map(|m| kind_of(&m.file_type()))
+}
+
 #[cfg(unix)]
 impl EntryMapper {
     fn new(_dir: &Path) -> Self {
@@ -214,12 +228,15 @@ impl EntryMapper {
     fn map(
         &mut self,
         caches: &Caches,
-        _path: &Path,
+        path: &Path,
         name: String,
         meta: &std::fs::Metadata,
         kind: FileKind,
         target: Option<String>,
     ) -> DirEntryInfo {
+        // Unix 的「隐藏」只是个名字约定，没有属性位，所以在名字进结构体
+        // 之前先判一次。
+        let hidden = name.starts_with('.');
         DirEntryInfo {
             name,
             kind,
@@ -231,6 +248,8 @@ impl EntryMapper {
             group: cached_name(&caches.groups, meta.gid(), group_name),
             mtime_ts: meta.mtime(),
             target,
+            target_kind: target_kind_of(kind, path),
+            hidden,
         }
     }
 }
@@ -324,6 +343,12 @@ pub struct ListOptions {
     pub sort: FileSortKey,
     /// 排序方向。
     pub order: SortOrder,
+    /// 列不列 `hidden` 的条目（判定见 `DirEntryInfo::hidden`）。
+    ///
+    /// **过滤在服务端做**，因为排序与分页也在服务端：在已取回的一页里过滤，
+    /// 得到的是「全量的一个错误切片」，`total` 也对不上——与本文件里
+    /// 「客户端排序在分页面前是错的」同一类错误。
+    pub show_hidden: bool,
 }
 
 /// **不 derive**：`SortOrder::default()` 是 `Desc`（进程页「先看最占资源的」），
@@ -335,6 +360,11 @@ impl Default for ListOptions {
             offset: 0,
             sort: FileSortKey::Name,
             order: SortOrder::Asc,
+            // provider 这一层的缺省是**不过滤**（即旧行为）。产品意义上的
+            // 「默认藏起来」是 HTTP 层的缺省（见 `FileListQuery::hidden`）——
+            // 两处缺省有意不同，理由同上面 `SortOrder` 那条注释：把两个语境的
+            // 默认值绑在一起，改一处就会悄悄改掉另一处。
+            show_hidden: true,
         }
     }
 }
@@ -407,6 +437,11 @@ fn finish_listing(
     skipped: u32,
     opts: &ListOptions,
 ) -> DirListing {
+    // 过滤在排序与分页之前：total 要算过滤之后的数。
+    if !opts.show_hidden {
+        entries.retain(|e| !e.hidden);
+    }
+
     let key_cmp = |a: &DirEntryInfo, b: &DirEntryInfo| match opts.sort {
         FileSortKey::Name => a.name.cmp(&b.name),
         // 大小/时间相同的条目退回名称序：排序要稳定可预期，刷新不跳动。
@@ -643,6 +678,167 @@ mod tests {
 
     fn names(l: &DirListing) -> Vec<&str> {
         l.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// 在临时目录里造一个「本平台意义上的隐藏项」，返回它的名字。
+    ///
+    /// 两个平台的约定不是一回事，测试不能只挑一边写：Unix 看名字是否以 `.`
+    /// 开头，Windows 看 `FILE_ATTRIBUTE_HIDDEN` 属性位——`.foo` 在 Explorer
+    /// 里照样显示，而设了属性位的 `NTUSER.DAT` 不显示。
+    fn make_hidden(dir: &Path) -> &'static str {
+        #[cfg(unix)]
+        {
+            std::fs::write(dir.join(".secret"), b"x").unwrap();
+            ".secret"
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW,
+            };
+            let p = dir.join("secret.txt");
+            std::fs::write(&p, b"x").unwrap();
+            let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+            wide.push(0);
+            // SAFETY: wide 是以 NUL 结尾的宽串，生存期覆盖本次调用。
+            let ok = unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+            assert_ne!(ok, 0, "SetFileAttributesW 失败");
+            "secret.txt"
+        }
+    }
+
+    #[tokio::test]
+    async fn 隐藏标记_按各平台自己的约定给出() {
+        let td = TempDir::new("hidden-flag");
+        std::fs::write(td.path().join("plain.txt"), b"x").unwrap();
+        let hidden_name = make_hidden(td.path());
+        let p = td.path().to_string_lossy().into_owned();
+
+        let l = FsProvider::new()
+            .list(&p, &roots(&[&p]), ListOptions::default())
+            .await
+            .unwrap();
+
+        let find = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+        assert!(find(hidden_name).hidden, "本平台的隐藏项必须标为 hidden");
+        assert!(!find("plain.txt").hidden, "普通文件不该被标为 hidden");
+    }
+
+    /// Windows 上**两套约定都算**：属性位之外，`.` 开头的名字也算隐藏
+    /// （项目负责人 2026-09-21 定）。
+    ///
+    /// 这推翻了本文件里原先「Windows 只看属性位」的写法。理由是全仓一贯的
+    /// 「三平台一致」：`.git` / `.venv` / `.vscode` 在服务器管理界面上是噪音，
+    /// 不该因为宿主是 Windows 就摊开。代价是与资源管理器不一致——它会显示
+    /// `.gitignore`。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn 隐藏标记_windows_上_dotfile_也算() {
+        let td = TempDir::new("hidden-dot-win");
+        std::fs::write(td.path().join("plain.txt"), b"x").unwrap();
+        // 只有名字，没有任何隐藏 / 系统属性位。
+        std::fs::write(td.path().join(".gitignore"), b"x").unwrap();
+        let p = td.path().to_string_lossy().into_owned();
+
+        let l = FsProvider::new()
+            .list(&p, &roots(&[&p]), ListOptions::default())
+            .await
+            .unwrap();
+        let find = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+
+        assert!(find(".gitignore").hidden, "Windows 上 dotfile 也要算隐藏");
+        assert!(!find("plain.txt").hidden);
+    }
+
+    #[tokio::test]
+    async fn 隐藏项_在服务端过滤掉且不计进_total() {
+        let td = TempDir::new("hidden-filter");
+        std::fs::write(td.path().join("plain.txt"), b"x").unwrap();
+        make_hidden(td.path());
+        let p = td.path().to_string_lossy().into_owned();
+
+        let l = FsProvider::new()
+            .list(
+                &p,
+                &roots(&[&p]),
+                ListOptions {
+                    show_hidden: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(names(&l), vec!["plain.txt"]);
+        // total 是**过滤之后、分页之前**的数：前端拿它显示「共 N 项」，
+        // 算进被过滤掉的条目就会出现「共 2 项」却只有一行的鬼数字。
+        assert_eq!(l.total, Some(1), "被过滤掉的条目不算进 total");
+    }
+
+    /// 点一个链接要能直接跳过去，而跳法取决于目标是目录还是文件（进去 / 定位），
+    /// 所以 `target` 之外还要报 `target_kind`。断链报 `None`。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 链接报告目标是目录还是文件() {
+        let td = TempDir::new("link-kind");
+        std::fs::create_dir(td.path().join("realdir")).unwrap();
+        std::fs::write(td.path().join("realfile.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink("realdir", td.path().join("to-dir")).unwrap();
+        std::os::unix::fs::symlink("realfile.txt", td.path().join("to-file")).unwrap();
+        std::os::unix::fs::symlink("nowhere", td.path().join("broken")).unwrap();
+        let p = td.path().to_string_lossy().into_owned();
+
+        let l = FsProvider::new()
+            .list(&p, &roots(&[&p]), ListOptions::default())
+            .await
+            .unwrap();
+        let find = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+
+        assert_eq!(find("to-dir").target_kind, Some(FileKind::Dir));
+        assert_eq!(find("to-file").target_kind, Some(FileKind::File));
+        assert_eq!(find("broken").target_kind, None, "断链没有目标类型可报");
+        assert_eq!(
+            find("realdir").target_kind,
+            None,
+            "非链接条目不该有 target_kind"
+        );
+    }
+
+    /// Windows 版。用 **junction**（目录联接）而不是符号链接：建 junction
+    /// 不需要管理员，而符号链接需要——截图里 `NetHood`、`Recent` 那些正是
+    /// junction。指向文件的链接在 Windows 上只有符号链接一种形态，
+    /// 本机建不出来时按本文件既有惯例探测跳过。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 链接报告目标是目录还是文件_windows() {
+        let td = TempDir::new("link-kind");
+        std::fs::create_dir(td.path().join("realdir")).unwrap();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", "to-dir", "realdir"])
+            .current_dir(td.path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("本机建不了 junction；跳过该用例");
+            return;
+        }
+        let p = td.path().to_string_lossy().into_owned();
+
+        let l = FsProvider::new()
+            .list(&p, &roots(&[&p]), ListOptions::default())
+            .await
+            .unwrap();
+        let find = |n: &str| l.entries.iter().find(|e| e.name == n).unwrap();
+
+        assert_eq!(find("to-dir").kind, FileKind::Symlink);
+        assert_eq!(find("to-dir").target_kind, Some(FileKind::Dir));
+        assert_eq!(
+            find("realdir").target_kind,
+            None,
+            "非链接条目不该有 target_kind"
+        );
     }
 
     #[tokio::test]

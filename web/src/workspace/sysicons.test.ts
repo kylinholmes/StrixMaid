@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setAuthToken } from "@/api/client";
 import {
+  COMPUTER_KEY,
   DIR_KEY,
+  DOWNLOADS_KEY,
+  DRIVE_KEY,
   entrySubject,
   extOf,
   fetchTypeIcon,
   GENERIC_FILE_KEY,
+  HOME_KEY,
   iconKeysOf,
   resetForTest,
 } from "./sysicons";
@@ -41,7 +45,7 @@ describe("iconKeysOf（主体→图标源的编译期穷尽判定）", () => {
     for (const subject of [
       { kind: "dir", name: "Zed.app", fullPath: "C:\\Zed.app" },
       { kind: "symlink", name: "x", fullPath: "C:\\x" },
-      { kind: "known-folder", fullPath: "C:\\Users\\k\\Desktop" },
+      { kind: "known-folder", name: "Desktop", fullPath: "C:\\Users\\k\\Desktop" },
       { kind: "home", fullPath: "C:\\Users\\k" },
       { kind: "mount", fullPath: "C:\\" },
     ] as const) {
@@ -60,11 +64,48 @@ describe("iconKeysOf（主体→图标源的编译期穷尽判定）", () => {
     });
   });
 
-  it("左栏主体只按路径、没有 typeKey（Windows 上 $dir 会抹平桌面/下载的区分）", () => {
-    for (const kind of ["known-folder", "home", "mount"] as const) {
-      const keys = iconKeysOf({ kind, fullPath: "/x" }, "unix");
-      expect(keys).toEqual({ pathKey: "/x", typeKey: null });
-    }
+  it("unix 的左栏主体只按路径取（macOS 的真身图标就在那条路上）", () => {
+    expect(iconKeysOf({ kind: "home", fullPath: "/x" }, "unix")).toEqual({
+      pathKey: "/x",
+      typeKey: null,
+    });
+    expect(iconKeysOf({ kind: "mount", fullPath: "/x" }, "unix")).toEqual({
+      pathKey: "/x",
+      typeKey: null,
+    });
+    expect(iconKeysOf({ kind: "known-folder", name: "Desktop", fullPath: "/x" }, "unix")).toEqual({
+      pathKey: "/x",
+      typeKey: null,
+    });
+  });
+
+  it("windows 的左栏主体改用保留 key（原先一律回落内置图标集）", () => {
+    const win = (subject: Parameters<typeof iconKeysOf>[0]) => iconKeysOf(subject, "windows");
+
+    expect(win({ kind: "home", fullPath: "C:\\Users\\k" })).toEqual({
+      pathKey: null,
+      typeKey: HOME_KEY,
+    });
+    expect(win({ kind: "known-folder", name: "Downloads", fullPath: "C:\\x" })).toEqual({
+      pathKey: null,
+      typeKey: DOWNLOADS_KEY,
+    });
+    // 简体中文 Windows 的物理目录名就是中文，同样要认得。
+    expect(win({ kind: "known-folder", name: "下载", fullPath: "C:\\x" }).typeKey).toBe(
+      DOWNLOADS_KEY,
+    );
+    expect(win({ kind: "mount", fullPath: "C:\\" })).toEqual({
+      pathKey: null,
+      typeKey: DRIVE_KEY,
+    });
+    // 单个反斜杠是「全部驱动器」那个虚拟根，不是一块盘。
+    expect(win({ kind: "mount", fullPath: "\\" }).typeKey).toBe(COMPUTER_KEY);
+  });
+
+  it("认不出的已知文件夹名不硬凑一个 key，交给内置图标回落", () => {
+    expect(
+      iconKeysOf({ kind: "known-folder", name: "Whatever", fullPath: "C:\\x" }, "windows").typeKey,
+    ).toBe(null);
   });
 
   it("entrySubject 把设备/fifo/socket 都归为文件", () => {

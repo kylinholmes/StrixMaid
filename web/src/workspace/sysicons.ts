@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { authHeaders } from "@/api/client";
-import type { Platform } from "./path";
+import { isVirtualRoot, type Platform } from "./path";
 
 /**
  * 系统文件类型图标（roadmap/12 §8 未决 8）：按扩展名向 `GET /files/icon/{ext}`
@@ -23,6 +23,58 @@ import type { Platform } from "./path";
 export const DIR_KEY = "$dir";
 /** 保留 key：无扩展名 / 认不出类型的文件。 */
 export const GENERIC_FILE_KEY = "$file";
+
+// 左栏（快速访问）的保留 key。与后端 `providers/fs/icon.rs` 的 `RESERVED_KEYS`
+// 一一对应，两边必须一致——对不上只会表现为「那一项没有图标」，不会报错。
+/** 保留 key：主目录。 */
+export const HOME_KEY = "$home";
+/** 保留 key：「此电脑」/ 全部驱动器这个虚拟根。 */
+export const COMPUTER_KEY = "$computer";
+/** 保留 key：一块固定磁盘。 */
+export const DRIVE_KEY = "$drive";
+/** 保留 key：桌面。 */
+export const DESKTOP_KEY = "$desktop";
+/** 保留 key：文稿 / 文档。 */
+export const DOCUMENTS_KEY = "$documents";
+/** 保留 key：下载。 */
+export const DOWNLOADS_KEY = "$downloads";
+/** 保留 key：图片。 */
+export const PICTURES_KEY = "$pictures";
+/** 保留 key：音乐。 */
+export const MUSIC_KEY = "$music";
+/** 保留 key：视频 / 影片。 */
+export const VIDEOS_KEY = "$videos";
+/** 保留 key：公共。 */
+export const PUBLIC_KEY = "$public";
+
+/**
+ * 已知文件夹的**物理目录名** → 保留 key。
+ *
+ * 键是磁盘上的真实目录名而不是展示名：简体中文 Windows 上「下载」就叫
+ * `下载`，两种都要认。认不出的名字返回 `undefined`，由调用方回落内置图标
+ * ——硬凑一个 key 只会画错。
+ *
+ * 这张表与 `QuickAccess.tsx` 的 `KNOWN_FOLDERS` 覆盖同一批名字。
+ */
+const KNOWN_FOLDER_KEY: Record<string, string> = {
+  Desktop: DESKTOP_KEY,
+  桌面: DESKTOP_KEY,
+  Documents: DOCUMENTS_KEY,
+  文档: DOCUMENTS_KEY,
+  文稿: DOCUMENTS_KEY,
+  Downloads: DOWNLOADS_KEY,
+  下载: DOWNLOADS_KEY,
+  Pictures: PICTURES_KEY,
+  图片: PICTURES_KEY,
+  Music: MUSIC_KEY,
+  音乐: MUSIC_KEY,
+  Movies: VIDEOS_KEY,
+  Videos: VIDEOS_KEY,
+  视频: VIDEOS_KEY,
+  影片: VIDEOS_KEY,
+  Public: PUBLIC_KEY,
+  公共: PUBLIC_KEY,
+};
 
 /** 会话级缓存：类型 key → object URL；`null` 是负缓存（这一类真的取不到）。 */
 const cache = new Map<string, string | null>();
@@ -212,8 +264,11 @@ export type IconSubject =
   | { kind: "file"; name: string }
   /** 符号链接：mac 上按路径解析到目标，其余回落链条形状。 */
   | { kind: "symlink"; name: string; fullPath: string | null }
-  /** 左栏的已知文件夹（桌面/下载……）：mac 有带徽标的专属图标（按路径）。 */
-  | { kind: "known-folder"; fullPath: string }
+  /**
+   * 左栏的已知文件夹（桌面/下载……）：mac 有带徽标的专属图标（按路径），
+   * Windows 按 `name` 换一个保留 key 去取（见 [`KNOWN_FOLDER_KEY`]）。
+   */
+  | { kind: "known-folder"; name: string; fullPath: string }
   /** 左栏的主目录。 */
   | { kind: "home"; fullPath: string }
   /** 左栏的挂载点/根：mac 按路径给磁盘/卷的真图标。 */
@@ -253,10 +308,26 @@ export function iconKeysOf(
       return { pathKey: null, typeKey: extOf(subject.name) ?? GENERIC_FILE_KEY };
     case "symlink":
       return { pathKey: unix ? subject.fullPath : null, typeKey: null };
+    // 左栏三种主体：unix 上按路径取（mac 给的是真身：下载文件夹的徽标、
+    // 磁盘的样子）；Windows 上按各自的保留 key 取。
+    //
+    // **Windows 这条原先是 `typeKey: null`**，即一律回落内置 Papirus 图标集，
+    // 理由是拿 `$dir` 去取会把 桌面/下载/磁盘 全画成同一只黄文件夹。现在不
+    // 再借用 `$dir`，而是每种主体一个保留 key，那条理由随之作废（项目负责人
+    // 2026-09-21 定）。后端仍然不接受路径，只认这张固定的 key 表，所以
+    // 「图标端点不碰用户文件」的前提没有松动。
     case "known-folder":
+      return {
+        pathKey: unix ? subject.fullPath : null,
+        typeKey: unix ? null : (KNOWN_FOLDER_KEY[subject.name] ?? null),
+      };
     case "home":
+      return { pathKey: unix ? subject.fullPath : null, typeKey: unix ? null : HOME_KEY };
     case "mount":
-      return { pathKey: unix ? subject.fullPath : null, typeKey: null };
+      return {
+        pathKey: unix ? subject.fullPath : null,
+        typeKey: unix ? null : isVirtualRoot(subject.fullPath, platform) ? COMPUTER_KEY : DRIVE_KEY,
+      };
     default:
       return assertNever(subject);
   }

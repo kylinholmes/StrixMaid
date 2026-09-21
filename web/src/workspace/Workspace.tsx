@@ -7,6 +7,7 @@ import { Button } from "@/components";
 import { cx } from "@/lib/cx";
 import { useSession } from "@/session/useSession";
 import { FileList } from "./FileList";
+import { sideButtonAction } from "./mousenav";
 import { guessHome, platformOf } from "./path";
 import { QuickAccess } from "./QuickAccess";
 import { useWorkspace } from "./store";
@@ -96,6 +97,23 @@ export function Workspace({ initial }: WorkspaceProps) {
     const next = future.current.pop();
     if (next !== undefined) jump(next, past);
   }, [jump]);
+
+  // 鼠标侧键 → 文件区的前进 / 后退。
+  //
+  // 与 ⌃` 同样挂在 window 的 capture 阶段：终端聚焦时也要收得到。
+  // `preventDefault` 是承重的，理由见 `mousenav.ts`——不拦的话浏览器会
+  // 自己把 SPA 退到上一个路由。
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const action = sideButtonAction(e.button);
+      if (action === null) return;
+      e.preventDefault();
+      if (action === "back") goBack();
+      else goForward();
+    };
+    window.addEventListener("mousedown", onDown, true);
+    return () => window.removeEventListener("mousedown", onDown, true);
+  }, [goBack, goForward]);
 
   return (
     <div className={s.workspace}>

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type Column, EmptyState, ErrorState, Table, TableSkeleton } from "@/components";
 import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
+import { activateEntry } from "./activate";
 import { fileIconUrl, folderIconUrl } from "./icons";
 import { OverlayScrollbar } from "./OverlayScrollbar";
 import { joinPath, type Platform } from "./path";
@@ -91,7 +92,11 @@ function KindIcon({
 export interface ListPaneProps {
   path: string | null;
   platform: Platform;
-  onNavigate: (path: string) => void;
+  /**
+   * 导航到 `path`。`select` 给出时表示「到了那儿顺便选中这一项」——
+   * 点一个指向文件的链接就是这种跳法（目标本身打不开，只能定位到它）。
+   */
+  onNavigate: (path: string, select?: string) => void;
   /** 层叠导航的动画类（推入/滑出/垫底），由 FileList 编排。 */
   className?: string;
   /** 层角色标记（top/under/leaving），测试与调试按它定位。 */
@@ -111,8 +116,11 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
   const dirSort = useWorkspace((st) => st.dirSort);
   const setDirSort = useWorkspace((st) => st.setDirSort);
 
+  // 隐藏项的过滤在**服务端**（`show_hidden`），不在这里筛：排序与分页也在
+  // 服务端，在已取回的一页里过滤得到的是全量的一个错误切片，`total` 还会
+  // 对不上——与本文件「排序在服务端」是同一条理由。
   const { entries, error, isPending, hasNextPage, isFetchingNextPage, fetchNextPage, refresh } =
-    useDirListing(path, dirSort);
+    useDirListing(path, dirSort, !hideHidden);
 
   const [selected, setSelected] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -138,24 +146,24 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
     if (h && h > 8) setRowH(h);
   }, []);
 
-  // 隐藏文件按 dotfile 约定过滤（在已加载的页内做；后端分页不知道这条约定）。
-  const visible = hideHidden ? entries.filter((e) => !e.name.startsWith(".")) : entries;
-
   const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
-  const end = Math.min(visible.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
-  const slice = visible.slice(start, end);
+  const end = Math.min(entries.length, Math.ceil((scrollTop + viewportH) / rowH) + OVERSCAN);
+  const slice = entries.slice(start, end);
 
   // 滚近已加载末尾就取下一页。
   useEffect(() => {
-    if (hasNextPage && !isFetchingNextPage && end >= visible.length - OVERSCAN) {
+    if (hasNextPage && !isFetchingNextPage && end >= entries.length - OVERSCAN) {
       void fetchNextPage();
     }
-  }, [end, visible.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [end, entries.length, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  const enter = useCallback(
+  /** 点一个条目：该进哪儿、该选中谁，判定统一在 `activate.ts` 里。 */
+  const activate = useCallback(
     (entry: DirEntry) => {
-      if (path === null || entry.kind !== "dir") return;
-      onNavigate(joinPath(path, entry.name, platform));
+      const action = activateEntry(path, entry, platform);
+      if (action === null) return;
+      if (action.kind === "enter") onNavigate(action.path);
+      else onNavigate(action.dir, action.name);
     },
     [path, platform, onNavigate],
   );
@@ -232,12 +240,12 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
           />
         ) : viewMode === "tiles" ? (
           <TileGrid
-            entries={visible}
+            entries={entries}
             platform={platform}
             pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
             selected={selected ?? markName ?? null}
             onSelect={setSelected}
-            onEnterDir={enter}
+            onEnterDir={activate}
           />
         ) : (
           <div ref={measureRow}>
@@ -249,7 +257,7 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
               selectedKey={selected ?? markName}
               onSelect={(e) => {
                 setSelected(e.name);
-                enter(e);
+                activate(e);
               }}
               onHeaderClick={onHeaderClick}
               sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
@@ -258,8 +266,8 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
                 start > 0 && <tr data-spacer aria-hidden style={{ height: start * rowH }} />
               }
               trailingRow={
-                visible.length - end > 0 && (
-                  <tr data-spacer aria-hidden style={{ height: (visible.length - end) * rowH }} />
+                entries.length - end > 0 && (
+                  <tr data-spacer aria-hidden style={{ height: (entries.length - end) * rowH }} />
                 )
               }
             />

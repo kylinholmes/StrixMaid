@@ -273,6 +273,10 @@ pub struct FsListParams {
     /// 排序方向。`None` = 升序。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<crate::process::SortOrder>,
+    /// 列不列隐藏项。`None` = 列（provider 层的缺省，即不过滤）。
+    /// 产品意义上的「默认藏起来」在 HTTP 层定，见 `file::FileListQuery::hidden`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_hidden: Option<bool>,
 }
 
 /// `fs.raw` 的参数：按块取一个文件的原始字节（roadmap/12 §4.6）。

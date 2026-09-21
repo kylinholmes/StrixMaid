@@ -147,7 +147,7 @@ export function FileList({
   }, [editing, platform, qc]);
 
   const acceptSuggestion = (target: string) => {
-    onNavigate(target);
+    navigate(target);
     setEditing(null);
     setSugs([]);
   };
@@ -155,6 +155,17 @@ export function FileList({
   useEffect(() => {
     setEditing(null);
   }, []);
+
+  /**
+   * 「跳过去并选中某一项」的目标（点一个指向**文件**的链接时产生）。
+   * 目标本身打不开——预览界面还没有——所以跳到它所在的目录并高亮它。
+   * 导航一旦离开那个目录就作废。
+   */
+  const [reveal, setReveal] = useState<{ dir: string; name: string } | null>(null);
+  const navigate = (to: string, select?: string) => {
+    setReveal(select === undefined ? null : { dir: to, name: select });
+    onNavigate(to);
+  };
 
   const parent = path === null ? null : parentPath(path, platform);
   const up = parent;
@@ -183,7 +194,7 @@ export function FileList({
         key={`p:${grand}`}
         path={grand}
         platform={platform}
-        onNavigate={onNavigate}
+        onNavigate={navigate}
         pane="deep"
         className={s.paneDeep}
         markName={parentName}
@@ -194,7 +205,7 @@ export function FileList({
         className={s.upStrip}
         title={`返回上一级 ${parent}`}
         aria-label={`返回上一级 ${parent}`}
-        onClick={() => parent !== null && onNavigate(parent)}
+        onClick={() => parent !== null && navigate(parent)}
       >
         <span aria-hidden>‹</span>
       </button>,
@@ -206,7 +217,7 @@ export function FileList({
         key={`p:${parent}`}
         path={parent}
         platform={platform}
-        onNavigate={onNavigate}
+        onNavigate={navigate}
         pane="under"
         className={cx(s.paneMid, grand !== null && s.paneMidShifted)}
         markName={currentName}
@@ -218,8 +229,9 @@ export function FileList({
       key={`p:${path}`}
       path={path}
       platform={platform}
-      onNavigate={onNavigate}
+      onNavigate={navigate}
       pane="top"
+      markName={reveal !== null && reveal.dir === path ? reveal.name : null}
       className={cx(
         layered && parent !== null && (grand !== null ? s.paneTop3 : s.paneTop),
         layered && pushAnim && s.panePushIn,
@@ -232,7 +244,7 @@ export function FileList({
         key={`p:${leaving}`}
         path={leaving}
         platform={platform}
-        onNavigate={onNavigate}
+        onNavigate={navigate}
         pane="leaving"
         className={cx(grand !== null ? s.paneTop3 : s.paneTop, s.panePopOut)}
       />,
@@ -254,7 +266,7 @@ export function FileList({
           size="sm"
           aria-label="上一级"
           disabled={up === null}
-          onClick={() => up !== null && onNavigate(up)}
+          onClick={() => up !== null && navigate(up)}
         >
           <ArrowUp size={14} />
         </Button>
@@ -289,7 +301,7 @@ export function FileList({
               if (e.key === "Enter") {
                 const chosen = sugIdx >= 0 ? sugs[sugIdx] : null;
                 const target = (chosen ?? editing ?? "").trim();
-                if (target && target !== path) onNavigate(target);
+                if (target && target !== path) navigate(target);
                 setEditing(null);
                 setSugs([]);
                 e.currentTarget.blur();
@@ -343,8 +355,10 @@ export function FileList({
         <Button
           iconOnly
           size="sm"
-          aria-label={hideHidden ? "显示隐藏文件" : "隐藏隐藏文件"}
-          title={hideHidden ? "显示以 . 开头的条目" : "隐藏以 . 开头的条目"}
+          aria-label={hideHidden ? "显示隐藏项" : "隐藏隐藏项"}
+          // 判定按平台走（Unix 是 dotfile，Windows 是隐藏/系统属性位），
+          // 所以文案不能再说「以 . 开头」。
+          title={hideHidden ? "显示隐藏项" : "隐藏隐藏项"}
           onClick={toggleHidden}
         >
           {hideHidden ? <EyeOff size={14} /> : <Eye size={14} />}

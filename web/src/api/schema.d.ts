@@ -218,6 +218,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/files/icon-path": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 具体条目的系统图标（按路径，macOS）
+         * @description `.app` 这类 bundle 显示应用自己的图标而不是文件夹，符号链接解析到目标。
+         *     只有 macOS 提供（`NSWorkspace iconForFile:`），其余平台一律 404；
+         *     为什么 Windows 不开这条路见 `providers/fs/icon` 的文档。
+         */
+        get: operations["path_icon"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/icon/{ext}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 文件类型图标
+         * @description 按**扩展名**（不含点，如 `pdf`）取这一类文件的系统图标。Linux 与无窗口
+         *     服务器的 macOS 环境一律 404，前端据此回落到内置图标集（§4.7）。
+         */
+        get: operations["type_icon"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/files/raw": {
         parameters: {
             query?: never;
@@ -227,9 +270,35 @@ export interface paths {
         };
         /**
          * 取原始字节
-         * @description 缩略图与将来的下载都走它。按 ≤256 KiB 的块从 worker 取回并流式转发。
+         * @description 缩略图与将来的下载都走它（roadmap/12 §4.6）。不放宽 `/files/content`：
+         *     「绝不把二进制当文本吐回去」是那个端点的安全属性。
+         *
+         *     worker RPC 单帧上限 1 MiB，文件按 ≤256 KiB 的块从 worker 逐块取回并
+         *     流式转发——控制面在块与块之间有喘息，不会被一个大文件顶住。
          */
         get: operations["raw_file"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/thumb": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 图片缩略图
+         * @description 在会话的 worker 内缩好再下发（roadmap/12 §4.7，2026-09-21 改判）：
+         *     一张 20 MiB 的照片出去的只有几 KB。相机 JPEG 走 EXIF 内嵌预览、完全不解码；
+         *     其余真解码缩放，带像素数上限与 panic 兜底。
+         */
+        get: operations["thumb"];
         put?: never;
         post?: never;
         delete?: never;
@@ -507,6 +576,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/processes/icon/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 进程图标
+         * @description 按**映像名**取一张 32×32 的 PNG（Windows 上就是 `chrome.exe` 这种带后缀的名字，
+         *     即 `ProcessSummary.name`）。取不到一律 404——系统进程没有图标是常态，不是异常。
+         */
+        get: operations["icon"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/processes/{pid}": {
         parameters: {
             query?: never;
@@ -591,6 +681,58 @@ export interface paths {
          *     是否开机自启 / 关键字过滤。`scope=user` 需要 user manager 可达。
          */
         get: operations["list_units"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/services/icon-generic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 通用服务图标
+         * @description 一张所有服务共用的齿轮，与 `services.msc` 里那对齿轮是同一张图
+         *     （Windows 上从 `%SystemRoot%\System32\filemgmt.dll` 运行时提取）。
+         *
+         *     前端在 `/services/icon/{name}` 回 404 时取它顶上。它与具体服务无关，
+         *     因此**整张表只需要取一次**，再由浏览器缓存住。
+         *
+         *     非 Windows 平台恒为 404：那两个平台上没有一张属于「服务」这个类别的系统图形
+         *     可取，拿通用可执行文件图顶替就是在展示层编数据。
+         */
+        get: operations["icon_generic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/services/icon/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 服务图标
+         * @description 按服务名取**这个服务自己**的一张 32×32 PNG（名字取自 `UnitSummary.name`，
+         *     带不带 `.service` 后缀都可以）。图标来自它 `ImagePath` 指向的可执行文件。
+         *
+         *     取不到一律 404，且这是常态而非异常：由 `svchost.exe` 托管的服务（本机 317 个
+         *     里有 239 个）与没有界面的守护进程都不带图标资源。前端据此改取
+         *     `/services/icon-generic` 那张通用齿轮。
+         */
+        get: operations["icon"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1355,6 +1497,17 @@ export interface components {
             gid: number;
             /** @description 属组名。同上。 */
             group?: string | null;
+            /**
+             * @description 这一项在**本平台的约定下**算不算隐藏。
+             *
+             *     两个平台的约定不是一回事，所以判断留在服务端、不交给前端拼：
+             *     Unix 看名字是否以 `.` 开头；Windows 看 `FILE_ATTRIBUTE_HIDDEN` 与
+             *     `FILE_ATTRIBUTE_SYSTEM` 两个属性位（`.gitignore` 在 Explorer 里照样
+             *     显示，而 `NTUSER.DAT` 不显示——按 dotfile 约定判会把两者都弄反）。
+             *
+             *     `#[serde(default)]`：老服务端没有这个字段，反序列化得到 `false`。
+             */
+            hidden?: boolean;
             /** @description 类型。 */
             kind: components["schemas"]["FileKind"];
             /**
@@ -1381,6 +1534,7 @@ export interface components {
             size_bytes: number;
             /** @description 符号链接的目标；`kind != symlink` 时为 `None`。不解引用，原样返回。 */
             target?: string | null;
+            target_kind?: null | components["schemas"]["FileKind"];
             /**
              * Format: int32
              * @description 属主 uid。
@@ -1499,7 +1653,8 @@ export interface components {
          */
         FileKind: "file" | "dir" | "symlink" | "block_device" | "char_device" | "fifo" | "socket" | "unknown";
         /**
-         * @description 目录列表的排序键。**目录永远排在前面**，键只决定组内顺序。
+         * @description 目录列表的排序键（`roadmap/12-workspace.md` §4.5）。**目录永远排在前面**，
+         *     键只决定目录组内与文件组内的顺序。
          * @enum {string}
          */
         FileSortKey: "name" | "size" | "mtime";
@@ -3363,58 +3518,31 @@ export interface operations {
             };
         };
     };
-    raw_file: {
-        parameters: {
-            query: {
-                /**
-                 * @description 绝对路径。
-                 * @example /etc
-                 */
-                path: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 文件的原始字节 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": number[];
-                };
-            };
-            /** @description 未认证，或会话的 worker 已退出 */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-        };
-    };
     list_dir: {
         parameters: {
             query: {
                 /**
-                 * @description 绝对路径。必须以 `/` 开头且**不含 `..`**——服务端做规范化后校验，
-                 *     不合法返回 [`crate::ErrorCode::InvalidRequest`]。
+                 * @description 见 [`FilePathQuery::path`]。
                  * @example /etc
                  */
                 path: string;
                 /** @description 最多返回多少条。缺省不分页。 */
-                limit?: number | null;
+                limit?: number;
                 /** @description 跳过前多少条（排序之后生效）。 */
-                offset?: number | null;
+                offset?: number;
                 /** @description 排序键，缺省按名称。 */
-                sort?: components["schemas"]["FileSortKey"] | null;
+                sort?: components["schemas"]["FileSortKey"];
                 /** @description 排序方向，缺省升序。 */
-                order?: components["schemas"]["SortOrder"] | null;
+                order?: components["schemas"]["SortOrder"];
+                /**
+                 * @description 列不列隐藏项（判定见 [`DirEntryInfo::hidden`]）。缺省 **列**。
+                 *
+                 *     缺省值与界面的缺省**有意相反**：界面默认把隐藏项收起来，本参数缺省
+                 *     是不过滤。理由是本结构体开头那条约定——「全部可选项缺省即旧行为」；
+                 *     把产品口味塞进 API 缺省，等于让一个不传参数的调用者拿到被悄悄裁剪过
+                 *     的目录。前端永远显式给值，所以这个缺省实际只对别的调用者可见。
+                 */
+                show_hidden?: boolean;
             };
             header?: never;
             path?: never;
@@ -3495,6 +3623,245 @@ export interface operations {
                 };
             };
             /** @description 路径不合法、二进制文件或超出大小上限 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 无权限读取，或路径在 files.allowed_roots 之外 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 文件不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    path_icon: {
+        parameters: {
+            query: {
+                /**
+                 * @description 绝对路径。必须以 `/` 开头且**不含 `..`**——服务端做规范化后校验，
+                 *     不合法返回 [`crate::ErrorCode::InvalidRequest`]。
+                 * @example /etc
+                 */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 这个条目的系统图标（响应体是原始 PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description 路径不合法（相对路径、含 `..` 或控制字符） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 路径在 files.allowed_roots 之外 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本平台不提供按路径取图标（macOS 之外） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    type_icon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 扩展名，不含前导点，如 `pdf` */
+                ext: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 这一类文件的系统图标（响应体是原始 PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description 扩展名不合法（含点号、分隔符或过长） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本平台不提供文件类型图标（Linux、无窗口服务器的 macOS），或系统给不出这一类的图标 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    raw_file: {
+        parameters: {
+            query: {
+                /**
+                 * @description 绝对路径。必须以 `/` 开头且**不含 `..`**——服务端做规范化后校验，
+                 *     不合法返回 [`crate::ErrorCode::InvalidRequest`]。
+                 * @example /etc
+                 */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 文件的原始字节 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": number[];
+                };
+            };
+            /** @description 路径不合法或是目录 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证，或会话的 worker 已退出 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 无权限读取，或路径在 files.allowed_roots 之外 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 文件不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    thumb: {
+        parameters: {
+            query: {
+                /**
+                 * @description 绝对路径。必须以 `/` 开头且**不含 `..`**——服务端做规范化后校验，
+                 *     不合法返回 [`crate::ErrorCode::InvalidRequest`]。
+                 * @example /etc
+                 */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 缩略图（原始 JPEG / PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/jpeg": string;
+                };
+            };
+            /** @description 路径不合法、不是图片、格式不支持或图片已损坏 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4234,6 +4601,56 @@ export interface operations {
             };
         };
     };
+    icon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 映像名，取自 `ProcessSummary.name`，如 `chrome.exe` */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 32×32 的 PNG 图标（响应体是原始 PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description 名字不合法（含路径分隔符、`..` 或过长） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 没有正在运行的同名进程、取不到它的可执行文件或图标，或本平台不提供进程图标（Linux / macOS） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     detail: {
         parameters: {
             query?: never;
@@ -4474,6 +4891,94 @@ export interface operations {
             };
             /** @description systemd 无响应 */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    icon_generic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 32×32 的 PNG 齿轮（响应体是原始 PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 本平台没有可用的通用服务图标（Linux / macOS 恒为此项） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    icon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 服务名，取自 `UnitSummary.name`，如 `Spooler` 或 `Spooler.service` */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 32×32 的 PNG 图标（响应体是原始 PNG 字节） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description 服务名不合法（含路径分隔符、`..` 或过长） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务不存在、它是驱动、或它的可执行文件里没有图标资源；非 Windows 平台恒为此项 */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5094,35 +5599,6 @@ export interface operations {
             };
         };
     };
-    list_shells: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 可用 shell，默认项在最前 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ShellInfo"][];
-                };
-            };
-            /** @description 未认证 */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-        };
-    };
     list_terminals: {
         parameters: {
             query?: never;
@@ -5203,6 +5679,35 @@ export interface operations {
             };
             /** @description 本会话的终端数已达上限 */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_shells: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可用 shell，默认项在最前 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShellInfo"][];
+                };
+            };
+            /** @description 未认证 */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

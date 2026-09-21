@@ -105,7 +105,10 @@ use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE
 use windows_sys::Win32::Security::{
     GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_SYSTEM,
+};
 
 use crate::platform::windows::{account_by_sid, filetime_to_unix, logical_volumes, rid_of_sid};
 
@@ -266,7 +269,10 @@ pub(super) fn list_drives(dir: &Path) -> DirListing {
             user: None,
             group: None,
             mtime_ts: 0,
+            // 驱动器是虚拟根下合成出来的条目，没有属性位可言，永不隐藏。
             target: None,
+            target_kind: None,
+            hidden: false,
         })
         .collect();
     DirListing {
@@ -316,6 +322,8 @@ impl EntryMapper {
         } else {
             Ownership::default()
         };
+        // 在 name 被搬进结构体之前判：dotfile 那一条要看名字。
+        let hidden = hidden_of(&name, meta.file_attributes());
         DirEntryInfo {
             name,
             kind,
@@ -327,6 +335,8 @@ impl EntryMapper {
             group: own.group,
             mtime_ts: filetime_to_unix(meta.last_write_time()),
             target,
+            target_kind: target_kind_of(kind, meta.file_attributes()),
+            hidden,
         }
     }
 }
@@ -424,6 +434,43 @@ unsafe fn sid_account(sid: PSID) -> Option<String> {
     }
     // SAFETY: 刚判过非空，其余由调用方保证。
     unsafe { account_by_sid(sid) }.map(|a| a.qualified())
+}
+
+/// 链接**目标**的类型，从链接自身的属性位读出。非链接返回 `None`。
+///
+/// **不碰目标，零额外系统调用**：重解析点（符号链接、junction）自身就带
+/// `FILE_ATTRIBUTE_DIRECTORY`——指向目录的链接置位，指向文件的不置位，
+/// 与 [`mode_of`] 用同一个位出于同一个理由。
+///
+/// 代价是**断链仍按链接声明的形态报**（Unix 侧要 `stat` 才知道目标类型，
+/// 因此那边断链报 `None`）。两个平台在界面上的结果一致：跳过去之后由
+/// `/files` 正常报「找不到」，而不是点了没反应。
+pub(super) fn target_kind_of(kind: FileKind, attrs: u32) -> Option<FileKind> {
+    if kind != FileKind::Symlink {
+        return None;
+    }
+    Some(if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        FileKind::Dir
+    } else {
+        FileKind::File
+    })
+}
+
+/// 这一项在 Windows 的约定下算不算隐藏。
+///
+/// **两套约定都算**（项目负责人 2026-09-21 定）：
+///
+/// 1. `FILE_ATTRIBUTE_HIDDEN`（用户可见的「隐藏」勾选框）与
+///    `FILE_ATTRIBUTE_SYSTEM`（系统簿记文件：`NTUSER.DAT{…}.regtrans-ms`、
+///    `pagefile.sys`）——资源管理器默认这两类都不显示；
+/// 2. 名字以 `.` 开头——Unix 的 dotfile 约定。
+///
+/// 第 2 条**与资源管理器不一致**（它会显示 `.gitignore`），是有意的：全仓
+/// 一贯的取向是「三平台一致」，而 `.git` / `.venv` / `.vscode` 在服务器管理
+/// 界面上就是噪音，不该因为宿主换成 Windows 就摊开一屏。这条推翻了本函数
+/// 最初「Windows 只看属性位」的写法。
+pub(super) fn hidden_of(name: &str, attrs: u32) -> bool {
+    attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0 || name.starts_with('.')
 }
 
 /// 文件属性 → 合成的 `mode`，口径与近似说明见模块文档「mode 是合成的」。

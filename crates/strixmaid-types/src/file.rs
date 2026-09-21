@@ -78,6 +78,14 @@ pub struct FileListQuery {
     /// 排序方向，缺省升序。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<crate::process::SortOrder>,
+    /// 列不列隐藏项（判定见 [`DirEntryInfo::hidden`]）。缺省 **列**。
+    ///
+    /// 缺省值与界面的缺省**有意相反**：界面默认把隐藏项收起来，本参数缺省
+    /// 是不过滤。理由是本结构体开头那条约定——「全部可选项缺省即旧行为」；
+    /// 把产品口味塞进 API 缺省，等于让一个不传参数的调用者拿到被悄悄裁剪过
+    /// 的目录。前端永远显式给值，所以这个缺省实际只对别的调用者可见。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_hidden: Option<bool>,
 }
 
 /// 目录项。
@@ -109,6 +117,24 @@ pub struct DirEntryInfo {
     /// 符号链接的目标；`kind != symlink` 时为 `None`。不解引用，原样返回。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// 链接**目标**的类型；`kind != symlink` 或目标取不到（断链、链接成环、
+    /// 无权限）时为 `None`。
+    ///
+    /// 有它才能决定点一个链接该怎么跳：目标是目录就进去，是文件就跳到它
+    /// 所在的目录并选中它。`target` 只给出路径，看不出该往哪儿跳。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<FileKind>,
+    /// 这一项算不算隐藏。判断留在服务端、不交给前端拼——前端只知道对面是
+    /// unix 还是 windows，不掌握属性位。
+    ///
+    /// * Unix：名字以 `.` 开头；
+    /// * Windows：`FILE_ATTRIBUTE_HIDDEN` / `FILE_ATTRIBUTE_SYSTEM` 属性位，
+    ///   **外加** dotfile 约定（项目负责人 2026-09-21 定；与资源管理器不一致
+    ///   是有意的，理由见 `providers/fs/windows.rs` 的 `hidden_of`）。
+    ///
+    /// `#[serde(default)]`：老服务端没有这个字段，反序列化得到 `false`。
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// `GET /api/v1/files` 的响应体。
