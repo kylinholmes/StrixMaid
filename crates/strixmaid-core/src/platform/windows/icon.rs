@@ -63,10 +63,13 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATT
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
+use windows_sys::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows_sys::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
-    SHGetFileInfoW,
+    ILFree, KF_FLAG_DONT_VERIFY, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON,
+    SHGFI_PIDL, SHGFI_USEFILEATTRIBUTES, SHGSI_ICON, SHGSI_LARGEICON, SHGetFileInfoW,
+    SHGetKnownFolderIDList, SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO,
 };
+use windows_sys::core::GUID;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, HICON, ICONINFO, PrivateExtractIconsW,
 };
@@ -151,9 +154,137 @@ pub fn generic_file_icon_png() -> io::Result<Vec<u8>> {
     shell_type_icon_png("strixmaid", FILE_ATTRIBUTE_NORMAL)
 }
 
+/// 自动 `ILFree` 的外壳 ID 列表（PIDL）。
+struct OwnedPidl(*mut ITEMIDLIST);
+
+impl Drop for OwnedPidl {
+    fn drop(&mut self) {
+        // SAFETY: 构造时已排除空指针，本类型独占所有权，只释放这一次。
+        unsafe { ILFree(self.0) };
+    }
+}
+
+/// 一个**已知文件夹**（桌面、下载、文稿、主目录……）的外壳图标。
+///
+/// # 为什么不是按路径取
+///
+/// 「按路径取图标」那条路在 Windows 上是关着的（见
+/// `providers/fs/icon` 的文档）：主进程可能以服务身份运行，拿任意路径去问
+/// 外壳等于给任何登录用户一个「这个路径存不存在、是什么」的探针。
+///
+/// 本函数不接受路径，只接受一个**固定枚举**里的 `KNOWNFOLDERID`。调用方
+/// 编不出新的取值，因此它问不出任何关于用户文件的事——那条限制仍然成立。
+///
+/// # `KF_FLAG_DONT_VERIFY`
+///
+/// 只要这个已知文件夹的**身份**，不要求它在磁盘上真的存在：既省掉一次磁盘
+/// 访问，也让服务进程（它自己的配置文件里往往根本没有「下载」这种目录）
+/// 照样取得到图标。
+///
+/// 顺带一提，服务身份解析出来的是**服务账户自己**的那些文件夹，不是登录
+/// 用户的——但我们只取图标，而已知文件夹的图标与是谁的无关。
+pub fn known_folder_icon_png(folder: &GUID) -> io::Result<Vec<u8>> {
+    let _com = ComInit::new();
+    warm_up_shell();
+
+    let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
+    // SAFETY: folder 指向一个有效的 GUID；htoken 传空表示当前用户；
+    // ppidl 是本函数栈上的输出变量，成功时得到一块需由 ILFree 释放的内存。
+    let hr = unsafe {
+        SHGetKnownFolderIDList(
+            folder,
+            KF_FLAG_DONT_VERIFY as u32,
+            std::ptr::null_mut(),
+            &raw mut raw,
+        )
+    };
+    if hr < 0 || raw.is_null() {
+        return Err(io::Error::other(format!(
+            "SHGetKnownFolderIDList 失败：0x{hr:08X}"
+        )));
+    }
+    let pidl = OwnedPidl(raw);
+
+    let mut info = empty_file_info();
+    // SAFETY: `SHGFI_PIDL` 下第一个参数是 PIDL 而不是宽字符串（Win32 的这个
+    // 形参本身就是个联合），pidl 由 OwnedPidl 看管、活过本次调用；info 是
+    // 可写的 SHFILEINFOW，长度如实给出。成功时 info.hIcon 归调用方销毁。
+    let ok = unsafe {
+        SHGetFileInfoW(
+            pidl.0 as *const u16,
+            0,
+            &raw mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if ok == 0 || info.hIcon.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "外壳没有给出这个已知文件夹的图标",
+        ));
+    }
+    let icon = OwnedIcon(info.hIcon);
+    // SAFETY: icon 有效且尚未销毁，借用期不超过本语句。
+    let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
+    encode_png(&rgba)
+}
+
+/// 一张**库存图标**（`SIID_*`）——磁盘、网络盘这类没有路径可言的东西。
+///
+/// 与 [`known_folder_icon_png`] 同理：取值来自固定枚举，不接受路径。
+pub fn stock_icon_png(siid: SHSTOCKICONID) -> io::Result<Vec<u8>> {
+    let _com = ComInit::new();
+    warm_up_shell();
+
+    // SAFETY: SHSTOCKICONINFO 是纯 POD（句柄、整数与 u16 数组），全零是合法值。
+    let mut sii: SHSTOCKICONINFO = unsafe { std::mem::zeroed() };
+    sii.cbSize = std::mem::size_of::<SHSTOCKICONINFO>() as u32;
+    // SAFETY: sii 的 cbSize 已按文档填好；成功时 hIcon 归调用方销毁。
+    let hr = unsafe { SHGetStockIconInfo(siid, SHGSI_ICON | SHGSI_LARGEICON, &raw mut sii) };
+    if hr < 0 || sii.hIcon.is_null() {
+        return Err(io::Error::other(format!(
+            "SHGetStockIconInfo 失败：0x{hr:08X}"
+        )));
+    }
+    let icon = OwnedIcon(sii.hIcon);
+    // SAFETY: 同上。
+    let rgba = unsafe { icon_to_rgba(icon.raw()) }?;
+    encode_png(&rgba)
+}
+
+/// 把「**进程内第一次**取外壳图标」串行化。
+///
+/// 现象：八条线程各取 50 次图标，其中七条**恰好在各自的第 0 次**调用上拿到
+/// `SHGetFileInfoW` 返回 0，之后 393 次全部成功。也就是说失败的不是「并发」，
+/// 而是「多条线程同时发起进程里的头一次」——外壳的系统图像列表还在初始化，
+/// 跑赢的那条拿到图标，其余的被判失败。
+///
+/// 图标提取跑在 `spawn_blocking` 的线程池上，而打开一个目录会同时要好几种
+/// 类型的图标，正好撞上这个形态。
+///
+/// [`Once::call_once`] 恰好是需要的语义：第一条线程做，其余线程**阻塞等它做完**
+/// 再继续。代价是进程生命期内多一次 `SHGetFileInfoW`。
+///
+/// 后果值得记一笔：失败会被 `IconCache` 负缓存 5 分钟，而前端
+/// （`web/src/workspace/sysicons.ts`）的平台探测一个会话只问一次，收到 404
+/// 就把**整个浏览器会话**判定成「本平台不提供系统图标」并全部回落内置图标集。
+/// 一次开机时的抖动，换来一整个会话没有系统图标。
+///
+/// 回归测试：`并发取类型图标不失败`。
+fn warm_up_shell() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // 结果丢弃：这一次调用只为把外壳的图像列表初始化起来。真失败了也
+        // 不该在这里报——调用方自己那次会拿到同样的错误并正常回落。
+        let _ = shell_icon("strixmaid", FILE_ATTRIBUTE_NORMAL);
+    });
+}
+
 /// [`file_type_icon_png`] 一族的共同两步：位置精确提取，回落现成 `HICON`。
 fn shell_type_icon_png(fictional_name: &str, attrs: u32) -> io::Result<Vec<u8>> {
     let _com = ComInit::new();
+    warm_up_shell();
 
     // 位置取到了、但那个文件提取失败（比如指向一个已卸载程序留下的路径）时
     // 继续往下走回落，而不是就此放弃。
@@ -739,6 +870,61 @@ mod tests {
         let png = file_type_icon_png("绝不会注册这个扩展名9f3a1c")
             .expect("未知扩展名应当回落到通用文件图标");
         assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    /// 已知文件夹（下载、桌面……）取得到各自的系统图标。
+    ///
+    /// 断言两张图**不相同**是承重的：取错路子（比如退回通用文件夹图标）时
+    /// 每个文件夹都会是同一只黄文件夹，只断言「取得到」看不出来。
+    #[test]
+    fn 已知文件夹取得到各自的图标() {
+        use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Downloads};
+
+        let desktop = known_folder_icon_png(&FOLDERID_Desktop).expect("桌面图标应当取得到");
+        let downloads = known_folder_icon_png(&FOLDERID_Downloads).expect("下载图标应当取得到");
+        assert_eq!(&desktop[..4], &[0x89, b'P', b'N', b'G']);
+        assert_ne!(desktop, downloads, "桌面与下载不该是同一张图");
+    }
+
+    /// 驱动器用外壳的「固定磁盘」图标。
+    #[test]
+    fn 驱动器取得到固定盘图标() {
+        use windows_sys::Win32::UI::Shell::SIID_DRIVEFIXED;
+
+        let png = stock_icon_png(SIID_DRIVEFIXED).expect("固定盘图标应当取得到");
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        let folder = folder_icon_png().expect("文件夹图标应当取得到");
+        assert_ne!(png, folder, "磁盘不该画成文件夹");
+    }
+
+    /// 并发取类型图标不得失败。
+    ///
+    /// 回归的是这样一个 bug：**进程内第一次** `SHGetFileInfoW(SHGFI_ICON)`
+    /// 在多条线程上同时发生时，除了跑赢的那一条，其余全部返回 0。
+    /// 实测形态非常干净——八条线程里有七条在**各自的第 0 次**调用上失败，
+    /// 之后 393 次全部成功。图标提取跑在 `spawn_blocking` 的线程池上，
+    /// 打开一个目录同时要好几种类型的图标，这个形态正好撞上。
+    #[test]
+    fn 并发取类型图标不失败() {
+        let workers: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    (0..50)
+                        .filter(|i| {
+                            // 三个入口轮着来：通用文件、文件夹、按扩展名，
+                            // 免得只把其中一条路热起来就以为好了。
+                            match (t + i) % 3 {
+                                0 => generic_file_icon_png().is_err(),
+                                1 => folder_icon_png().is_err(),
+                                _ => file_type_icon_png("txt").is_err(),
+                            }
+                        })
+                        .count()
+                })
+            })
+            .collect();
+        let failures: usize = workers.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(failures, 0, "并发下有 {failures}/400 次取图标失败");
     }
 
     #[test]

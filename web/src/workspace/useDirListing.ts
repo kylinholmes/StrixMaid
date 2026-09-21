@@ -16,6 +16,20 @@ export interface DirSort {
 }
 
 /**
+ * 一个目录查询的缓存键。
+ *
+ * **凡是会改变服务端返回内容的输入都必须在里面**：排序与分页在服务端做，
+ * 隐藏项的过滤也在服务端做（`show_hidden`）。漏掉一项，react-query 就会
+ * 把上一次的结果当成命中——表现是「按了开关列表纹丝不动」，而不是报错。
+ *
+ * 第一段固定是 `dir`、第二段固定是路径，`refresh()` 靠这个前缀让整个目录
+ * 的所有排序/开关组合一起失效。
+ */
+export function dirQueryKey(path: string | null, sort: DirSort, showHidden: boolean) {
+  return ["dir", path, sort.key, sort.desc, showHidden] as const;
+}
+
+/**
  * 分页取一个目录，附带 §4.8 的两条刷新路：
  *
  * 1. **焦点刷新**：窗口重新获得焦点 / 标签页重新可见时自动重取（300ms 去重
@@ -25,9 +39,9 @@ export interface DirSort {
  * 排序在**服务端**做（`sort`/`order`），分页在排序之后切——客户端排序在
  * 分页面前是错的：本页排得再好也只是全量的一个错误切片。
  */
-export function useDirListing(path: string | null, sort: DirSort) {
+export function useDirListing(path: string | null, sort: DirSort, showHidden: boolean) {
   const qc = useQueryClient();
-  const queryKey = ["dir", path, sort.key, sort.desc] as const;
+  const queryKey = dirQueryKey(path, sort, showHidden);
 
   const query = useInfiniteQuery({
     queryKey,
@@ -44,6 +58,7 @@ export function useDirListing(path: string | null, sort: DirSort) {
             offset: pageParam,
             sort: sort.key,
             order: sort.desc ? "desc" : "asc",
+            show_hidden: showHidden,
           },
         },
       });

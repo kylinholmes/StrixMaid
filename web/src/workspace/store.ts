@@ -47,7 +47,11 @@ interface WorkspaceState {
   panelInset: number;
   /** 左侧快速访问栏是否折叠。 */
   railCollapsed: boolean;
-  /** 隐藏以 `.` 开头的条目（dotfile 约定，三平台一致处理）。 */
+  /**
+   * 收起隐藏项。**判定在服务端**（`DirEntryInfo::hidden`：Unix 看 dotfile
+   * 约定，Windows 看属性位），这里只是开关；过滤也在服务端做，本值作为
+   * `show_hidden` 的反面随查询下发。
+   */
   hideHidden: boolean;
   /** 文件区视图：列表 / 平铺图标（§4.5）。 */
   viewMode: "list" | "tiles";
@@ -94,7 +98,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   // 首次渲染的兜底值（≈折叠条一行）；RO 一挂上就换成实测。
   panelInset: 40,
   railCollapsed: false,
-  hideHidden: false,
+  // 默认收起：Windows 的主目录里 NTUSER.DAT{…}.regtrans-ms 这类系统簿记
+  // 文件比真文件还多，默认摊开等于让人从垃圾里找东西。与资源管理器、
+  // Finder、各家文件管理器的缺省一致。
+  hideHidden: true,
   viewMode: "list",
   dirSort: { key: "name", desc: false },
 

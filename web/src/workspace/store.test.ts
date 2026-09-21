@@ -6,6 +6,11 @@ const reset = () => useWorkspace.setState({ tabs: [], activeId: null, cwd: null 
 describe("workspace store", () => {
   beforeEach(reset);
 
+  it("隐藏项默认收起来", () => {
+    // 默认显示的话，Windows 用户一进主目录就是满屏 NTUSER.DAT{…}.regtrans-ms。
+    expect(useWorkspace.getState().hideHidden).toBe(true);
+  });
+
   it("加标签自动成为活动", () => {
     useWorkspace.getState().addTab({ id: "a", title: "sh", status: "live" });
     expect(useWorkspace.getState().activeId).toBe("a");

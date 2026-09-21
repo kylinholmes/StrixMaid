@@ -107,6 +107,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Time",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
+    # 已知文件夹的图标走 PIDL（`SHGetKnownFolderIDList` + `SHGFI_PIDL`），
+    # `ITEMIDLIST` 与 `ILFree` 在这个子模块里。
+    "Win32_UI_Shell_Common",
     # 图标本体：`PrivateExtractIconsW` / `GetIconInfo` / `DestroyIcon`。
     "Win32_UI_WindowsAndMessaging",
 ] }

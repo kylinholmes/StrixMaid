@@ -66,6 +66,58 @@ pub const DIR_KEY: &str = "$dir";
 /// 保留 key：无扩展名 / 认不出类型的文件的系统图标。
 pub const GENERIC_FILE_KEY: &str = "$file";
 
+// ---------------------------------------------------------------------------
+// 快速访问栏的保留 key（roadmap/12 §8 未决 3 的 Windows 部分）
+// ---------------------------------------------------------------------------
+//
+// 左栏的「主目录 / 桌面 / 下载 / …… / 驱动器」在 Windows 上原先一律回落内置
+// 图标集，理由写在 `web/src/workspace/sysicons.ts` 的 `iconKeysOf`：拿 `$dir`
+// 去取会把它们全画成同一只黄文件夹，反而丢信息。
+//
+// 现在给它们各开一个保留 key。**仍然不接受路径**——取值是下面这张固定的表，
+// 调用方编不出新的，所以本端点「不碰用户文件、可以留在主进程」的前提一行
+// 不改（见本模块开头的「key 是扩展名，不是路径」）。
+
+/// 保留 key：登录用户的主目录。
+pub const HOME_KEY: &str = "$home";
+/// 保留 key：桌面。
+pub const DESKTOP_KEY: &str = "$desktop";
+/// 保留 key：文稿 / 文档。
+pub const DOCUMENTS_KEY: &str = "$documents";
+/// 保留 key：下载。
+pub const DOWNLOADS_KEY: &str = "$downloads";
+/// 保留 key：图片。
+pub const PICTURES_KEY: &str = "$pictures";
+/// 保留 key：音乐。
+pub const MUSIC_KEY: &str = "$music";
+/// 保留 key：视频 / 影片。
+pub const VIDEOS_KEY: &str = "$videos";
+/// 保留 key：公共。
+pub const PUBLIC_KEY: &str = "$public";
+/// 保留 key：「此电脑」/ 全部驱动器这个虚拟根。
+pub const COMPUTER_KEY: &str = "$computer";
+/// 保留 key：一块固定磁盘。
+pub const DRIVE_KEY: &str = "$drive";
+
+/// 全部保留 key。`$` 被 [`validate_ext`] 拒绝，真实扩展名撞不上它们。
+///
+/// 前端的同名表在 `web/src/workspace/sysicons.ts`，两边必须一致——
+/// 多一个少一个只会表现为「那一项没有图标」，不会报错。
+pub const RESERVED_KEYS: &[&str] = &[
+    DIR_KEY,
+    GENERIC_FILE_KEY,
+    HOME_KEY,
+    DESKTOP_KEY,
+    DOCUMENTS_KEY,
+    DOWNLOADS_KEY,
+    PICTURES_KEY,
+    MUSIC_KEY,
+    VIDEOS_KEY,
+    PUBLIC_KEY,
+    COMPUTER_KEY,
+    DRIVE_KEY,
+];
+
 /// 本平台 / 本运行环境能不能取文件类型图标。
 pub fn available() -> bool {
     sys_available()
@@ -144,7 +196,7 @@ impl FileTypeIcons {
     /// 第三档在 Windows / macOS 上几乎不发生（未知类型也有「白纸」图标），
     /// 前端因此把 404 当「平台不提供」的探测信号用。
     pub async fn icon_png(&self, ext: &str) -> ApiResult<Arc<Vec<u8>>> {
-        let key = if ext == DIR_KEY || ext == GENERIC_FILE_KEY {
+        let key = if RESERVED_KEYS.contains(&ext) {
             ext.to_owned()
         } else {
             validate_ext(ext)?;
@@ -235,12 +287,36 @@ fn path_available() -> bool {
     false
 }
 
+/// 保留 key → Windows 的 `KNOWNFOLDERID`。不是已知文件夹的保留 key 返回
+/// `None`（它们各有各的取法）。
+#[cfg(windows)]
+fn known_folder_of(key: &str) -> Option<&'static windows_sys::core::GUID> {
+    use windows_sys::Win32::UI::Shell as sh;
+    Some(match key {
+        HOME_KEY => &sh::FOLDERID_Profile,
+        DESKTOP_KEY => &sh::FOLDERID_Desktop,
+        DOCUMENTS_KEY => &sh::FOLDERID_Documents,
+        DOWNLOADS_KEY => &sh::FOLDERID_Downloads,
+        PICTURES_KEY => &sh::FOLDERID_Pictures,
+        MUSIC_KEY => &sh::FOLDERID_Music,
+        VIDEOS_KEY => &sh::FOLDERID_Videos,
+        PUBLIC_KEY => &sh::FOLDERID_Public,
+        COMPUTER_KEY => &sh::FOLDERID_ComputerFolder,
+        _ => return None,
+    })
+}
+
 #[cfg(windows)]
 fn extract(key: &str) -> Option<Vec<u8>> {
     use crate::platform::windows::icon;
     let got = match key {
         DIR_KEY => icon::folder_icon_png(),
         GENERIC_FILE_KEY => icon::generic_file_icon_png(),
+        // 磁盘没有路径可言，用外壳的库存图标。
+        DRIVE_KEY => icon::stock_icon_png(windows_sys::Win32::UI::Shell::SIID_DRIVEFIXED),
+        k if known_folder_of(k).is_some() => {
+            icon::known_folder_icon_png(known_folder_of(k).expect("刚判过"))
+        }
         ext => icon::file_type_icon_png(ext),
     };
     match got {
@@ -263,6 +339,11 @@ fn extract(key: &str) -> Option<Vec<u8>> {
     match key {
         DIR_KEY => appkit::folder_icon_png(FILE_ICON_SIZE),
         GENERIC_FILE_KEY => appkit::generic_file_icon_png(FILE_ICON_SIZE),
+        // 左栏那几个保留 key 在 macOS 上不走这里（`iconKeysOf` 在 unix 平台
+        // 给 pathKey，按路径取的才是真身）。不拦的话它们会落到下一条、被当成
+        // 扩展名交给 UTType——UTType 对未知扩展名照样给一张通用图，于是成了
+        // 「200 + 一张错图」而不是 404。
+        k if RESERVED_KEYS.contains(&k) => None,
         ext => appkit::file_type_icon_png(ext, FILE_ICON_SIZE),
     }
 }
@@ -379,6 +460,41 @@ mod tests {
             .await
             .expect("$file 应当取得到");
         assert_ne!(dir, file, "文件夹与通用文件不该是同一张图");
+    }
+
+    /// 快速访问栏那几个保留 key 各有各的图标。
+    ///
+    /// 只在 Windows 上跑：macOS 的左栏走的是**按路径**那条路（`iconKeysOf`
+    /// 在 unix 平台给 pathKey），那边这些 key 本来就不该被请求。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn 左栏保留_key_各有各的图标() {
+        let icons = FileTypeIcons::new();
+        let get = async |k: &str| icons.icon_png(k).await.unwrap_or_else(|e| panic!("{k}: {e:?}"));
+
+        let downloads = get(DOWNLOADS_KEY).await;
+        let desktop = get(DESKTOP_KEY).await;
+        let drive = get(DRIVE_KEY).await;
+        let dir = get(DIR_KEY).await;
+
+        assert_ne!(downloads, desktop, "下载与桌面不该是同一张图");
+        assert_ne!(drive, dir, "磁盘不该画成文件夹");
+        assert_ne!(downloads, dir, "下载不该退回成通用文件夹");
+    }
+
+    /// 左栏的保留 key 只在 Windows 上有货，别的平台一律 404。
+    ///
+    /// 在 macOS（有窗口服务器时）这条是真的回归护栏：漏掉 `extract` 里那条
+    /// 拦截的话，`$downloads` 会被当成扩展名拿去查 UTType 并拿回一张通用图。
+    /// Linux 上 `available()` 为假，恒过。
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn 左栏保留_key_在非_windows_上一律_404() {
+        let icons = FileTypeIcons::new();
+        for k in [HOME_KEY, DOWNLOADS_KEY, DRIVE_KEY, COMPUTER_KEY] {
+            let err = icons.icon_png(k).await.expect_err(k);
+            assert_eq!(err.code, ErrorCode::NotFound, "{k}");
+        }
     }
 
     #[tokio::test]

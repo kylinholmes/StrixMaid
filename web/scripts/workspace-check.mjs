@@ -39,6 +39,23 @@ const dir = (name) => ({
   mtime_ts: 1_758_300_000,
 });
 
+/**
+ * 一个链接条目。`target_kind` 是服务端报的目标类型，前端据它决定跳法
+ * （目录进去、文件跳到所在目录并选中）——见 src/workspace/activate.ts。
+ */
+const link = (name, target, target_kind) => ({
+  name,
+  kind: "symlink",
+  target,
+  target_kind,
+  size_bytes: 0,
+  mode: 0o777,
+  uid: 1000,
+  gid: 1000,
+  user: "kylin",
+  mtime_ts: 1_758_300_000,
+});
+
 /** 每个平台一套目录树 mock。 */
 function listings(platform, big) {
   if (platform === "windows") {
@@ -46,12 +63,23 @@ function listings(platform, big) {
       "\\": { entries: [{ ...dir("C:\\") }, { ...dir("D:\\") }], skipped: 0 },
       "C:\\": { entries: [dir("Users"), dir("Windows")], skipped: 0 },
       "C:\\Users": { entries: [dir("kylin")], skipped: 0 },
-      "C:\\Users\\kylin": { entries: [dir("Desktop"), ...makeEntries(3)], skipped: 0 },
+      "C:\\Users\\kylin": {
+        entries: [dir("Desktop"), dir("Downloads"), ...makeEntries(3)],
+        skipped: 0,
+      },
     };
   }
   return {
     "/home/kylin": {
-      entries: [dir("proj"), dir("docs"), dir(".config"), { ...makeEntries(1)[0], name: ".bashrc" }, ...makeEntries(4)],
+      entries: [
+        dir("proj"),
+        dir("docs"),
+        { ...dir(".config"), hidden: true },
+        { ...makeEntries(1)[0], name: ".bashrc", hidden: true },
+        link("link-docs", "/home/kylin/docs", "dir"),
+        link("link-conf", "/etc/nginx.conf", "file"),
+        ...makeEntries(4),
+      ],
       skipped: 0,
     },
     "/home": { entries: [dir("kylin")], skipped: 0 },
@@ -70,6 +98,9 @@ const cwdCommands = [];
 
 /** /api/v1/files 收到的完整查询参数（排序/分页的断言点）。 */
 const filesQueries = [];
+
+/** `/files/icon/<key>` 里出现过的 key，按序记录——左栏保留 key 的断言点。 */
+const iconKeys = [];
 
 /** 1×1 红色 PNG：图标与缩略图的 mock 响应共用。 */
 const PNG_1X1 = Buffer.from(
@@ -118,6 +149,10 @@ async function mockApi(page, { platform, osId }) {
       filesQueries.push(Object.fromEntries(qs.entries()));
       const found = maps[qpath];
       if (!found) return json({ code: "not_found", message: `没有 ${qpath}` }, 404);
+      // 隐藏项的过滤在服务端，且在排序与分页**之前**——total 必须是过滤后的数。
+      // 这里照搬真实现的位置，否则 mock 会掩盖分页错位这类问题。
+      const showHidden = qs.get("show_hidden") === "true";
+      const kept = showHidden ? found.entries : found.entries.filter((e) => !e.hidden);
       const key = qs.get("sort") ?? "name";
       const desc = qs.get("order") === "desc";
       const cmp =
@@ -126,7 +161,7 @@ async function mockApi(page, { platform, osId }) {
           : key === "mtime"
             ? (a, b) => a.mtime_ts - b.mtime_ts || a.name.localeCompare(b.name)
             : (a, b) => a.name.localeCompare(b.name);
-      const list = [...found.entries].sort(
+      const list = [...kept].sort(
         (a, b) => (b.kind === "dir") - (a.kind === "dir") || (desc ? cmp(b, a) : cmp(a, b)),
       );
       const total = list.length;
@@ -134,6 +169,9 @@ async function mockApi(page, { platform, osId }) {
       const limit = qs.get("limit") ? Number(qs.get("limit")) : undefined;
       const page = limit === undefined ? list : list.slice(offset, offset + limit);
       return json({ path: qpath, entries: page, skipped: found.skipped, total });
+    }
+    if (p.includes("/files/icon/")) {
+      iconKeys.push(decodeURIComponent(p.split("/files/icon/")[1] ?? ""));
     }
     if (p.includes("/files/icon/") || p.endsWith("/files/icon-path") || p.endsWith("/files/raw")) {
       // 系统类型图标（按扩展名 / $dir / $file）、按路径的 bundle 图标、
@@ -256,16 +294,71 @@ async function unixFlow(browser) {
   await page.waitForTimeout(150);
   check("Ctrl+` 再按折叠面板", !(await page.isVisible(".xterm")));
 
-  // 隐藏文件开关：默认显示 dotfile，开关后隐藏并注明数量。
-  check("默认显示隐藏文件", await page.isVisible("text=.bashrc"));
-  await page.click('[aria-label="隐藏隐藏文件"]');
+  // 隐藏项开关：**默认收起**，过滤发生在服务端（查询带 show_hidden）。
+  check("默认收起隐藏项", !(await page.isVisible("text=.bashrc")));
+  check(
+    "默认就带 show_hidden=false 去请求",
+    filesQueries.at(-1)?.show_hidden === "false",
+    JSON.stringify(filesQueries.at(-1)),
+  );
+  await page.click('[aria-label="显示隐藏项"]');
+  await page.waitForSelector("text=.bashrc");
+  check("开关后隐藏项显示出来", true);
+  check(
+    "开关翻转后重新向服务端要（show_hidden 进了缓存键）",
+    filesQueries.at(-1)?.show_hidden === "true",
+    JSON.stringify(filesQueries.at(-1)),
+  );
+  await page.click('[aria-label="隐藏隐藏项"]');
   await page.waitForFunction(
     () => !document.querySelector('[data-pane="top"]')?.textContent?.includes(".bashrc"),
   );
-  check("开关后 dotfile 不再显示", true);
-  await page.click('[aria-label="显示隐藏文件"]');
-  await page.waitForSelector("text=.bashrc");
-  check("再开回来 dotfile 恢复显示", true);
+  check("再关回去隐藏项收起", true);
+
+  // 链接跳转：指向目录的直接进去，指向文件的跳到所在目录并选中。
+  await page.click('[data-pane="top"] tr:has-text("link-docs")');
+  await page.waitForSelector('[data-pane="top"] >> text=logo.png');
+  check("点指向目录的链接进到目标目录", filesRequests.at(-1) === "/home/kylin/docs");
+
+  await page.fill('[aria-label="路径，回车跳转"]', "/home/kylin");
+  await page.press('[aria-label="路径，回车跳转"]', "Enter");
+  await page.waitForSelector('[data-pane="top"] tr:has-text("link-conf")');
+  await page.click('[data-pane="top"] tr:has-text("link-conf")');
+  await page.waitForSelector('[data-pane="top"] >> text=nginx.conf');
+  check("点指向文件的链接跳到它所在的目录", filesRequests.at(-1) === "/etc");
+  check(
+    "并且把那个文件选中",
+    (await page.getAttribute('[data-pane="top"] tr:has-text("nginx.conf")', "aria-selected")) ===
+      "true",
+  );
+
+  // 鼠标侧键：第四键后退、第五键前进（`src/workspace/mousenav.ts`）。
+  //
+  // 走 CDP 而不是 page.mouse：Playwright 的 mouse.down 只认 left/right/middle，
+  // 而侧键正是 button 3 / 4。CDP 发出的是货真价实的 MouseEvent。
+  const cdp = await page.context().newCDPSession(page);
+  const sideClick = async (button) => {
+    for (const type of ["mousePressed", "mouseReleased"]) {
+      await cdp.send("Input.dispatchMouseEvent", {
+        type,
+        x: 400,
+        y: 300,
+        button,
+        buttons: type === "mousePressed" ? (button === "back" ? 8 : 16) : 0,
+        clickCount: 1,
+      });
+    }
+  };
+  await sideClick("back");
+  await page.waitForSelector('[data-pane="top"] tr:has-text("link-conf")');
+  check("鼠标第四键后退", filesRequests.at(-1) === "/home/kylin");
+  await sideClick("forward");
+  await page.waitForSelector('[data-pane="top"] >> text=nginx.conf');
+  check("鼠标第五键前进", filesRequests.at(-1) === "/etc");
+
+  await page.fill('[aria-label="路径，回车跳转"]', "/home/kylin");
+  await page.press('[aria-label="路径，回车跳转"]', "Enter");
+  await page.waitForSelector('[data-pane="top"] tr:has-text("link-docs")');
 
   // 地址栏输入：敲路径回车即跳转。
   await page.fill('[aria-label="路径，回车跳转"]', "/etc");
@@ -480,6 +573,7 @@ async function windowsFlow(browser) {
   await mockApi(page, { platform: "windows", osId: "windows" });
   await page.addInitScript(() => localStorage.setItem("strixmaid.session.token", "mock-token"));
   filesRequests.length = 0;
+  iconKeys.length = 0;
 
   await page.goto(`${BASE}/files`);
   // 主目录猜成 C:\Users\kylin。
@@ -494,6 +588,19 @@ async function windowsFlow(browser) {
   const bad = filesRequests.filter((q) => q?.includes("\\C:"));
   check("驱动器根不与父路径拼接", bad.length === 0, bad.join(","));
   check("确实请求了 C:\\", filesRequests.includes("C:\\"));
+
+  // 左栏在 Windows 上要为每一种位置取各自的保留 key，而不是全部回落内置
+  // 图标集（改判之前是后者）。这里断言的是「问了哪些 key」；图标长什么样
+  // 由后端决定，mock 不负责。
+  for (const key of ["$home", "$desktop", "$downloads", "$computer", "$drive"]) {
+    check(`左栏按保留 key 取系统图标：${key}`, iconKeys.includes(key), iconKeys.join(" "));
+  }
+  // 五种位置五个不同的 key——借用 `$dir` 的老做法会把它们抹成同一只黄文件夹。
+  check(
+    "左栏各位置的 key 互不相同",
+    new Set(iconKeys.filter((k) => k.startsWith("$") && k !== "$dir" && k !== "$file")).size >= 5,
+    iconKeys.join(" "),
+  );
 
   // 上一级：C:\ → 虚拟根 \。
   await page.click('[aria-label="上一级"]');

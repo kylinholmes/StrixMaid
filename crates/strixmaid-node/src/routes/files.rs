@@ -240,7 +240,10 @@ pub async fn type_icon(
     get,
     path = "/files",
     tag = "files",
-    params(FilePathQuery),
+    // 必须是 FileListQuery：handler 收的就是它。写成 FilePathQuery 会让
+    // limit / offset / sort / order / show_hidden 全部不进 OpenAPI，
+    // 前端按 schema 生成的类型里也就没有这些参数。
+    params(FileListQuery),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "目录列表", body = DirListing),
@@ -262,6 +265,7 @@ pub async fn list_dir(
         offset: q.offset.unwrap_or(0),
         sort: q.sort,
         order: q.order,
+        show_hidden: q.show_hidden,
     };
     Ok(Json(
         exec::call(&st.auth, &session, Privilege::User, rpc::FS_LIST, params).await?,

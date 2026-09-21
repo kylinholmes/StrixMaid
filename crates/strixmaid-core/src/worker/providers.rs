@@ -371,6 +371,7 @@ fn register_fs(d: &mut Dispatcher) {
                 offset: q.offset,
                 sort: q.sort.unwrap_or_default(),
                 order: q.order.unwrap_or(strixmaid_types::process::SortOrder::Asc),
+                show_hidden: q.show_hidden.unwrap_or(true),
             };
             result(f.list(&q.path, &q.allowed_roots, opts).await?)
         }
@@ -515,6 +516,61 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, strixmaid_types::ErrorCode::PermissionDenied);
+    }
+
+    /// `show_hidden` 从 RPC 参数一路落到 `ListOptions`。
+    ///
+    /// 盯的是**字段名对不对得上**：`FsListParams` 是 serde 反序列化出来的，
+    /// 名字写错不会报错，只会默默取缺省值——于是开关看着接好了，实际一按没反应。
+    #[tokio::test]
+    async fn fs_list_的_show_hidden_一路传到_provider() {
+        let dir = std::env::temp_dir().join(format!("strixmaid-rpc-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plain.txt"), b"x").unwrap();
+
+        // 造一个本平台意义上的隐藏项。
+        #[cfg(unix)]
+        std::fs::write(dir.join(".secret"), b"x").unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW,
+            };
+            let f = dir.join("secret.txt");
+            std::fs::write(&f, b"x").unwrap();
+            let mut wide: Vec<u16> = f.as_os_str().encode_wide().collect();
+            wide.push(0);
+            // SAFETY: wide 是以 NUL 结尾的宽串，生存期覆盖本次调用。
+            assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) }, 0);
+        }
+
+        let p = dir.to_string_lossy().into_owned();
+        let d = default_dispatcher().await;
+        let count = |v: &serde_json::Value| v["entries"].as_array().unwrap().len();
+
+        let all = d
+            .dispatch(
+                rpc::FS_LIST,
+                serde_json::json!({ "path": p, "allowed_roots": [p] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(&all), 2, "不给 show_hidden 时缺省是不过滤");
+
+        let shown = d
+            .dispatch(
+                rpc::FS_LIST,
+                serde_json::json!({ "path": p, "allowed_roots": [p], "show_hidden": false }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(&shown), 1, "show_hidden=false 必须真的过滤掉隐藏项");
+        assert_eq!(shown["entries"][0]["name"], "plain.txt");
+        assert_eq!(shown["total"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

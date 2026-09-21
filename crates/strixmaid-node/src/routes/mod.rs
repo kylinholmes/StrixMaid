@@ -49,6 +49,7 @@ use crate::state::AppState;
     components(schemas(
         strixmaid_types::process::ProcessSortKey,
         strixmaid_types::process::SortOrder,
+        strixmaid_types::file::FileSortKey,
     )),
     tags(
         (name = "auth", description = "认证与提权（PAM challenge-response）"),

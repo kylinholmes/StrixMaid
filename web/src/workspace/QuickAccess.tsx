@@ -206,7 +206,7 @@ export function QuickAccess({ current, onGo }: QuickAccessProps) {
             kf.path,
             kf.label,
             <RailIcon
-              subject={{ kind: "known-folder", fullPath: kf.path }}
+              subject={{ kind: "known-folder", name: kf.name, fullPath: kf.path }}
               platform={platform}
               fallback={<img src={folderIconUrl(kf.name)} width={14} height={14} alt="" />}
             />,
