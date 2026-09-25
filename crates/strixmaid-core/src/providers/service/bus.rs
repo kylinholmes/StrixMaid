@@ -820,7 +820,6 @@ async fn summaries_for(
     }
     out
 }
-}
 
 #[async_trait]
 impl Provider for SystemdBus {

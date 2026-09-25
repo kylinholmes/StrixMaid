@@ -451,6 +451,8 @@ pub(crate) struct FlushQueue {
     deadline: Option<tokio::time::Instant>,
 }
 
+// 同上：这些方法只有 Linux 的 bus.rs 会调，测试在三平台都跑。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl FlushQueue {
     /// 记一个待刷新的 unit；没有计时就起一个。
     ///
