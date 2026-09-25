@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { authHeaders } from "@/api/client";
+import { BlobCache } from "./blobcache";
 import { isVirtualRoot, type Platform } from "./path";
 
 /**
@@ -77,11 +78,13 @@ const KNOWN_FOLDER_KEY: Record<string, string> = {
 };
 
 /** 会话级缓存：类型 key → object URL；`null` 是负缓存（这一类真的取不到）。 */
-const cache = new Map<string, string | null>();
+// 上限与回收见 `blobcache.ts`。类型图标一个扩展名一张，256 绰绰有余。
+const cache = new BlobCache<string | null>(256, (v) => v);
 const inflight = new Map<string, Promise<string | null>>();
 
 /** 按路径的会话级缓存（macOS 的 bundle / 符号链接，见 `usePathIcon`）。 */
-const pathCache = new Map<string, string | null>();
+// 按路径的 bundle 图标一个应用一张；512 覆盖整个 /Applications 有余。
+const pathCache = new BlobCache<string | null>(512, (v) => v);
 const pathInflight = new Map<string, Promise<string | null>>();
 
 /** 平台探测的结论。`null` = 还没问过或上次因网络/未登录没问成，可以再试。 */
@@ -207,7 +210,7 @@ export function fetchPathIcon(path: string): Promise<string | null> {
 /** 通用的「异步取 → 会话缓存 → 状态」钩子骨架。 */
 function useIconUrl(
   key: string | null,
-  store: Map<string, string | null>,
+  store: BlobCache<string | null>,
   fetcher: (key: string) => Promise<string | null>,
 ): string | null {
   const [url, setUrl] = useState<string | null>(() =>

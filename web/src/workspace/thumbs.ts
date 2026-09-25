@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { authHeaders } from "@/api/client";
+import { BlobCache } from "./blobcache";
 import type { DirEntry } from "./useDirListing";
 
 /**
@@ -46,8 +47,10 @@ export interface Thumb {
   orientation: number;
 }
 
-/** path → 缩略图。会话级缓存：同一目录反复进出不重取。 */
-const cache = new Map<string, Thumb>();
+/** path → 缩略图。会话级缓存：同一目录反复进出不重取。
+ *  上限 512：每张 5～40 KB，封顶约 20 MB；超出按最久未用逐出并回收
+ *  object URL（背景见 `blobcache.ts`——此前无上限也从不 revoke）。 */
+const cache = new BlobCache<Thumb>(512, (t) => t.url);
 const inflight = new Map<string, Promise<Thumb | null>>();
 
 /**
