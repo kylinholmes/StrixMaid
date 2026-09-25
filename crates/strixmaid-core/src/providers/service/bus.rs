@@ -23,6 +23,7 @@ use strixmaid_types::service::{
     UnitFile, UnitListQuery, UnitScope, UnitSummary,
 };
 use strixmaid_types::{ApiError, ApiResult, ErrorCode};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OnceCell, broadcast};
 use zbus::names::{BusName, InterfaceName};
 use zbus::proxy::CacheProperties;
@@ -31,7 +32,8 @@ use zbus::{Connection, MatchRule, MessageStream};
 
 use super::cgroup::CgroupReader;
 use super::{
-    EVENT_CAPACITY, EVENT_DEBOUNCE, ServiceEvent, ServiceProvider, UnitDeps, apply_list_query,
+    EVENT_CAPACITY, FlushQueue, ServiceEvent, ServiceProvider, UnitDeps,
+    apply_list_query,
     lookup_enable_state, opt_u64, parse_active_state, parse_enable_state, parse_load_state,
     read_unit_fragment, summary_for_unloaded_file, summary_for_vanished, unit_file_basename,
     unit_type_of, usec_to_ts, validate_unit_name, with_timeout,
@@ -44,6 +46,12 @@ const SYSTEMD_DEST: &str = "org.freedesktop.systemd1";
 const UNIT_PATH_PREFIX: &str = "/org/freedesktop/systemd1/unit/";
 /// 所有 unit 共有的接口。
 const IFACE_UNIT: &str = "org.freedesktop.systemd1.Unit";
+
+/// 监听任务多久检查一次「还有没有人在看」。
+///
+/// 这是 2026-09-25 事故的**暴露面收敛**：没有订阅者就退场，不再长期持有
+/// 对系统总线的信号订阅。间隔取 30 秒——退场晚一点无害，查得太勤则是白费。
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `ListUnits` 的一行：name / description / load / active / sub / following / path / job id / job type / job path。
 pub type UnitListEntry = (
@@ -94,6 +102,7 @@ pub trait Manager {
     fn unmask_unit_files(&self, files: &[&str], runtime: bool) -> zbus::Result<Vec<FileChange>>;
     fn reload(&self) -> zbus::Result<()>;
     fn subscribe(&self) -> zbus::Result<()>;
+    fn unsubscribe(&self) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn unit_new(&self, id: String, unit: OwnedObjectPath) -> zbus::Result<()>;
@@ -482,10 +491,19 @@ impl SystemdBus {
             Ok(streams) => {
                 let shared = Arc::clone(&self.shared);
                 tokio::spawn(async move {
-                    run_listener(conn, scope, Arc::clone(&shared), streams).await;
-                    tracing::warn!(?scope, "systemd 事件监听退出（bus 断开）");
-                    // 允许下一次 subscribe() 重新拉起。
-                    shared.set_listener_flag(scope, false);
+                    // 标志的所有权在监听任务自己手里：退场那条路要在锁内
+                    // 连同「还有没有订阅者」一起判（`retire_if_idle`），
+                    // 这里不能再清一次——否则会把**后来新起的那个**监听的
+                    // 标志清掉，导致同一作用域并存两个监听。
+                    match run_listener(conn, scope, Arc::clone(&shared), streams).await {
+                        ListenerExit::Idle => {
+                            tracing::debug!(?scope, "systemd 事件监听退场（无订阅者）");
+                        }
+                        ListenerExit::Disconnected => {
+                            tracing::warn!(?scope, "systemd 事件监听退出（bus 断开）");
+                            shared.set_listener_flag(scope, false);
+                        }
+                    }
                 });
             }
             Err(e) => {
@@ -497,6 +515,28 @@ impl SystemdBus {
 }
 
 impl Shared {
+    /// 没有订阅者时清掉监听标志并返回 `true`（调用方据此退场）。
+    ///
+    /// **检查与清标志必须在同一把锁内**：否则「监听决定退场」与「新订阅者
+    /// 到来」之间有窗口，新订阅者会看到 flag 仍为 true 而直接返回，然后
+    /// 监听就退场了——那个订阅者一个事件都收不到。
+    ///
+    /// 与 [`ServiceProvider::subscribe`] 的顺序配合：那边**先**拿 receiver
+    /// 再调 `ensure_listener`，所以只要它拿到了 receiver，这里就一定看得见
+    /// `receiver_count() > 0`，不会误退场。
+    fn retire_if_idle(&self, scope: UnitScope) -> bool {
+        let mut flags = self.listeners.lock().unwrap_or_else(|p| p.into_inner());
+        if self.events.receiver_count() > 0 {
+            return false;
+        }
+        let flag = match scope {
+            UnitScope::System => &mut flags.system,
+            UnitScope::User => &mut flags.user,
+        };
+        *flag = false;
+        true
+    }
+
     /// 置监听标志；返回值表示**本次调用改变了它**（用于「只启动一次」）。
     fn set_listener_flag(&self, scope: UnitScope, value: bool) -> bool {
         let mut flags = self.listeners.lock().unwrap_or_else(|p| p.into_inner());
@@ -599,13 +639,34 @@ fn merge_lists(
     out
 }
 
-/// 事件监听主循环。所有流结束（连接断开）时返回。
+/// 监听任务的退出方式。
+enum ListenerExit {
+    /// 没有订阅者了，主动退场（标志已在锁内清掉）。
+    Idle,
+    /// 连接断了。
+    Disconnected,
+}
+
+/// 事件监听主循环。
+///
+/// # 循环体内绝不 `await` 总线调用
+///
+/// 这是 2026-09-25 总线死锁的**根因修复**（`docs/incidents/2026-09-25-dbus-wedge.md`）。
+/// 原先这里直接 `await` 冲刷（`summaries_for`，含 D-Bus 往返），而等回复期间
+/// 下面四路信号流全部停止被 poll；zbus 的读取任务随即在 `broadcast_direct`
+/// 上挂住（proxy 信号流默认只排 64 条），于是**那个回复再也读不出来**——
+/// 监听等回复、回复等读取、读取等队列腾空、队列等监听，环形等待，永久卡死。
+/// 症状是整台机器的 system bus 被拖垮：dbus-daemon 拒绝一切发往本进程的消息，
+/// 连 systemd 的 `method_return` 都被丢，SSH 登录因 `pam_systemd` 超时卡 25 秒。
+///
+/// 所以冲刷交给下面 spawn 的独立任务，本循环只做三件不阻塞的事：入队、
+/// 投递、以及「没人看了就退场」。
 async fn run_listener(
     conn: Connection,
     scope: UnitScope,
     shared: Arc<Shared>,
     streams: ListenerStreams,
-) {
+) -> ListenerExit {
     let ListenerStreams {
         mgr,
         mut unit_new,
@@ -615,12 +676,30 @@ async fn run_listener(
     } = streams;
     tracing::debug!(?scope, "systemd 事件监听已启动");
 
-    let mut pending: HashSet<String> = HashSet::new();
-    let mut deadline: Option<tokio::time::Instant> = None;
+    // 容量 1 + `try_send`：同一时刻最多一批在飞。送不进去就把名字放回队列，
+    // 下一个去抖窗口再试——天然合并，也不会无限 spawn 任务。
+    let (flush_tx, mut flush_rx) = tokio::sync::mpsc::channel::<HashSet<String>>(1);
+    let flusher = {
+        let conn = conn.clone();
+        let shared = Arc::clone(&shared);
+        tokio::spawn(async move {
+            while let Some(names) = flush_rx.recv().await {
+                let units = summaries_for(&conn, &mgr, names, scope).await;
+                if !units.is_empty() {
+                    // 没有订阅者时 send 返回 Err，无所谓。
+                    let _ = shared.events.send(ServiceEvent { units });
+                }
+            }
+        })
+    };
 
-    loop {
-        // 拷一份给 future 用，避免与下面各分支对 `deadline` 的可变借用冲突。
-        let flush_deadline = deadline;
+    let mut queue = FlushQueue::default();
+    let mut idle = tokio::time::interval(IDLE_CHECK);
+    idle.tick().await; // interval 的第一个 tick 立刻就绪，丢掉
+
+    let exit = loop {
+        // 拷一份给 future 用，避免与各分支对 `queue` 的可变借用冲突。
+        let flush_deadline = queue.deadline();
         let flush_at = async move {
             match flush_deadline {
                 Some(d) => tokio::time::sleep_until(d).await,
@@ -630,45 +709,71 @@ async fn run_listener(
 
         tokio::select! {
             Some(sig) = unit_new.next() => {
-                if let Ok(a) = sig.args() { mark(&mut pending, &mut deadline, a.id().clone()); }
+                if let Ok(a) = sig.args() { queue.mark(a.id().clone()); }
             }
             Some(sig) = unit_removed.next() => {
-                if let Ok(a) = sig.args() { mark(&mut pending, &mut deadline, a.id().clone()); }
+                if let Ok(a) = sig.args() { queue.mark(a.id().clone()); }
             }
             Some(sig) = job_removed.next() => {
-                if let Ok(a) = sig.args() { mark(&mut pending, &mut deadline, a.unit().clone()); }
+                if let Ok(a) = sig.args() { queue.mark(a.unit().clone()); }
             }
             Some(msg) = props_changed.next() => {
                 if let Ok(m) = msg
                     && let Some(p) = m.header().path()
                     && let Some(name) = unit_name_from_path(p.as_str())
                 {
-                    mark(&mut pending, &mut deadline, name);
+                    queue.mark(name);
                 }
             }
             _ = flush_at => {
-                deadline = None;
-                let names = std::mem::take(&mut pending);
-                let units = summaries_for(&conn, &mgr, names, scope).await;
-                if !units.is_empty() {
-                    // 没有订阅者时 send 返回 Err，无所谓。
-                    let _ = shared.events.send(ServiceEvent { units });
+                match flush_tx.try_send(queue.take()) {
+                    Ok(()) => {}
+                    // 上一批还在飞：放回去，下一个窗口连同新到的一起刷。
+                    Err(TrySendError::Full(names)) => queue.requeue(names),
+                    // 冲刷任务没了（panic），再监听也没有意义。
+                    Err(TrySendError::Closed(_)) => break ListenerExit::Disconnected,
                 }
             }
-            else => break,
+            _ = idle.tick() => {
+                if conn.is_closed() {
+                    break ListenerExit::Disconnected;
+                }
+                // 没人在看就退场。退场后这条连接上不再持有任何信号流，
+                // 也就没有能把 zbus 读取任务挡住的队列了——本次事故的
+                // 暴露面从「7×24」缩到「有人正看着服务页的那几分钟」。
+                if shared.retire_if_idle(scope) {
+                    break ListenerExit::Idle;
+                }
+            }
+            else => break ListenerExit::Disconnected,
+        }
+    };
+
+    // 先断投递口再等冲刷任务收尾，避免它卡在 recv 上。
+    drop(flush_tx);
+    let _ = flusher.await;
+
+    if matches!(exit, ListenerExit::Idle) {
+        // 告诉 systemd 别再往这条连接发信号了。失败只记 debug：我们已经在
+        // 退场路径上，而且连接本来就可能不好了。
+        match SystemdBus::manager(&conn).await {
+            Ok(m) => {
+                if let Err(e) = m.unsubscribe().await {
+                    tracing::debug!(?scope, error = %e, "Unsubscribe 失败");
+                }
+            }
+            Err(e) => tracing::debug!(?scope, error = %e, "退场时建 manager 失败"),
         }
     }
-}
-
-/// 记一个待刷新的 unit，并在没有去抖计时时启动一个。
-fn mark(pending: &mut HashSet<String>, deadline: &mut Option<tokio::time::Instant>, name: String) {
-    pending.insert(name);
-    if deadline.is_none() {
-        *deadline = Some(tokio::time::Instant::now() + EVENT_DEBOUNCE);
-    }
+    exit
 }
 
 /// 为一批 unit 名取当前摘要。批量大（daemon-reload 时几百个）就整表拉一次，小批量逐个查。
+///
+/// **两条路都套 `with_timeout`**：本文件其余对外方法一直是这么做的，唯独
+/// 这条事件刷新路径漏了，而它恰好是 2026-09-25 死锁里被无限等下去的那个
+/// `await`。根因已由「冲刷移出监听循环」修掉，这里是纵深——即便将来某个
+/// 调用又挂住，挂住的也只是冲刷任务，且 15 秒后自己解开。
 async fn summaries_for(
     conn: &Connection,
     mgr: &ManagerProxy<'_>,
@@ -677,7 +782,8 @@ async fn summaries_for(
 ) -> Vec<UnitSummary> {
     const PER_UNIT_LIMIT: usize = 16;
     if names.len() > PER_UNIT_LIMIT {
-        return match SystemdBus::list_units_raw(conn, scope).await {
+        let all = with_timeout("事件刷新 ListUnits", SystemdBus::list_units_raw(conn, scope)).await;
+        return match all {
             Ok(all) => {
                 let mut by_name: HashMap<String, UnitSummary> =
                     all.into_iter().map(|u| (u.name.clone(), u)).collect();
@@ -698,7 +804,19 @@ async fn summaries_for(
     }
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        out.push(SystemdBus::summary_no_load(conn, mgr, &name, scope).await);
+        // 逐个查：单个超时只让这一条退化成「查不到」，不拖垮整批。
+        match with_timeout(
+            "事件刷新 unit 摘要",
+            async { Ok::<_, ApiError>(SystemdBus::summary_no_load(conn, mgr, &name, scope).await) },
+        )
+        .await
+        {
+            Ok(s) => out.push(s),
+            Err(e) => {
+                tracing::warn!(unit = %name, error = %e, "事件刷新时取 unit 摘要超时");
+                out.push(summary_for_vanished(&name, scope));
+            }
+        }
     }
     out
 }

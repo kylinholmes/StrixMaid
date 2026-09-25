@@ -18,6 +18,9 @@ Environment=RUST_LOG=info
 # control-group 兜底杀残留。
 KillMode=control-group
 TimeoutStopSec=20
+# 显式给上限：默认 soft 只有 1024，而每个会话要占 worker/helper 的管道与
+# socket，终端多开时很容易贴着走（2026-09-25 事故复盘时发现没设）。
+LimitNOFILE=65536
 # 主进程需要 root：spawn setuid helper、读全量 /proc、改主机名与时区。不加沙箱限制。
 
 [Install]
