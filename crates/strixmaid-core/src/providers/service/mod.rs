@@ -429,6 +429,67 @@ pub fn apply_list_query(mut units: Vec<UnitSummary>, q: &UnitListQuery) -> Vec<U
     units
 }
 
+/// 事件刷新的**去抖与合并队列**。不碰总线，因此可以独立测试、三平台都跑。
+///
+/// # 为什么要有这个结构
+///
+/// 2026-09-25 的总线死锁（`debug/2026-09-25-dbus-wedge/`）根因是：监听循环
+/// 在 `select!` 里直接 `await` 总线往返，等回复期间四路信号流全部停止被
+/// poll；zbus 的读取任务随即在 `broadcast_direct` 上挂住（proxy 信号流默认
+/// 只排 64 条，见 zbus `connection/mod.rs` 的 `DEFAULT_MAX_QUEUED`），于是
+/// 那个回复再也读不出来——环形等待，永久卡死，且每次重启后必然复发。
+///
+/// 修法是把冲刷交给独立任务，监听循环只管入队。「入队」本身的语义——去抖、
+/// 合并、以及**送不出去时要放回**——就是这个结构，它是这条修复里唯一
+/// 不依赖 D-Bus 的部分，所以单独拎出来测。
+// 只有 Linux 的 bus.rs 用它，但测试要在三平台跑（这是本条修复里
+// 唯一不依赖 D-Bus 的部分），所以不 cfg 掉，只在别处允许它闲置。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct FlushQueue {
+    pending: std::collections::HashSet<String>,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl FlushQueue {
+    /// 记一个待刷新的 unit；没有计时就起一个。
+    ///
+    /// **已在计时的不重新起表**：去抖窗口不该被后续事件延长，否则一台持续
+    /// 有 unit 变动的机器会让刷新被无限推迟。
+    pub(crate) fn mark(&mut self, name: String) {
+        self.pending.insert(name);
+        self.arm();
+    }
+
+    /// 去抖到点的时刻；`None` = 没有待刷新的东西（调用方据此挂起等待）。
+    pub(crate) fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+
+    /// 取走这一批并停表。
+    pub(crate) fn take(&mut self) -> std::collections::HashSet<String> {
+        self.deadline = None;
+        std::mem::take(&mut self.pending)
+    }
+
+    /// 把一批没送出去的名字放回（冲刷任务还忙着），与期间新到的合并、重新起表。
+    ///
+    /// 空批次不起表——那只会让循环按去抖间隔空转一圈。
+    pub(crate) fn requeue(&mut self, names: std::collections::HashSet<String>) {
+        if names.is_empty() {
+            return;
+        }
+        self.pending.extend(names);
+        self.arm();
+    }
+
+    fn arm(&mut self) {
+        if self.deadline.is_none() {
+            self.deadline = Some(tokio::time::Instant::now() + EVENT_DEBOUNCE);
+        }
+    }
+}
+
 /// 把一个 `Future` 套上 [`CALL_TIMEOUT`]，超时映射为 `ErrorCode::Timeout`。
 /// 仅 Linux 实现（bus / cli）使用：launchd 侧的取数方式完全不同。
 #[cfg(target_os = "linux")]
