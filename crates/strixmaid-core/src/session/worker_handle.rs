@@ -61,6 +61,19 @@ use super::framing::{self, FdFrameReader};
 /// 等 worker 第一帧 `Hello` 的上限。exec 一个静态二进制并起 tokio 用不了 1 秒，
 /// 这里放宽到 15 秒兜底负载很高的机器。
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 单次 RPC 的顶层超时——**最后防线**，不替代各 provider 自己的细粒度超时。
+///
+/// 2026-09-25 事故的教训之一：这个项目对「调用会失败」防得很好，对「调用
+/// 永远不返回」几乎没防。worker **活着但某个调用卡死**（fs.list 落在挂死的
+/// NFS 上、阻塞线程池被同类调用耗尽）时，这里的 `rx.await` 原本会永远等
+/// 下去，把上面的 HTTP 请求一起挂住。
+///
+/// 取 60 秒：worker 侧最慢的**合法**路径是日志查询（journalctl 自带 30 秒
+/// 超时），翻倍留余量。超时不代表 worker 死了——不动连接、不杀进程，只让
+/// 这一次调用以 Timeout 失败，pending 表同步清掉（迟到的应答按「无人认领」
+/// 记日志丢弃，是既有语义）。
+const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// `Shutdown` 之后等 worker 自行退出的时间，超过则进入 `Stop::Graceful`。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// `Stop::Graceful` 之后再等这么久，还不退就 `Stop::Force`。
@@ -258,21 +271,44 @@ impl WorkerHandle {
             method: method.to_string(),
             params,
         };
-        if let Err(e) = self.inner.send(&msg).await {
+        // 发送与等应答都在超时伞下：worker 卡死不读时，写满的 socket 缓冲
+        // 会把 send 也挂住，只罩 rx 罩不全。
+        let attempt = tokio::time::timeout(RPC_TIMEOUT, async {
+            if let Err(e) = self.inner.send(&msg).await {
+                return Err(
+                    ApiError::new(ErrorCode::Unavailable, "无法向 worker 发送请求")
+                        .with_detail(e.to_string()),
+                );
+            }
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => Err(ApiError::new(ErrorCode::Unavailable, "worker 在应答前断开")),
+            }
+        })
+        .await;
+        // 除「拿到应答」（read_loop 已摘牌）外，其余出路都要把 pending 里
+        // 自己这一格摘掉，否则表随失败调用无限涨。remove 幂等，多摘无害。
+        let cleanup = || {
             self.inner
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
-            return Err(
-                ApiError::new(ErrorCode::Unavailable, "无法向 worker 发送请求")
-                    .with_detail(e.to_string()),
-            );
-        }
-
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(ApiError::new(ErrorCode::Unavailable, "worker 在应答前断开")),
+        };
+        match attempt {
+            Ok(result) => {
+                if result.is_err() {
+                    cleanup();
+                }
+                result
+            }
+            Err(_) => {
+                cleanup();
+                Err(ApiError::new(
+                    ErrorCode::Timeout,
+                    format!("worker 对 {method} {} 秒未应答", RPC_TIMEOUT.as_secs()),
+                ))
+            }
         }
     }
 
@@ -314,17 +350,28 @@ impl WorkerHandle {
             channel: channel.to_string(),
             params,
         };
-        if let Err(e) = self.inner.send(&msg).await {
+        // 同 `call_with_fds`：worker 卡死不读时 send 会挂在写满的缓冲上，
+        // 订阅帧也要在超时伞下。
+        let sent = tokio::time::timeout(RPC_TIMEOUT, self.inner.send(&msg)).await;
+        let err = match sent {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(
+                ApiError::new(ErrorCode::Unavailable, "无法向 worker 发起订阅")
+                    .with_detail(e.to_string()),
+            ),
+            Err(_) => Some(ApiError::new(
+                ErrorCode::Timeout,
+                format!("向 worker 发起订阅 {} 秒未完成", RPC_TIMEOUT.as_secs()),
+            )),
+        };
+        if let Some(e) = err {
             // 还没起守望任务，这里自己收拾干净即可。
             self.inner
                 .subs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
-            return Err(
-                ApiError::new(ErrorCode::Unavailable, "无法向 worker 发起订阅")
-                    .with_detail(e.to_string()),
-            );
+            return Err(e);
         }
 
         tokio::spawn(watch_subscription(
@@ -653,5 +700,63 @@ fn fail_all(inner: &Inner) {
         .collect();
     for (_, tx) in drained {
         let _ = tx.send(Err(ApiError::new(ErrorCode::Unavailable, "worker 已断开")));
+    }
+}
+
+#[cfg(test)]
+mod rpc_timeout_tests {
+    use super::*;
+    use crate::worker::{self, Dispatcher};
+
+    /// 进程内 worker（与 `worker/providers.rs` 的测试同一套路）。
+    async fn handle_for(d: Dispatcher) -> WorkerHandle {
+        let (main_side, worker_side) = crate::session::channel::IpcChannel::pair().unwrap();
+        tokio::spawn(async move {
+            let _ = worker::serve(worker_side, Arc::new(d)).await;
+        });
+        WorkerHandle::connect(main_side, -1, None)
+            .await
+            .expect("进程内 worker 握手失败")
+    }
+
+    /// 2026-09-25 事故那一类「活着但不应答」的回归：卡死的调用必须在
+    /// [`RPC_TIMEOUT`] 后以 Timeout 失败，pending 表不留悬挂条目，且
+    /// **连接仍然可用**——超时是这一次调用的事，不是连接的死刑。
+    ///
+    /// 时钟策略：握手与收尾用**真实时间**，只在等超时那一段 `pause()`。
+    /// 全程 paused 的话，auto-advance 会在 socket 事件传播的窗口里直接把
+    /// 钟拨过 60 秒——第二次正常调用也会被判超时（实测如此，不是理论）。
+    #[tokio::test]
+    async fn 卡死的调用按超时失败_连接不陪葬() {
+        let mut d = Dispatcher::new();
+        d.register_fn("test.hang", |_v| async move {
+            std::future::pending::<Result<Value, ApiError>>().await
+        });
+        d.register_fn("test.ok", |_v| async move { Ok(Value::Null) });
+        let handle = handle_for(d).await;
+
+        tokio::time::pause(); // 快进 60 秒的超时，不真等
+        let err = handle
+            .call("test.hang", Value::Null)
+            .await
+            .expect_err("卡死的调用应当超时");
+        assert_eq!(err.code, ErrorCode::Timeout, "错误码应是 Timeout：{err:?}");
+
+        assert!(
+            handle
+                .inner
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "超时后 pending 表必须清空，否则随失败调用无限涨"
+        );
+
+        tokio::time::resume(); // 回到真实时间，别让 auto-advance 误伤下面的往返
+        let v = handle
+            .call("test.ok", Value::Null)
+            .await
+            .expect("超时后连接应当照常可用");
+        assert_eq!(v, Value::Null);
     }
 }

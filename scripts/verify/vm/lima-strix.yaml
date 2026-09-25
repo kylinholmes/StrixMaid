@@ -1,0 +1,82 @@
+# 本机 Linux 验证虚拟机（Apple Silicon）。
+#
+#   limactl start --name=strix scripts/verify/vm/lima-strix.yaml
+#   limactl shell strix
+#
+# 为什么是「虚拟机 + 里面再跑容器」而不是二选一：
+#
+#   - **容器**给的是发行版矩阵。07 的验收要在 ubuntu 与 rocky 上各跑一遍，
+#     差异是真实的（`/logs` 在 RHEL 系上曾返回 500，Ubuntu 上永远复现不了）。
+#     开一台 VM 装一个发行版是笨办法，容器几秒一个。
+#   - **虚拟机**给的是容器给不了的那几项：`user@.service`（07 §1.2 #9 在容器里
+#     只能得到 503，注里写着「VM 上应为 200」）、systemd-logind 与 sshd 的
+#     pam_systemd、以及 `dbus-wedge-stress.sh` 要的那种全系统压力。
+#   - macOS 上没有第三条路：Docker Desktop / podman machine 本身就是一台 Linux
+#     虚拟机。既然一定要有，就让它是一台**看得见、进得去、能当真机用**的。
+#
+# 架构：客机与宿主同架构（aarch64），不做整机模拟。CI 的发布物是 x86_64，
+# 靠 Rosetta 在**用户态**翻译——见下面 `vmOpts.vz.rosetta` 的说明。
+
+minimumLimaVersion: 2.0.0
+
+# Fedora Cloud Base。镜像源用理化学研究所（日本）——实测 46 MB/s，
+# 官方 download.fedoraproject.org 经重定向后只有几百 KB/s。
+# 换地方时把下面两条 location 换成
+# https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/<arch>/images/...
+# 即可，digest 不变。
+images:
+- location: "https://ftp.riken.jp/Linux/fedora/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2"
+  arch: aarch64
+  digest: "sha256:55c60a3b80d3616a08705afd0459e75fe9f03c54aba7a46e4002a41a72fa0d5b"
+- location: "https://ftp.riken.jp/Linux/fedora/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+  arch: x86_64
+  digest: "sha256:28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+
+# Apple 虚拟化框架。相对 QEMU 少一整层用户态模拟：本机实测冷启动到
+# `systemctl is-system-running: running` 约 35 s，宿主侧常驻内存按需增长
+# （客机空转时宿主进程 RSS ~150 MB，不是一上来就占满 memory）。
+vmType: vz
+
+cpus: 4
+memory: 4GiB
+disk: 60GiB          # 稀疏分配，实际占用按写入量增长
+
+vmOpts:
+  vz:
+    # 整套方案的关键一项。
+    #
+    # CI 的发布物是 x86_64：`strixmaid` 是静态 musl（换架构也只是指令集问题），
+    # 但 `strixmaid-helper` 动态链接 glibc，还要 dlopen 发行版的 PAM 模块。
+    # 在 aarch64 客机上直接跑它必然失败：
+    #   rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2
+    # 解法不是「翻译一个二进制」，而是**让整个用户态都是 x86_64**——
+    # 也就是用 `--platform linux/amd64` 起容器（见 run-in-podman.sh 的 --arch）。
+    # Rosetta 负责把里面所有 x86_64 指令翻译掉，速度接近原生，
+    # 比 qemu-user-static 快一个数量级。
+    #
+    # binfmt: true 让 Lima 在客机里注册 binfmt_misc 处理器，且带 F 标志
+    # （fix binary），这样容器与其它 mount namespace 里也生效。
+    rosetta:
+      enabled: true
+      binfmt: true
+
+mounts:
+- location: "~/orca/StrixMaid"
+  writable: true
+
+# 宿主的 http_proxy 指向 127.0.0.1:7891。透传进客机后那个地址指的是客机自己，
+# 必然不通——dnf / podman pull 会卡住而不是报错，很难看出原因。
+propagateProxyEnv: false
+
+ssh:
+  forwardAgent: false
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    # Fedora Cloud 自带 podman；显式装一遍是为了让这份配置在别的基础镜像上也成立。
+    command -v podman >/dev/null || dnf -y install podman
+    # 07 的脚本要用到的客机侧工具（容器内那份由 Containerfile 负责）。
+    rpm -q jq >/dev/null 2>&1 || dnf -y install jq curl
