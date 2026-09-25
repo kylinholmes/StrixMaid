@@ -497,7 +497,9 @@ async fn spawn_listener(conn: Connection, scope: UnitScope, shared: Arc<Shared>)
     if !shared.set_listener_flag(scope, true) {
         return; // 已经有一个在跑
     }
-    match ListenerStreams::setup(&conn).await {
+    // setup 里是六连发的总线往返，而本函数被 WS 订阅经 block_in_place
+    // 同步等着：不包超时的话，总线一慢每个订阅请求就永久占一个运行时线程。
+    match with_timeout("监听建立", ListenerStreams::setup(&conn)).await {
         Ok(streams) => {
             tokio::spawn(run_listener(conn, scope, shared, streams));
         }
@@ -725,7 +727,7 @@ async fn run_listener(
             }
         }
 
-        streams = match ListenerStreams::setup(&conn).await {
+        streams = match with_timeout("监听重建", ListenerStreams::setup(&conn)).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(?scope, error = %e, "重建监听失败");
