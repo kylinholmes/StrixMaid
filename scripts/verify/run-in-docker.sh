@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 07 验证工装的 docker 驱动。与 run-in-podman.sh 等价，用于只有 docker 的机器。
 #
-#   scripts/verify/run-in-docker.sh --dist <解压后的发布目录> [--distro ubuntu|rocky] [--long]
+#   scripts/verify/run-in-docker.sh --dist <解压后的发布目录> [--distro ubuntu|rocky] [--arch amd64|arm64] [--long]
 #
 # 与 podman 版的差别只在起容器那一步（其余步骤逐条对齐，改一边记得改另一边）：
 #
@@ -15,10 +15,11 @@
 # 前置：docker、cgroup v2、能访问镜像与软件源。
 set -euo pipefail
 
-DIST=''; DISTRO=ubuntu; LONG=0
+DIST=''; DISTRO=ubuntu; ARCH=''; LONG=0
 while [ $# -gt 0 ]; do case "$1" in
   --dist) DIST="$2"; shift 2 ;;
   --distro) DISTRO="$2"; shift 2 ;;
+  --arch) ARCH="$2"; shift 2 ;;
   --long) LONG=1; shift ;;
   *) echo "未知参数 $1" >&2; exit 2 ;;
 esac; done
@@ -40,16 +41,44 @@ if [ "$DISTRO" != ubuntu ] && command -v file >/dev/null 2>&1; then
   }
 fi
 
+# 发布物的架构与宿主不同时（典型：Apple Silicon 上跑 CI 的 x86_64 产物），
+# 必须让容器的整个用户态也是那个架构——`strixmaid` 是静态的无所谓，但
+# `strixmaid-helper` 动态链接 glibc，还要 dlopen 发行版的 PAM 模块，
+# 它们只在同架构的镜像里存在。不指定就会拉到与宿主同架构的镜像，
+# helper 起不来，而报错（"failed to open elf at /lib64/ld-linux-x86-64.so.2"）
+# 离原因很远。
+#
+# 宿主侧要有对应的 binfmt 处理器：Apple 虚拟化框架的 Rosetta（Lima 的
+# `vmOpts.vz.rosetta`）或 qemu-user-static。
+if [ -z "$ARCH" ] && command -v file >/dev/null 2>&1; then
+  case "$(file -b "$DIST/strixmaid")" in
+    *x86-64*)  ARCH=amd64 ;;
+    *aarch64*) ARCH=arm64 ;;
+  esac
+fi
+# 下面对 PLATFORM 一律写成 ${PLATFORM[@]+"${PLATFORM[@]}"}：macOS 自带的
+# bash 3.2 在 set -u 下展开空数组会当成未绑定变量直接退出。
+PLATFORM=()
+if [ -n "$ARCH" ]; then
+  case "$ARCH" in
+    amd64|arm64) ;;
+    x86_64)  ARCH=amd64 ;;
+    aarch64) ARCH=arm64 ;;
+    *) echo "--arch 支持 amd64 / arm64" >&2; exit 2 ;;
+  esac
+  PLATFORM=(--platform "linux/$ARCH")
+fi
+
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-IMG="strix-verify:$DISTRO"
+IMG="strix-verify:$DISTRO${ARCH:+-$ARCH}"
 NAME="strix-verify-$$"
 ALICE_PW='alice-verify-pw'; BOB_PW='bob-verify-pw'
 
 echo "== 构建镜像 $IMG（BASE=$BASE）=="
-docker build --build-arg "BASE=$BASE" -t "$IMG" -f "$ROOT/scripts/verify/Containerfile" "$ROOT"
+docker build ${PLATFORM[@]+"${PLATFORM[@]}"} --build-arg "BASE=$BASE" -t "$IMG" -f "$ROOT/scripts/verify/Containerfile" "$ROOT"
 
 echo "== 起 systemd 容器 $NAME =="
-docker run -d --name "$NAME" --hostname strix-verify \
+docker run -d ${PLATFORM[@]+"${PLATFORM[@]}"} --name "$NAME" --hostname strix-verify \
   --privileged --cgroupns=private \
   -e container=docker \
   --tmpfs /run --tmpfs /run/lock \
