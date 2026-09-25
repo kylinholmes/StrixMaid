@@ -1,15 +1,15 @@
 #!/bin/bash
-# StrixMaid 总线死锁 —— 压力复现脚本（与 verify-fix.sh 配套）
+# StrixMaid 总线死锁 —— 压力复现脚本（与 dbus-wedge-check.sh 配套）
 #
-# verify-fix.sh 验的是「没卡住」，但它不制造触发条件。这个脚本负责制造：
+# dbus-wedge-check.sh 验的是「没卡住」，但它不制造触发条件。这个脚本负责制造：
 # 旧代码的死锁需要**一次事件刷新期间涌入 ≥64 条 systemd 信号**
 # （zbus proxy 信号流的默认容量 DEFAULT_MAX_QUEUED=64），所以这里用
 # daemon-reload 与批量 unit 启停连续灌信号，同时按秒采样那条 bus socket
 # 的 Recv-Q。
 #
 # 用法（<测试机> 上，需 root 读别的进程的 socket）：
-#   sudo bash stress-bus.sh              # 默认 6 轮
-#   sudo ROUNDS=20 bash stress-bus.sh
+#   sudo bash dbus-wedge-stress.sh              # 默认 6 轮
+#   sudo ROUNDS=20 bash dbus-wedge-stress.sh
 #
 # **前提**：必须有一个客户端正订阅着 services.changed（浏览器打开服务页）。
 # 修复后监听是按需存在的——没有订阅者时监听根本不启动，那样跑出来的
@@ -28,7 +28,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=1; }
 note() { printf '  ---- %s\n' "$*"; }
 
-# 与 verify-fix.sh 同一个取法：锚定 State 字段再取它后面那个。
+# 与 dbus-wedge-check.sh 同一个取法：锚定 State 字段再取它后面那个。
 recvq_of() {
   ss -xap 2>/dev/null | grep -F "pid=$1," \
     | awk '{ for (i=1;i<=NF;i++)
@@ -42,9 +42,16 @@ PID=$(systemctl show strixmaid -p ExecMainPID --value 2>/dev/null)
 say "0. 前提检查：有没有人正订阅 services.changed"
 # 监听任务起来时会打 debug 日志「systemd 事件监听已启动」。
 # 需要服务以 RUST_LOG=debug 运行才看得到。
-STARTED=$(journalctl -u strixmaid --no-pager 2>/dev/null | grep -c '事件监听已启动')
-RETIRED=$(journalctl -u strixmaid --no-pager 2>/dev/null | grep -c '事件监听退场')
-note "监听启动 $STARTED 次、退场 $RETIRED 次"
+#
+# 两个计数都锚定**本进程启动**：不锚定的话会把历史开机/重启的行全算进来，
+# 一次早年的 bus 断开就能让「启动 > 退出」永远成立——正是要防的假绿。
+# 退出有两种文案（退场 = 无订阅者；退出 = bus 断开），都要数。
+START_TS=$(systemctl show strixmaid -p ExecMainStartTimestamp --value 2>/dev/null)
+SINCE_ARGS=()
+[[ -n "$START_TS" && "$START_TS" != "n/a" ]] && SINCE_ARGS=(--since "$START_TS")
+STARTED=$(journalctl -u strixmaid "${SINCE_ARGS[@]}" --no-pager 2>/dev/null | grep -c '事件监听已启动')
+RETIRED=$(journalctl -u strixmaid "${SINCE_ARGS[@]}" --no-pager 2>/dev/null | grep -cE '事件监听退场|事件监听退出')
+note "本进程内：监听启动 $STARTED 次、退出 $RETIRED 次"
 if [[ "$STARTED" -le "$RETIRED" ]]; then
   bad "当前没有活着的监听——请先在浏览器里打开服务页并保持，否则这轮压力测不到东西"
   note "（日志看不到？服务要以 RUST_LOG=debug 跑：systemctl edit strixmaid 加 Environment=RUST_LOG=debug）"
@@ -68,10 +75,13 @@ for i in $(seq 1 "$ROUNDS"); do
   # daemon-reload：一次就会对**所有** unit 发 PropertiesChanged，是最猛的信号源。
   systemctl daemon-reload
   # 批量启停：造 JobRemoved / UnitNew / UnitRemoved。挑无害的 oneshot 目标。
+  # 只等这三个 start——裸 `wait` 会连上面的后台采样器一起等，而它永不退出，
+  # 脚本就停在第一轮（这个坑真踩过，别改回去）。
+  pids=()
   for u in systemd-tmpfiles-clean.service man-db.service systemd-journal-flush.service; do
-    systemctl start "$u" >/dev/null 2>&1 &
+    systemctl start "$u" >/dev/null 2>&1 & pids+=("$!")
   done
-  wait
+  wait "${pids[@]}"
   echo "reload + 启停完成"
 done
 

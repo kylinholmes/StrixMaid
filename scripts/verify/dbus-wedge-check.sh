@@ -2,8 +2,8 @@
 # StrixMaid 总线卡死 —— 修复后自检脚本
 #
 # 用法（在 <测试机> 上执行，建议 root，便于读取目标进程的 /proc）：
-#   sudo bash verify-fix.sh            # 默认监控 60 秒
-#   sudo MONITOR_SECS=300 bash verify-fix.sh
+#   sudo bash dbus-wedge-check.sh            # 默认监控 60 秒
+#   sudo MONITOR_SECS=300 bash dbus-wedge-check.sh
 #
 # 判据（全部满足才算通过）：
 #   1. dbus-daemon 拒绝日志 0 行（本次样本：修复前 4 行/分钟，持续 25 小时）
