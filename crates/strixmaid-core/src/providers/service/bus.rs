@@ -651,7 +651,7 @@ enum ListenerExit {
 ///
 /// # 循环体内绝不 `await` 总线调用
 ///
-/// 这是 2026-09-25 总线死锁的**根因修复**（`debug/2026-09-25-dbus-wedge/`）。
+/// 这是 2026-09-25 总线死锁的**根因修复**（`docs/incidents/2026-09-25-dbus-wedge.md`）。
 /// 原先这里直接 `await` 冲刷（`summaries_for`，含 D-Bus 往返），而等回复期间
 /// 下面四路信号流全部停止被 poll；zbus 的读取任务随即在 `broadcast_direct`
 /// 上挂住（proxy 信号流默认只排 64 条），于是**那个回复再也读不出来**——

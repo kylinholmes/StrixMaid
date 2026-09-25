@@ -433,7 +433,7 @@ pub fn apply_list_query(mut units: Vec<UnitSummary>, q: &UnitListQuery) -> Vec<U
 ///
 /// # 为什么要有这个结构
 ///
-/// 2026-09-25 的总线死锁（`debug/2026-09-25-dbus-wedge/`）根因是：监听循环
+/// 2026-09-25 的总线死锁（`docs/incidents/2026-09-25-dbus-wedge.md`）根因是：监听循环
 /// 在 `select!` 里直接 `await` 总线往返，等回复期间四路信号流全部停止被
 /// poll；zbus 的读取任务随即在 `broadcast_direct` 上挂住（proxy 信号流默认
 /// 只排 64 条，见 zbus `connection/mod.rs` 的 `DEFAULT_MAX_QUEUED`），于是
