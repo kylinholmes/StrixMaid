@@ -703,3 +703,59 @@ mod tests {
         assert_eq!(opt_u64(7), Some(7));
     }
 }
+
+#[cfg(test)]
+mod flush_queue_tests {
+    use super::FlushQueue;
+
+    /// 去抖窗口**不被后续事件延长**：第一条事件起表，之后来的并入同一批。
+    ///
+    /// 这是原有语义，重构时最容易丢——改成「每条事件都重置计时」的话，
+    /// 一台持续有 unit 变动的机器会让刷新被无限推迟。
+    #[tokio::test]
+    async fn 去抖窗口不被后续事件延长() {
+        let mut q = FlushQueue::default();
+        q.mark("a.service".into());
+        let first = q.deadline().expect("第一条事件应当起表");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        q.mark("b.service".into());
+        assert_eq!(q.deadline(), Some(first), "第二条事件不该把表往后推");
+        assert_eq!(q.take().len(), 2, "两条应当合并成一批");
+    }
+
+    #[test]
+    fn 取走之后停表() {
+        let mut q = FlushQueue::default();
+        assert!(q.deadline().is_none(), "空队列不该有表");
+        q.mark("a.service".into());
+        let batch = q.take();
+        assert_eq!(batch.len(), 1);
+        assert!(q.deadline().is_none(), "取走后应当停表");
+        assert!(q.take().is_empty(), "再取是空的");
+    }
+
+    /// **本次事故的回归点**：冲刷任务忙不过来时这一批必须放回队列，
+    /// 且与其间新到的事件合并——既不能丢，也不能重复刷。
+    #[test]
+    fn 送不出去的一批放回并与新事件合并() {
+        let mut q = FlushQueue::default();
+        q.mark("a.service".into());
+        let batch = q.take();
+
+        // 模拟 try_send 失败：这一批退回。退回之前已经来了新事件。
+        q.mark("b.service".into());
+        q.requeue(batch);
+
+        assert!(q.deadline().is_some(), "放回之后必须重新起表，否则这批永远不刷");
+        let merged = q.take();
+        assert_eq!(merged.len(), 2, "退回的与新来的应当合并：{merged:?}");
+        assert!(merged.contains("a.service") && merged.contains("b.service"));
+    }
+
+    #[test]
+    fn 放回空批次不起表() {
+        let mut q = FlushQueue::default();
+        q.requeue(Default::default());
+        assert!(q.deadline().is_none(), "没东西可刷就别起表，否则空转");
+    }
+}
