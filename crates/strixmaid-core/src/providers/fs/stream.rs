@@ -232,21 +232,23 @@ async fn serve_source(mut channel: IpcChannel, source: Source, size: u64) -> io:
 /// 在线程池扩张时留下大量分配器 arena（Linux THP 会进一步放大其驻留内存）。
 /// 队列与当前块均有界；取消时 receiver 释放，blocking_send 随即退出。
 /// 若文件系统读取仍未返回，任务持有的 permit 保证不能提前复用名额。
-async fn pump_file<W: AsyncWrite + Unpin>(
-    mut file: File,
+async fn pump_file<R: io::Read + io::Seek + Send + 'static, W: AsyncWrite + Unpin>(
+    mut file: R,
     sink: &mut W,
     offset: u64,
     mut remaining: u64,
     permit: Arc<OwnedSemaphorePermit>,
 ) -> io::Result<()> {
-    use std::io::{Read, Seek};
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let reader = tokio::task::spawn_blocking(move || -> io::Result<()> {
         let _permit = permit;
         file.seek(io::SeekFrom::Start(offset))?;
         while remaining > 0 && !tx.is_closed() {
             let mut buf = vec![0; remaining.min(BUFFER_SIZE as u64) as usize];
-            let n = file.read(&mut buf)?;
+            let n = match file.read(&mut buf) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -384,6 +386,123 @@ mod tests {
     async fn finish(handle: WorkerHandle, task: tokio::task::JoinHandle<()>) {
         handle.shutdown().await;
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn 文件读取被信号中断时重试而不是截断() {
+        struct InterruptedRead(bool);
+        impl io::Read for InterruptedRead {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !std::mem::replace(&mut self.0, true) {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                buf[0] = 42;
+                Ok(1)
+            }
+        }
+        impl io::Seek for InterruptedRead {
+            fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::new(slots.clone().acquire_owned().await.unwrap());
+        let mut output = Vec::new();
+        pump_file(InterruptedRead(false), &mut output, 0, 1, permit)
+            .await
+            .unwrap();
+        assert_eq!(output, [42]);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn 取消仍在系统调用里的读取不能提前归还名额() {
+        struct BlockedRead {
+            started: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl io::Read for BlockedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                let _ = self.started.take().unwrap().send(());
+                let _ = self.release.recv();
+                Ok(0)
+            }
+        }
+        impl io::Seek for BlockedRead {
+            fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::new(slots.clone().acquire_owned().await.unwrap());
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            pump_file(
+                BlockedRead {
+                    started: Some(started),
+                    release: blocked,
+                },
+                &mut tokio::io::sink(),
+                0,
+                1,
+                permit,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(slots.available_permits(), 0, "系统调用没退，不能再开新读取");
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn 真实文件背压超时取消阻塞发送并归还名额() {
+        let temp = Temp::new();
+        let path = temp.0.join("stalled");
+        File::create(&path)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        let file = File::open(&path).unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::new(slots.clone().acquire_owned().await.unwrap());
+        let (mut tx, mut rx) = tokio::io::duplex(1);
+        let task =
+            tokio::spawn(async move { pump_file(file, &mut tx, 0, 8 * 1024 * 1024, permit).await });
+        tokio::time::timeout(Duration::from_secs(2), rx.read_u8())
+            .await
+            .unwrap()
+            .unwrap();
+        // 读取首字节会腾出一格；让写端再次填满并进入等待后再推进时钟。
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(STALL + Duration::from_secs(1)).await;
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        #[cfg(unix)]
+        assert_eq!(source_fds(&path), 0);
     }
 
     #[cfg(unix)]
