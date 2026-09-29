@@ -40,6 +40,19 @@ impl figment::Provider for ConfigFile {
     fn data(&self) -> Result<figment::value::Map<figment::Profile, Dict>, figment::Error> {
         match std::fs::metadata(&self.path) {
             Err(e) if !self.required && e.kind() == std::io::ErrorKind::NotFound => {
+                // Windows 也会把中间组件为普通文件报告为 NotFound。
+                // 向上找到首个存在的父路径，确认它是目录后才允许缺省。
+                for parent in self.path.ancestors().skip(1) {
+                    if parent.as_os_str().is_empty() {
+                        break;
+                    }
+                    match std::fs::metadata(parent) {
+                        Ok(meta) if meta.is_dir() => break,
+                        Ok(_) => return Err("配置路径的中间组件必须是目录".into()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(e.to_string().into()),
+                    }
+                }
                 tracing::debug!(path = %self.path.display(), "配置文件不存在，使用默认值 + 环境变量 + 命令行");
                 Ok(Default::default())
             }

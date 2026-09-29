@@ -487,6 +487,43 @@ fn 配置文件不存在时回落到默认值() {
 }
 
 #[test]
+fn 配置路径的多层父目录不存在时仍允许缺省() {
+    let missing = PathBuf::from(format!(
+        "strixmaid-config-test-{}-不存在的父目录",
+        std::process::id()
+    ));
+    // 同时覆盖绝对路径和相对路径；后者的 ancestors 最终包含空路径。
+    for parent in [std::env::temp_dir().join(&missing), missing] {
+        assert!(!parent.exists(), "夹具前提：父目录确实不存在");
+        let path = parent.join("nested").join("config.toml");
+        let config = Config::from_figment(
+            Figment::from(Serialized::defaults(Config::default()))
+                .merge(ConfigFile::optional(&path)),
+        )
+        .expect("真正缺失的父目录不应阻止首次启动");
+        assert_eq!(config, Config::default());
+    }
+}
+
+#[test]
+fn 显式配置文件缺失不能回落默认值() {
+    let missing = std::env::temp_dir().join(format!(
+        "strixmaid-config-test-{}-显式缺失.toml",
+        std::process::id()
+    ));
+    assert!(!missing.exists(), "夹具前提：该路径确实不存在");
+    for path in [missing.clone(), missing.join("nested").join("config.toml")] {
+        let err = Config::from_figment(
+            Figment::from(Serialized::defaults(Config::default()))
+                .merge(ConfigFile::required(&path)),
+        )
+        .expect_err("显式配置缺失必须报错");
+        assert!(matches!(err, ConfigError::Source(_)));
+        assert!(err.to_string().contains(&path.display().to_string()));
+    }
+}
+
+#[test]
 fn 配置文件存在但解析失败必须报错且带上路径() {
     // 语法错误：`listen` 没有值。静默忽略这种文件比直接失败危险得多。
     let file = TempToml::new("语法错误", "listen = \n");
@@ -580,11 +617,23 @@ fn 配置路径指向目录必须报来源错误() {
 #[test]
 fn 配置路径的中间组件不是目录必须报错() {
     let parent = TempToml::new("非目录父级", "");
-    let path = parent.path().join("config.toml");
-    let err =
-        with_env(&[], || Config::load_from(&path, None)).expect_err("路径无效不应当作首次启动");
-    assert!(matches!(err, ConfigError::Source(_)));
-    assert!(err.to_string().contains(&path.display().to_string()));
+    for path in [
+        parent.path().join("config.toml"),
+        parent.path().join("nested").join("config.toml"),
+    ] {
+        let err =
+            with_env(&[], || Config::load_from(&path, None)).expect_err("路径无效不应当作首次启动");
+        assert!(matches!(err, ConfigError::Source(_)));
+        assert!(err.to_string().contains(&path.display().to_string()));
+
+        let err = Config::from_figment(
+            Figment::from(Serialized::defaults(Config::default()))
+                .merge(ConfigFile::required(&path)),
+        )
+        .expect_err("显式配置同样必须拒绝无效路径");
+        assert!(matches!(err, ConfigError::Source(_)));
+        assert!(err.to_string().contains(&path.display().to_string()));
+    }
 }
 
 #[cfg(unix)]
