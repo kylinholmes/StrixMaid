@@ -395,6 +395,19 @@ fn register_fs(d: &mut Dispatcher) {
         }
     });
 
+    let f = fs.clone();
+    d.register_fd(
+        rpc::FS_OPEN_STREAM,
+        Arc::new(move |v| {
+            let f = f.clone();
+            Box::pin(async move {
+                let q: rpc::FsOpenStreamParams = params(rpc::FS_OPEN_STREAM, v)?;
+                let (meta, attachment) = f.open_stream(q).await?;
+                Ok((result(meta)?, vec![attachment]))
+            })
+        }),
+    );
+
     d.register_fn(rpc::FS_THUMB, move |v| {
         let f = fs.clone();
         async move {
@@ -449,6 +462,7 @@ mod tests {
             rpc::CAPS_PROBE_USER,
             rpc::FS_LIST,
             rpc::FS_READ,
+            rpc::FS_OPEN_STREAM,
             // `term.open` 交出 fd，注册在另一张表里，但 `methods()` 两张都算——
             // 它对调用方而言就是一个普通方法名。
             rpc::TERM_OPEN,

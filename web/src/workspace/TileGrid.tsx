@@ -50,8 +50,19 @@ function Tile({
       title={entry.name}
       onClick={() => {
         onSelect();
-        onOpen();
+        if (entry.kind === "dir" || entry.kind === "symlink") onOpen();
       }}
+      onDoubleClick={() => {
+        if (entry.kind !== "dir" && entry.kind !== "symlink") onOpen();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          onSelect();
+          onOpen();
+        }
+      }}
+      aria-pressed={selected}
     >
       <div ref={ref} className={s.tileIcon}>
         {thumb ? (
@@ -77,8 +88,8 @@ export interface TileGridProps {
   platform: Platform;
   selected: string | null;
   onSelect: (name: string) => void;
-  /** 打开一个目录（文件暂无动作）。 */
-  onEnterDir: (e: DirEntry) => void;
+  /** 与列表共用的激活动作。 */
+  onActivate: (e: DirEntry) => void;
 }
 
 /** 平铺图标视图（§4.5 的第二种视图）。图片出缩略图（§4.7），其余用类型图标。 */
@@ -88,7 +99,7 @@ export function TileGrid({
   platform,
   selected,
   onSelect,
-  onEnterDir,
+  onActivate,
 }: TileGridProps) {
   return (
     <div className={s.tileGrid}>
@@ -101,7 +112,7 @@ export function TileGrid({
           selected={selected === e.name}
           onSelect={() => onSelect(e.name)}
           onOpen={() => {
-            if (e.kind === "dir") onEnterDir(e);
+            onActivate(e);
           }}
         />
       ))}

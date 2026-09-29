@@ -63,8 +63,22 @@ describe("activateEntry", () => {
   it("没有目标的链接：无处可去", () =>
     expect(activateEntry("/home/k", link("weird"), "unix")).toBeNull());
 
-  it("普通文件：暂时无处可去（预览界面还没有）", () =>
-    expect(activateEntry("/home/k", file("a.txt"), "unix")).toBeNull());
+  it("普通文件：打开预览", () =>
+    expect(activateEntry("/home/k", file("a.txt"), "unix")).toEqual({
+      kind: "preview",
+      path: "/home/k/a.txt",
+    }));
+
+  it.each(["fifo", "socket", "block_device", "char_device", "unknown"])(
+    "%s 给出不能预览原因",
+    (kind) => {
+      expect(activateEntry("/dev", { kind, name: "special" }, "unix")).toMatchObject({
+        kind: "preview",
+        path: "/dev/special",
+        reason: expect.any(String),
+      });
+    },
+  );
 
   it("当前目录未知时不动", () => expect(activateEntry(null, dir("src"), "unix")).toBeNull());
 });

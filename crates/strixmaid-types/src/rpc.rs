@@ -89,6 +89,8 @@ pub const FS_READ: &str = "fs.read";
 pub const FS_RAW: &str = "fs.raw";
 /// 出一张缩略图（读，roadmap/12 §4.7）。参数 [`FsThumbParams`]，结果 [`FsThumb`]。
 pub const FS_THUMB: &str = "fs.thumb";
+/// 打开一个文件，返回元数据及一个专用字节通道附件。
+pub const FS_OPEN_STREAM: &str = "fs.open_stream";
 
 /// 开一个 PTY（`roadmap/03-terminal.md` §4.5）。
 ///
@@ -303,6 +305,27 @@ pub struct FsRawParams {
 /// hex 编码后 512 KiB，加上 JSON 骨架仍在 1 MiB 帧限之内。
 pub const FS_RAW_MAX_CHUNK: u32 = 256 * 1024;
 
+/// 附件等待 offset、length 两个大端 u64，再启动数据泵。
+/// 不写入、直接释放附件即可实现 HEAD。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsOpenStreamParams {
+    pub path: String,
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// 已打开句柄或已物理转正的有界预览档的元数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsOpenStreamResult {
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    pub mime: Option<String>,
+    #[serde(default = "one")]
+    pub orientation: u8,
+}
+
 /// `fs.thumb` 的参数：出一张缩略图（roadmap/12 §4.7）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsThumbParams {
@@ -420,7 +443,7 @@ mod tests {
             assert!(m.starts_with("log."), "{m}");
         }
         assert!(CAPS_PROBE_USER.starts_with("caps."));
-        for m in [FS_LIST, FS_READ, FS_RAW, FS_THUMB] {
+        for m in [FS_LIST, FS_READ, FS_RAW, FS_THUMB, FS_OPEN_STREAM] {
             assert!(m.starts_with("fs."), "{m}");
         }
     }
@@ -456,6 +479,7 @@ mod tests {
             FS_READ,
             FS_RAW,
             FS_THUMB,
+            FS_OPEN_STREAM,
             TERM_OPEN,
             TERM_RESIZE,
             TERM_CLOSE,

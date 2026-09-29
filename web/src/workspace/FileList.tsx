@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { Button, ProgressLine, Segmented, Toolbar, ToolbarSpacer } from "@/components";
 import { cx } from "@/lib/cx";
+import { onSessionReset } from "@/session/lifecycle";
 import { ListPane } from "./ListPane";
 import { isDescendant, joinPath, type Platform, parentPath, splitForCompletion } from "./path";
+import { FilePreview, type PreviewTarget } from "./preview/FilePreview";
 import { useWorkspace } from "./store";
 import s from "./Workspace.module.css";
 
@@ -41,6 +43,11 @@ export function FileList({
   onForward,
   leading,
 }: FileListProps) {
+  const [preview, setPreview] = useState<PreviewTarget | null>(null);
+  useEffect(() => onSessionReset(() => setPreview(null)), []);
+  const openPreview = (filePath: string, entry: PreviewTarget["entry"], reason?: string) => {
+    setPreview({ path: filePath, entry, reason });
+  };
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const toggleHidden = useWorkspace((st) => st.toggleHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
@@ -158,7 +165,7 @@ export function FileList({
 
   /**
    * 「跳过去并选中某一项」的目标（点一个指向**文件**的链接时产生）。
-   * 目标本身打不开——预览界面还没有——所以跳到它所在的目录并高亮它。
+   * 保留链接定位行为：跳到目标所在的目录并高亮它。
    * 导航一旦离开那个目录就作废。
    */
   const [reveal, setReveal] = useState<{ dir: string; name: string } | null>(null);
@@ -195,6 +202,7 @@ export function FileList({
         path={grand}
         platform={platform}
         onNavigate={navigate}
+        onPreview={openPreview}
         pane="deep"
         className={s.paneDeep}
         markName={parentName}
@@ -218,6 +226,7 @@ export function FileList({
         path={parent}
         platform={platform}
         onNavigate={navigate}
+        onPreview={openPreview}
         pane="under"
         className={cx(s.paneMid, grand !== null && s.paneMidShifted)}
         markName={currentName}
@@ -230,6 +239,7 @@ export function FileList({
       path={path}
       platform={platform}
       onNavigate={navigate}
+      onPreview={openPreview}
       pane="top"
       markName={reveal !== null && reveal.dir === path ? reveal.name : null}
       className={cx(
@@ -245,6 +255,7 @@ export function FileList({
         path={leaving}
         platform={platform}
         onNavigate={navigate}
+        onPreview={openPreview}
         pane="leaving"
         className={cx(grand !== null ? s.paneTop3 : s.paneTop, s.panePopOut)}
       />,
@@ -367,6 +378,7 @@ export function FileList({
           <RefreshCw size={14} />
         </Button>
       </Toolbar>
+      {preview && <FilePreview target={preview} onClose={() => setPreview(null)} />}
       {fetching && <ProgressLine />}
       <div
         className={cx(s.scrollWrap, viewSwitching && s.noAnim)}

@@ -55,6 +55,8 @@ use strixmaid_types::{ApiError, ApiResult};
 use super::{Probe, Provider};
 
 pub mod icon;
+mod preview;
+mod stream;
 pub mod thumb;
 
 #[cfg(windows)]
@@ -260,6 +262,7 @@ impl EntryMapper {
 #[derive(Clone, Default)]
 pub struct FsProvider {
     caches: Arc<Caches>,
+    streams: Arc<stream::Streams>,
 }
 
 /// Windows 上是个空结构：名字缓存在 `account_by_sid` 里（见上）。
@@ -275,6 +278,18 @@ struct Caches {
 impl FsProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 打开普通文件并交出专用字节通道，接收端随后选择读取范围。
+    pub async fn open_stream(
+        &self,
+        params: strixmaid_types::rpc::FsOpenStreamParams,
+    ) -> ApiResult<(
+        strixmaid_types::rpc::FsOpenStreamResult,
+        crate::session::channel::Attachment,
+    )> {
+        let path = resolve(&params.path, &params.allowed_roots)?;
+        self.streams.open(path, params.preview).await
     }
 
     /// `fs.list`：列目录（含排序与分页，`opts` 见 [`ListOptions`]）。

@@ -40,7 +40,7 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use image::{ImageFormat, ImageReader};
+use image::{ImageDecoder, ImageFormat, ImageReader};
 use strixmaid_types::rpc::{FS_THUMB_MAX_BYTES, FS_THUMB_MAX_PX, FsThumb};
 use strixmaid_types::{ApiError, ApiResult};
 
@@ -50,7 +50,14 @@ static DECODE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(
 
 /// 门禁在进入阻塞线程池之前执行，permit 随真实工作一起结束，不能随请求取消释放。
 pub(super) async fn render(file: std::path::PathBuf, max_px: u32) -> ApiResult<FsThumb> {
-    bounded_decode(&DECODE_SLOTS, move || thumb_blocking(&file, max_px)).await
+    decode_job(move || thumb_blocking(&file, max_px)).await
+}
+
+/// 缩略图与大图预览共用同一份解码配额。
+pub(super) async fn decode_job<T: Send + 'static>(
+    work: impl FnOnce() -> ApiResult<T> + Send + 'static,
+) -> ApiResult<T> {
+    bounded_decode(&DECODE_SLOTS, work).await
 }
 
 async fn bounded_decode<T: Send + 'static>(
@@ -77,14 +84,14 @@ async fn bounded_decode<T: Send + 'static>(
 /// 8000 万像素：现役最高像素的消费级相机（1 亿像素的中画幅除外）都在这之下，
 /// 而按 RGBA 算它已经是 320 MiB 的解码缓冲——再往上就该拒绝而不是硬扛。
 /// 这个判断在**解码之前**做：`ImageReader` 只读文件头就能给出尺寸。
-const MAX_PIXELS: u64 = 80_000_000;
+pub(super) const MAX_PIXELS: u64 = 80_000_000;
 
 /// 源文件大小上限。
 ///
 /// 与旧的 8 MiB 上限不是一回事：那时是「整份下发给浏览器」，所以按带宽定；
 /// 现在字节不出机器，这个上限只防「拿一个几 GiB 的文件让 worker 去读头」。
-const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+pub(super) const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// JPEG 输出质量。80 在 256 px 这个尺度上看不出与 95 的差别，体积却只有一半。
 const JPEG_QUALITY: u8 = 80;
@@ -98,7 +105,7 @@ fn ext_of(file: &Path) -> String {
 
 /// 纯 Rust 解码器认得的扩展名。认不出的不尝试解码——省得把一个 `.bin`
 /// 喂进解码器去试格式。
-fn rust_decodable(file: &Path) -> bool {
+pub(super) fn rust_decodable(file: &Path) -> bool {
     matches!(
         ext_of(file).as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
@@ -236,6 +243,14 @@ fn system_thumb(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
 
 /// 解码 + 缩放 + 编码；并发配额与 panic 恢复在阻塞任务入口统一执行。
 fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsThumb> {
+    encode_thumb(&decode_scaled(bytes, max_px, false)?, orientation)
+}
+
+pub(super) fn decode_scaled(
+    bytes: &[u8],
+    max_px: u32,
+    orient: bool,
+) -> ApiResult<image::DynamicImage> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| ApiError::invalid_request(format!("认不出图片格式：{e}")))?;
@@ -259,8 +274,25 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     reader.limits(limits);
-    let img = reader
-        .decode()
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| ApiError::invalid_request(format!("图片解码失败：{e}")))?;
+    // 与 ImageReader::decode 一样，先为输出像素预留预算，再把剩余额度
+    // 交给解码器；直接 from_decoder 本身不会扣除这笔分配。
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits
+        .reserve(decoder.total_bytes())
+        .and_then(|()| decoder.set_limits(limits))
+        .map_err(|e| ApiError::invalid_request(format!("图片超过解码内存上限：{e}")))?;
+    let orientation = if orient {
+        decoder
+            .orientation()
+            .map_err(|e| ApiError::invalid_request(format!("图片方向无效：{e}")))?
+    } else {
+        image::metadata::Orientation::NoTransforms
+    };
+    let img = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| ApiError::invalid_request(format!("图片解码失败：{e}")))?;
 
     // `thumbnail` 是为缩略图准备的快速路径（先整数倍降采样再精修），
@@ -268,12 +300,13 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
     //
     // 本来就比目标小的图**原样保留**：`thumbnail` 会把它放大（按长边填满），
     // 放大只会糊，还白白把一张 2 KB 的图标编成几十 KB。
-    let small = if w <= max_px && h <= max_px {
+    let mut small = if w <= max_px && h <= max_px {
         img
     } else {
         img.thumbnail(max_px, max_px)
     };
-    encode_thumb(&small, orientation)
+    small.apply_orientation(orientation);
+    Ok(small)
 }
 
 /// 缩好的图 → `FsThumb`。**格式判据只有这一处**，两条解码路共用。
@@ -283,6 +316,21 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
 /// 按声明判会把一张 20 KB 的照片编成 150 KB 的 PNG。
 fn encode_thumb(img: &image::DynamicImage, orientation: u8) -> ApiResult<FsThumb> {
     let (tw, th) = (img.width(), img.height());
+    let (out, mime) = encode_image(img, FS_THUMB_MAX_BYTES)?;
+    Ok(FsThumb {
+        mime: mime.to_owned(),
+        width: tw,
+        height: th,
+        orientation,
+        embedded: false,
+        data_hex: hex::encode(&out),
+    })
+}
+
+pub(super) fn encode_image(
+    img: &image::DynamicImage,
+    max_bytes: usize,
+) -> ApiResult<(Vec<u8>, &'static str)> {
     let transparent = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] != 255);
 
     let mut out = Vec::with_capacity(64 * 1024);
@@ -301,21 +349,14 @@ fn encode_thumb(img: &image::DynamicImage, orientation: u8) -> ApiResult<FsThumb
         "image/jpeg"
     };
 
-    if out.len() > FS_THUMB_MAX_BYTES {
+    if out.len() > max_bytes {
         // 走到这里说明实现出了岔子（缩放没生效之类），如实报错。
         return Err(ApiError::internal(format!(
-            "缩略图编出来 {} 字节，超过上限 {FS_THUMB_MAX_BYTES}",
+            "图片编出来 {} 字节，超过上限 {max_bytes}",
             out.len()
         )));
     }
-    Ok(FsThumb {
-        mime: mime.to_owned(),
-        width: tw,
-        height: th,
-        orientation,
-        embedded: false,
-        data_hex: hex::encode(&out),
-    })
+    Ok((out, mime))
 }
 
 // ===========================================================================

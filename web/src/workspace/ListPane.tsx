@@ -94,9 +94,10 @@ export interface ListPaneProps {
   platform: Platform;
   /**
    * 导航到 `path`。`select` 给出时表示「到了那儿顺便选中这一项」——
-   * 点一个指向文件的链接就是这种跳法（目标本身打不开，只能定位到它）。
+   * 点一个指向文件的链接就是这种跳法（保留定位目标的行为）。
    */
   onNavigate: (path: string, select?: string) => void;
+  onPreview: (path: string, entry: DirEntry, reason?: string) => void;
   /** 层叠导航的动画类（推入/滑出/垫底），由 FileList 编排。 */
   className?: string;
   /** 层角色标记（top/under/leaving），测试与调试按它定位。 */
@@ -110,7 +111,15 @@ export interface ListPaneProps {
  * 层叠导航（进目录像 macOS 那样推入新层）要求同屏能渲染两层，
  * 所以这些状态必须住在层内而不是 FileList 里。
  */
-export function ListPane({ path, platform, onNavigate, className, pane, markName }: ListPaneProps) {
+export function ListPane({
+  path,
+  platform,
+  onNavigate,
+  onPreview,
+  className,
+  pane,
+  markName,
+}: ListPaneProps) {
   const hideHidden = useWorkspace((st) => st.hideHidden);
   const viewMode = useWorkspace((st) => st.viewMode);
   const dirSort = useWorkspace((st) => st.dirSort);
@@ -163,9 +172,10 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
       const action = activateEntry(path, entry, platform);
       if (action === null) return;
       if (action.kind === "enter") onNavigate(action.path);
-      else onNavigate(action.dir, action.name);
+      else if (action.kind === "reveal") onNavigate(action.dir, action.name);
+      else onPreview(action.path, entry, action.reason);
     },
-    [path, platform, onNavigate],
+    [path, platform, onNavigate, onPreview],
   );
 
   /** 点表头：同键翻方向，异键切键（升序起步）。排序在服务端，翻页也一致。 */
@@ -181,7 +191,7 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
       header: "名称",
       mono: true,
       render: (e) => (
-        <span className={s.nameCell}>
+        <span className={s.nameCell} data-entry-name={e.name}>
           <KindIcon
             entry={e}
             fullPath={path === null ? null : joinPath(path, e.name, platform)}
@@ -245,10 +255,32 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
             pathOf={(e) => (path === null ? e.name : joinPath(path, e.name, platform))}
             selected={selected ?? markName ?? null}
             onSelect={setSelected}
-            onEnterDir={activate}
+            onActivate={activate}
           />
         ) : (
-          <div ref={measureRow}>
+          <div
+            ref={measureRow}
+            onDoubleClickCapture={(event) => {
+              const row = (event.target as HTMLElement).closest("tr");
+              const name = row?.querySelector<HTMLElement>("[data-entry-name]")?.dataset.entryName;
+              const entry = slice.find((item) => item.name === name);
+              if (entry && entry.kind !== "dir" && entry.kind !== "symlink") {
+                row?.focus();
+                activate(entry);
+              }
+            }}
+            onKeyDownCapture={(event) => {
+              if (event.key !== "Enter") return;
+              const row = (event.target as HTMLElement).closest("tbody tr");
+              const name = row?.querySelector<HTMLElement>("[data-entry-name]")?.dataset.entryName;
+              const entry = slice.find((item) => item.name === name);
+              if (!entry) return;
+              event.preventDefault();
+              event.stopPropagation();
+              setSelected(entry.name);
+              activate(entry);
+            }}
+          >
             <Table
               caption={`目录 ${path} 的内容`}
               columns={columns}
@@ -257,7 +289,7 @@ export function ListPane({ path, platform, onNavigate, className, pane, markName
               selectedKey={selected ?? markName}
               onSelect={(e) => {
                 setSelected(e.name);
-                activate(e);
+                if (e.kind === "dir" || e.kind === "symlink") activate(e);
               }}
               onHeaderClick={onHeaderClick}
               sortedBy={{ key: dirSort.key, desc: dirSort.desc }}
