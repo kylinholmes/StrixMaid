@@ -5,7 +5,7 @@
 //!
 //! # 一环一环的对应关系
 //!
-//! | 这一步做什么 | Unix（[`unix`]） | Windows（[`windows`]） |
+//! | 这一步做什么 | Unix（[`unix`]） | Windows（`windows`） |
 //! |---|---|---|
 //! | 开始对话，记下目标用户 | `pam_start` | 拆 `DOMAIN\user` / `user@upn`，不调用任何系统 API |
 //! | 要凭据 | conversation 回调，PAM 说要什么就问什么 | 合成一条 echo-off 的「密码」提示 |
@@ -23,7 +23,7 @@
 //! 所以 Unix 侧的提示是 PAM 现给的，helper 只做转发。Windows 的
 //! `LogonUserW` 是**一次性**的：一个用户名加一个密码，要么成要么不成，没有回合。
 //! 为了让协议两边一样，Windows 侧**自己合成**那一轮提示（见
-//! [`windows::Session::authenticate`]）。协议因此不必分平台，
+//! `windows::Session::authenticate`）。协议因此不必分平台，
 //! 前端也不知道底下是 PAM 还是 LSA。
 //!
 //! 由此还带来两个「Windows 上恒定」的行为，写在各自方法的文档里：

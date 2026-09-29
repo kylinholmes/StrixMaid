@@ -17,7 +17,7 @@ Papirus Icon Theme（20 个：folders/ 的大部分 + files/csv.svg、files/make
       取自其 Papirus/64x64/places/ 与 mimetypes/ 目录（只取这两类，避开上游
       README 声明有商标限制的品牌 logo）。上游大量使用符号链接，收录时逐个
       解链并断言内容以 <svg 或 <?xml 开头（CDN 对软链返回的是目标路径字符串，
-      这个坑踩过一次，见 docs/HANDOFF-2026-09-18.md §3.3）。
+      这个坑踩过一次，见 docs/README.md 的素材内容校验约束）。
 说明：本项目自身即 GPL-3.0-only，方向一致；GPL 的源码随附义务由「SVG 原样
       收录在本目录」满足——SVG 就是它自己的源。
 

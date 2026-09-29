@@ -87,7 +87,7 @@ pub struct GpuInfo {
     /// DRM 卡名，如 `card0`。与 `gpu.*` 指标的 `gpu` 标签一致。
     #[schema(example = "card0")]
     pub card: String,
-    /// 型号串。sysfs 没有营销名，这里给「厂商名 [vendor:device]」这类由 PCI id
+    /// 型号串。sysfs 没有营销名，这里给「厂商名 `[vendor:device]`」这类由 PCI id
     /// 组出的可读串（前端可再经 pci.ids 美化）；认不出为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "AMD [1002:73a3]")]

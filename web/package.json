@@ -6,11 +6,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "check": "biome check src",
-    "fix": "biome check --write src",
+    "check": "biome check src e2e playwright.config.ts",
+    "fix": "biome check --write src e2e playwright.config.ts",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
-    "api": "openapi-typescript http://127.0.0.1:9700/api/v1/openapi.json -o src/api/schema.d.ts"
+    "api": "openapi-typescript http://127.0.0.1:9700/api/v1/openapi.json -o src/api/schema.d.ts",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.2",

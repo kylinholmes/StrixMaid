@@ -2,7 +2,7 @@
 //!
 //! # 两个平台怎么拿到这条通道
 //!
-//! | | Unix（[`unix`]） | Windows（[`windows`]） |
+//! | | Unix（[`unix`]） | Windows（`windows`） |
 //! |---|---|---|
 //! | 实体 | `socketpair` 的一端，主进程 `dup2` 到 fd 3 | 一条命名管道，名字由 `--pipe` 给出 |
 //! | 「确实是主进程给的」 | fd 3 是继承来的，且 `fstat` 确认是 socket | 名字是 128 位随机的，主进程还会核对本进程 pid |

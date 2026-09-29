@@ -2,19 +2,19 @@
 //!
 //! 按平台各有一个实现，都是子进程：
 //!
-//! - Linux：[`journalctl::Journalctl`]，`journalctl -o json`
+//! - Linux：`journalctl::Journalctl`，`journalctl -o json`
 //!   （`docs/design.md` §4：libsystemd FFI 会毁掉静态构建）；
-//! - macOS：[`oslog::OsLog`]，`log show --style ndjson` 与 `log stream`。
+//! - macOS：`oslog::OsLog`，`log show --style ndjson` 与 `log stream`。
 //!
 //! Windows 上不是子进程而是 FFI：
 //!
-//! - [`eventlog::EventLog`]，`wevtapi` 的 `EvtQuery` / `EvtSubscribe`。
+//! - `eventlog::EventLog`，`wevtapi` 的 `EvtQuery` / `EvtSubscribe`。
 //!   之所以这次直接上 FFI 而不是起 `wevtutil` 子进程：`wevtutil` 每次调用要
 //!   解析一遍发布者元数据、渲染 XML，一次 200 条的查询要跑好几秒；而
 //!   `EvtSubscribe` 是**推送式**的，follow 不需要轮询。
 //!
 //! 非 journald 的 Linux 系统（`/var/log/*.log`）**不实现**，
-//! 只留 [`FileLogs`] 空壳证明 trait 容得下它。
+//! 只留 `FileLogs` 空壳证明 trait 容得下它。
 //!
 //! # 输出量控制
 //!

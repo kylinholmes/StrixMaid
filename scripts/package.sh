@@ -17,11 +17,17 @@ case "$arch" in
     aarch64) musl_target=aarch64-unknown-linux-musl ;;
     *) echo "未知架构 $arch（支持 x86_64 / aarch64）" >&2; exit 2 ;;
 esac
-gnu_target=x86_64-unknown-linux-gnu
+# helper 动态链接 glibc，必须与 strixmaid 同架构。
+# 原先这里写死 x86_64：`package.sh aarch64` 会把一个 x86_64 的 helper
+# 装进 aarch64 的包里，装上去之后 PAM 认证在第一步就失败。
+gnu_target="$arch-unknown-linux-gnu"
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+# cargo 的产物目录可被 CARGO_TARGET_DIR 改写。虚拟机里源码走 virtiofs、
+# 产物写客机本地盘会快很多，下面一律用这个变量而不是字面量 target/。
+td="${CARGO_TARGET_DIR:-target}"
 
 # 前端产物。web/dist 不在 git 里（它是 web/src 的派生物，跟踪必然漂移），
 # 所以每次出包都在这里重建一次——本地与 CI 因此走同一条路，
@@ -42,6 +48,18 @@ if [ "$arch" = "x86_64" ]; then
         exit 3
     }
     cargo build --release --target "$musl_target" -p strixmaid
+elif [ "$(uname -s)-$(uname -m)" = "Linux-$arch" ]; then
+    # 同架构的 Linux 上这是**原生构建**，不是交叉编译，不需要 zigbuild。
+    # （典型场景：Apple Silicon 上的 aarch64 Linux 虚拟机，见
+    # scripts/verify/vm/lima-strix.yaml。）
+    command -v "$arch-linux-musl-gcc" >/dev/null 2>&1 || {
+        echo "缺 $arch-linux-musl-gcc（libsqlite3-sys 要编 C 源）。" >&2
+        echo "  Debian/Ubuntu: apt install musl-tools" >&2
+        echo "  Fedora:        dnf install musl-gcc &&" >&2
+        echo "                 ln -s /usr/bin/musl-gcc /usr/local/bin/$arch-linux-musl-gcc" >&2
+        exit 3
+    }
+    cargo build --release --target "$musl_target" -p strixmaid
 else
     command -v cargo-zigbuild >/dev/null 2>&1 || {
         echo "缺 cargo-zigbuild：cargo install cargo-zigbuild（并安装 zig）" >&2
@@ -53,7 +71,7 @@ cargo build --release --target "$gnu_target" -p strixmaid-helper
 
 # 静态性断言（§3.1）：不产出动态链接的「静态包」。
 for bin in strixmaid; do
-    f="target/$musl_target/release/$bin"
+    f="$td/$musl_target/release/$bin"
     if ldd "$f" 2>&1 | grep -qv 'not a dynamic executable\|statically linked'; then
         echo "$f 不是静态链接：" >&2; ldd "$f" >&2; exit 4
     fi
@@ -62,8 +80,8 @@ done
 out="strixmaid-$version-$arch"
 stage=$(mktemp -d)
 mkdir -p "$stage/$out/packaging/pam.d"
-cp "target/$musl_target/release/strixmaid"       "$stage/$out/"
-cp "target/$gnu_target/release/strixmaid-helper" "$stage/$out/"
+cp "$td/$musl_target/release/strixmaid"       "$stage/$out/"
+cp "$td/$gnu_target/release/strixmaid-helper" "$stage/$out/"
 cp packaging/strixmaid.service packaging/strixmaid-agent.service "$stage/$out/packaging/"
 cp packaging/install.sh "$stage/$out/packaging/"
 cp packaging/pam.d/strixmaid.debian packaging/pam.d/strixmaid.rhel "$stage/$out/packaging/pam.d/"
@@ -72,6 +90,6 @@ cp LICENSE "$stage/$out/"
 tar -C "$stage" -czf "$out.tar.gz" "$out"
 rm -rf "$stage"
 ls -l "$out.tar.gz"
-echo "体积（验收 §5.2：strixmaid ≤ 15MiB、helper ≤ 1MiB；agent 已并入 strixmaid）："
-ls -l "target/$musl_target/release/strixmaid" "target/$musl_target/release/strixmaid-agent" \
-      "target/$gnu_target/release/strixmaid-helper" | awk '{print $5, $NF}'
+echo "体积（验收 §5.2：strixmaid ≤ 18MiB、helper ≤ 1MiB；agent 已并入 strixmaid）："
+ls -l "$td/$musl_target/release/strixmaid" \
+      "$td/$gnu_target/release/strixmaid-helper" | awk '{print $5, $NF}'

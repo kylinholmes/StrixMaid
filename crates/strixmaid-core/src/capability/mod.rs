@@ -331,7 +331,7 @@ const FALLBACK_PATH: &[&str] = &[
 #[cfg(windows)]
 const FALLBACK_PATH: &[&str] = &[];
 
-/// 找可执行文件：带路径分隔符的直接检查；否则依次在 `PATH` 与 [`FALLBACK_PATH`] 里找。
+/// 找可执行文件：带路径分隔符的直接检查；否则依次在 `PATH` 与 `FALLBACK_PATH` 里找。
 ///
 /// # Windows 上还要试后缀
 ///

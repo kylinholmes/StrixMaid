@@ -2278,13 +2278,11 @@ dependencies = [
  "strixmaid-types",
  "tokio",
  "tokio-tungstenite 0.30.0",
- "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
- "utoipa-scalar",
  "windows-sys 0.61.2",
 ]
 
@@ -2324,7 +2322,6 @@ dependencies = [
 name = "strixmaid-helper"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "embed-resource",
  "libc",
  "nix 0.31.3",
@@ -2346,7 +2343,6 @@ dependencies = [
  "hex",
  "hyper",
  "hyper-util",
- "rand 0.10.2",
  "serde",
  "serde_json",
  "strixmaid-core",

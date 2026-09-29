@@ -41,7 +41,7 @@
 //!
 //! - [`RemoteSnapshots`]：别的节点的实时快照来源。server 用它的 agent 注册表实现，
 //!   agent 传 `None`。
-//! - [`ApiStates::extra_protected`]：宿主追加的受保护路由。`serve` 模式用它挂 `/nodes`。
+//! - [`routes::ApiStates::extra_protected`]：宿主追加的受保护路由。`serve` 模式用它挂 `/nodes`。
 //!
 //! 这是依赖倒置：node 定义缝，宿主填。node 的依赖表里因此没有任何「多节点」的东西。
 

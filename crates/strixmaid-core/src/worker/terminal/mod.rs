@@ -37,7 +37,7 @@
 //!
 //! # 两个平台的实现
 //!
-//! | | Unix（[`unix`]） | Windows（[`windows`]） |
+//! | | Unix（[`unix`]） | Windows（`windows`） |
 //! |---|---|---|
 //! | 伪终端 | `openpty` + `TIOCSCTTY` | ConPTY（`CreatePseudoConsole`） |
 //! | 起 shell | `fork` + `setuid` + `execve` | `CreateProcessAsUserW` + 伪控制台属性 |

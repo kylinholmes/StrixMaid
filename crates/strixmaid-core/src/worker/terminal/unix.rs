@@ -5,7 +5,7 @@
 //! # 本文件独有的要点
 //!
 //! - PTY 主设备一关，内核就给整个会话发 `SIGHUP`。这既是关终端的手段，
-//!   也意味着 [`Terminal::master`] 不能随手 drop。
+//!   也意味着 `Terminal::master` 不能随手 drop。
 //! - 从设备**只要还有一个 fd 开着**，shell 退出时主设备就读不到 EOF，
 //!   主进程会一直以为终端还活着。所以 `open` 里拿到自己那份之后立刻
 //!   丢掉 portable-pty 的那份，`spawn_on_tty` 之后再丢掉自己的。

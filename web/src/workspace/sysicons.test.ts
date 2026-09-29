@@ -11,7 +11,7 @@ import {
   GENERIC_FILE_KEY,
   HOME_KEY,
   iconKeysOf,
-  resetForTest,
+  resetIcons,
 } from "./sysicons";
 
 describe("extOf", () => {
@@ -130,7 +130,7 @@ describe("fetchTypeIcon", () => {
   const fetchMock = vi.fn<typeof fetch>();
 
   beforeEach(() => {
-    resetForTest();
+    resetIcons();
     setAuthToken("test-token");
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);

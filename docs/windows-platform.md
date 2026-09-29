@@ -110,7 +110,7 @@ Windows 的 `LoadUserProfileW`）」。
 
 **`pam_service` 配置项在 Windows 上无意义**。字段保留只是为了让配置形状在三个平台上
 一致（下游的配置管理不必按平台分叉），helper 收到后直接忽略。这一条写在
-`crates/strixmaid-core/src/config.rs` 的 `DEFAULT_PAM_SERVICE` 文档里，
+`crates/strixmaid-core/src/config/defaults.rs` 的 `DEFAULT_PAM_SERVICE` 文档里，
 `Config::example_toml()` 生成的 Windows 版示例配置里也有同样的提示行。
 
 **明文口令的处理没有因为换平台而放宽**：`design.md` §5.3 的三条硬约束照旧——

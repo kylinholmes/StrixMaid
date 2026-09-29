@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use figment::Figment;
-use figment::providers::{Env, Format, Serialized, Toml};
+use figment::providers::{Env, Serialized};
 use serde::{Deserialize, Serialize};
-use strixmaid_core::config::MetricsConfig;
+use strixmaid_core::config::{ConfigFile, MetricsConfig};
 
 /// 缺省配置文件路径。
 #[cfg(not(windows))]
@@ -107,7 +107,6 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-
     /// 带注释的示例配置。
     ///
     /// 与 `Config::example_toml()` 同理：**由二进制自己生成**，不在打包脚本里手抄。
@@ -158,27 +157,15 @@ impl AgentConfig {
         cli: Option<&T>,
     ) -> anyhow::Result<AgentConfig> {
         let mut figment = Figment::from(Serialized::defaults(AgentConfig::default()));
-        match path {
-            Some(p) => {
-                if !p.exists() {
-                    bail!("配置文件 {} 不存在", p.display());
-                }
-                figment = figment.merge(Toml::file(p));
-            }
-            None => {
-                let p = Path::new(DEFAULT_CONFIG_PATH);
-                if p.exists() {
-                    figment = figment.merge(Toml::file(p));
-                }
-            }
-        }
+        figment = figment.merge(match path {
+            Some(path) => ConfigFile::required(path),
+            None => ConfigFile::optional(DEFAULT_CONFIG_PATH),
+        });
         let mut figment = figment.merge(Env::prefixed("STRIXMAID_AGENT_").split("__"));
         if let Some(cli) = cli {
             figment = figment.merge(strixmaid_core::config::cli_layer(cli)?);
         }
-        let cfg: AgentConfig = figment
-            .extract()
-            .context("解析 Agent 配置失败")?;
+        let cfg: AgentConfig = figment.extract().context("解析 Agent 配置失败")?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -298,6 +285,7 @@ fn machine_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use figment::providers::{Format, Toml};
 
     /// 只为 `load_with` 的两条用例造一个临时配置文件。
     ///
@@ -412,19 +400,25 @@ mod tests {
             "缺 token / token_file"
         );
         assert!(
-            from_toml(r#"server_url = "http://s"
-token = "t""#)
+            from_toml(
+                r#"server_url = "http://s"
+token = "t""#
+            )
             .is_err(),
             "只认 ws://"
         );
-        let err = from_toml(r#"server_url = "wss://s"
-token = "t""#)
+        let err = from_toml(
+            r#"server_url = "wss://s"
+token = "t""#,
+        )
         .unwrap_err();
         assert!(err.to_string().contains("wss"), "{err}");
         assert!(
-            from_toml(r#"server_url = "ws://s"
+            from_toml(
+                r#"server_url = "ws://s"
 token = "t"
-sync_interval_secs = 1"#)
+sync_interval_secs = 1"#
+            )
             .is_err()
         );
     }
@@ -510,5 +504,23 @@ sync_interval_secs = 1"#)
             4,
             "取到的不像 GUID：{guid}"
         );
+    }
+    #[test]
+    fn 显式配置目录不能被命令行覆盖掩盖() {
+        let path = std::env::temp_dir();
+        let cli = serde_json::json!({"server_url": "ws://test:9700", "token": "test-only"});
+        let error = AgentConfig::load_with(Some(&path), Some(&cli))
+            .expect_err("目录不应当作空配置，即使命令行提供了全部必填项");
+        assert!(format!("{error:#}").contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn 显式配置缺失时不能回落命令行() {
+        let file = TempToml::new("must-exist", "");
+        std::fs::remove_file(&file.0).unwrap();
+        let cli = serde_json::json!({"server_url": "ws://test:9700", "token": "test-only"});
+        let error =
+            AgentConfig::load_with(Some(&file.0), Some(&cli)).expect_err("显式配置必须存在");
+        assert!(format!("{error:#}").contains(&file.0.display().to_string()));
     }
 }

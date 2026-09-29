@@ -60,7 +60,7 @@ fi
 ok "有活着的监听，可以施压"
 
 BASE_Q=$(recvq_of "$PID"); BASE_Q=${BASE_Q:-0}
-BASE_REJ=$(journalctl -u dbus --since '-1 min' --no-pager 2>/dev/null | grep -c 'full message queue')
+BASE_REJ=$(journalctl -u dbus -u dbus-broker --since '-1 min' --no-pager 2>/dev/null | grep -c 'full message queue')
 note "起点：Recv-Q=${BASE_Q} bytes，近 1 分钟拒绝日志 ${BASE_REJ} 行"
 
 say "1. 灌信号（${ROUNDS} 轮）"
@@ -106,7 +106,7 @@ else
   bad "施压结束后 Recv-Q 仍有 ${END_Q} bytes 未读，疑似又卡住了"
 fi
 
-REJ=$(journalctl -u dbus --since '-3 min' --no-pager 2>/dev/null | grep -c 'full message queue')
+REJ=$(journalctl -u dbus -u dbus-broker --since '-3 min' --no-pager 2>/dev/null | grep -c 'full message queue')
 [[ "$REJ" -eq 0 ]] && ok "施压期间 dbus 0 行拒绝日志" || bad "施压期间出现 $REJ 行拒绝日志"
 
 T0=$(date +%s%N)

@@ -21,7 +21,8 @@ hex = "0.4.3"
 # 风险按三层压：① 相机 JPEG 走 EXIF 内嵌预览，**根本不解码**；② 真要解码时
 # 先读文件头拿尺寸，像素数超限直接拒绝；③ 解码器本身是纯 Rust（zune-jpeg /
 # png / image-webp），越界即 panic 而不是可利用的内存破坏，且跑在 worker
-# 的登录用户身份下、被 `catch_unwind` 兜住。
+# 的登录用户身份下。debug / release 均以 unwind 构建并捕获 Rust panic；
+# 解码并发、源文件读取与解码器分配另有限额，不靠 panic 恢复 OOM。
 #
 # default-features = false：只开真的会遇到的五种格式。开全（tiff/hdr/exr/pnm…）
 # 平白多几百 KB，且那些格式的解码器是最少被人审的那批。

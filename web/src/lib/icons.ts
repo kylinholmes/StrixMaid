@@ -19,6 +19,7 @@
  */
 
 import { authHeaders } from "@/api/client";
+import { onSessionReset, sessionSignal } from "@/session/lifecycle";
 
 /** 客户端缓存 TTL，与服务端缓存及响应里的 `Cache-Control: max-age=300` 对齐。 */
 const TTL_MS = 5 * 60 * 1000;
@@ -112,6 +113,7 @@ export function createIconSource({
   };
 
   const load = async (key: string): Promise<void> => {
+    const scope = sessionSignal();
     if (!accepts(key)) {
       put(key, null);
       return;
@@ -120,7 +122,8 @@ export function createIconSource({
     // 没有会话就别发：必然 401，而把 401 记进负缓存会让登录后的五分钟内都没有图标
     if (headers === null) return;
     try {
-      const res = await fetch(url(key), { headers });
+      const res = await fetch(url(key), { headers, signal: scope });
+      if (scope.aborted) return;
       // 401 说明的是会话问题，不是「这个东西没有图标」，因此不写负缓存
       if (res.status === 401) return;
       if (!res.ok) {
@@ -129,6 +132,7 @@ export function createIconSource({
         return;
       }
       const buf = await res.arrayBuffer();
+      if (scope.aborted) return;
       if (buf.byteLength === 0 || buf.byteLength > MAX_BYTES) {
         put(key, null);
         return;
@@ -142,6 +146,11 @@ export function createIconSource({
     }
   };
 
+  onSessionReset(() => {
+    cache.clear();
+    inflight.clear();
+  });
+
   return {
     accepts,
     url,
@@ -151,8 +160,9 @@ export function createIconSource({
       if (fresh(key)) return Promise.resolve();
       const running = inflight.get(key);
       if (running !== undefined) return running;
+      const scope = sessionSignal();
       const task = load(key).finally(() => {
-        inflight.delete(key);
+        if (!scope.aborted) inflight.delete(key);
       });
       inflight.set(key, task);
       return task;

@@ -90,7 +90,7 @@ pub type RawAttachment = u64;
 /// `STATUS_INVALID_HANDLE`）。所以这里 `forget`，把关闭的责任整个交给接收方。
 ///
 /// 接收方一直没来拉的情况下会漏一个句柄。那只发生在对端进程已经消失时
-/// （见 [`super::framing::windows`] 的模块文档），而那条路径上本进程紧接着也会
+/// （见 `super::framing::windows` 的模块文档），而那条路径上本进程紧接着也会
 /// 因为通道断开而退出，句柄随进程一起回收。
 pub fn release_sent(sent: Vec<Attachment>) {
     #[cfg(unix)]

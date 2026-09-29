@@ -2,20 +2,20 @@
 //!
 //! Linux 上的两条实现路径（`docs/design.md` §4）：
 //!
-//! - [`bus::SystemdBus`]：主路径，`zbus` 直连 `org.freedesktop.systemd1`。有属性信号与 job 事件，
+//! - `bus::SystemdBus`：主路径，`zbus` 直连 `org.freedesktop.systemd1`。有属性信号与 job 事件，
 //!   `services.changed` 频道靠它驱动；cgroup 用量直读 `/sys/fs/cgroup`。
-//! - [`cli::SystemctlCli`]：降级路径，`systemctl ... --output=json` 子进程（需 systemd ≥ 246）。
+//! - `cli::SystemctlCli`：降级路径，`systemctl ... --output=json` 子进程（需 systemd ≥ 246）。
 //!   没有事件流，`subscribe()` 返回一个永远安静的 receiver。
 //!
 //! macOS 上是第三条：
 //!
-//! - [`launchd::Launchctl`]：`launchctl` 子进程。macOS 的服务管理器是 launchd，
+//! - `launchd::Launchctl`：`launchctl` 子进程。macOS 的服务管理器是 launchd，
 //!   概念能对上一半（有 unit 名、有 enable/disable、有运行状态），
 //!   对不上的一半（`Type=` / 依赖图 / cgroup 用量）如实报缺失。
 //!
 //! Windows 上是第四条：
 //!
-//! - [`scm::ServiceControlManager`]：直接调服务控制管理器的 API。
+//! - `scm::ServiceControlManager`：直接调服务控制管理器的 API。
 //!   四条路径里它与 systemd 的模型**最接近**——有依赖图、有启动类型、
 //!   有「禁用」这一档（正对应 systemd 的 mask），详见该模块的映射表。
 //!
@@ -162,7 +162,7 @@ pub trait ServiceProvider: Provider {
 
     /// 订阅变更事件（`services.changed`）。
     ///
-    /// bus 路径：首次调用时才向 systemd `Subscribe()` 并启动监听任务，之后常驻。
+    /// bus 路径：按需向 systemd `Subscribe()` 并启动监听；无订阅者时定期退役。
     /// CLI 路径：返回的 receiver 永远收不到消息，但也不会 `Closed`——
     /// WS hub 不需要区分两种实现。
     async fn subscribe(&self) -> broadcast::Receiver<ServiceEvent>;

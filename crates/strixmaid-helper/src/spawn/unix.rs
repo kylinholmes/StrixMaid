@@ -1,6 +1,6 @@
 //! Unix 侧拉起 worker：fork + 切换身份 + exec `strixmaid worker`（design.md §2.2 / §10）。
 //!
-//! 本文件是 `spawn` 的 Unix 实现。Windows 侧的同形实现见 [`super::windows`]；
+//! 本文件是 `spawn` 的 Unix 实现。Windows 侧的同形实现见 `super::windows`；
 //! 两边为什么一个用 fork 一个用 `CreateProcessAsUserW`、又怎么被
 //! [父模块](super)收拢成同一个入口，见父模块文档。
 //!

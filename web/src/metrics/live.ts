@@ -1,6 +1,8 @@
 import { create } from "zustand";
+import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { wsClient } from "@/lib/ws";
+import { sessionSignal } from "@/session/lifecycle";
 
 type MetricSnapshot = components["schemas"]["MetricSnapshot"];
 
@@ -52,7 +54,7 @@ export const useLive = create<LiveState>((set, get) => ({
     set({ rings: next, lastTs: snap.ts });
   },
   setUp: (up) => set({ up }),
-  clear: () => set({ rings: new Map(), lastTs: 0 }),
+  clear: () => set({ rings: new Map(), lastTs: 0, up: false }),
 }));
 
 let detach: (() => void) | null = null;
@@ -63,6 +65,8 @@ let detach: (() => void) | null = null;
  */
 export function startLive(): void {
   stopLive();
+  const scope = sessionSignal();
+  let active = true;
   const offData = wsClient.subscribe("metrics.live", {}, (payload) => {
     useLive.getState().ingest(payload as MetricSnapshot);
   });
@@ -72,14 +76,15 @@ export function startLive(): void {
     const stale = st.lastTs === 0 || Date.now() / 1000 - st.lastTs > 6;
     if (!stale) return;
     void (async () => {
-      const { api } = await import("@/api/client");
-      const { data } = await api.GET("/api/v1/metrics/current");
+      const { data } = await api.GET("/api/v1/metrics/current").catch(() => ({ data: undefined }));
+      if (!active || scope.aborted) return;
       // 只在仍然陈旧时并入，避免和迟到的 WS 帧打架
       const cur = useLive.getState();
       if (data && (cur.lastTs === 0 || data.ts > cur.lastTs)) cur.ingest(data);
     })();
   }, 2_000);
   detach = () => {
+    active = false;
     offData();
     offStatus();
     clearInterval(poller);

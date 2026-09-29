@@ -23,7 +23,7 @@
 //! 变成 `Finder` 这种垃圾值，`?type=service` 过滤也就废了。
 //!
 //! 因此对外一律报 `com.apple.Finder.service`，调 `launchctl` 前再剥掉后缀
-//! （[`strip_suffix`] / [`to_label`]）。代价是名字比原生的长七个字符，
+//! （`strip_suffix` / [`to_label`]）。代价是名字比原生的长七个字符，
 //! 换来的是**API 契约在两个平台上完全一致**——前端不需要知道自己连的是 Linux 还是 Mac。
 //!
 //! # 权限

@@ -20,7 +20,7 @@
 //! `utoipa-scalar` 自带的 HTML 模板（`res/scalar.html`）最后一行是
 //! `<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>`
 //! —— 从 jsdelivr CDN 拉 JS。StrixMaid 的目标是内网/离线服务器，那条 `<script>` 只会转圈。
-//! 因此这里改用 [`Scalar::custom_html`] 传入自己的模板，指向随二进制提供的
+//! 因此这里改用 `Scalar::custom_html` 传入自己的模板，指向随二进制提供的
 //! `src/vendor/scalar.standalone.js.gz`（`@scalar/api-reference@1.66.1` 的
 //! `dist/browser/standalone.js`，版本已钉死）。
 //!

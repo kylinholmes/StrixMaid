@@ -1,4 +1,5 @@
 import createClient from "openapi-fetch";
+import { resetSessionResources, sessionSignal } from "@/session/lifecycle";
 import type { paths } from "./schema";
 
 /**
@@ -9,6 +10,7 @@ let authToken: string | null = null;
 
 export function setAuthToken(token: string | null): void {
   authToken = token;
+  resetSessionResources();
 }
 
 /**
@@ -28,6 +30,8 @@ export const api = createClient<paths>();
 api.use({
   onRequest({ request }) {
     if (authToken) request.headers.set("Authorization", `Bearer ${authToken}`);
-    return request;
+    return new Request(request, {
+      signal: AbortSignal.any([request.signal, sessionSignal()]),
+    });
   },
 });

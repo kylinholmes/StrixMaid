@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { authHeaders } from "@/api/client";
+import { onSessionReset, sessionSignal } from "@/session/lifecycle";
 import { BlobCache } from "./blobcache";
 import { isVirtualRoot, type Platform } from "./path";
 
@@ -78,12 +79,10 @@ const KNOWN_FOLDER_KEY: Record<string, string> = {
 };
 
 /** 会话级缓存：类型 key → object URL；`null` 是负缓存（这一类真的取不到）。 */
-// 上限与回收见 `blobcache.ts`。类型图标一个扩展名一张，256 绰绰有余。
 const cache = new BlobCache<string | null>(256, (v) => v);
 const inflight = new Map<string, Promise<string | null>>();
 
 /** 按路径的会话级缓存（macOS 的 bundle / 符号链接，见 `usePathIcon`）。 */
-// 按路径的 bundle 图标一个应用一张；512 覆盖整个 /Applications 有余。
 const pathCache = new BlobCache<string | null>(512, (v) => v);
 const pathInflight = new Map<string, Promise<string | null>>();
 
@@ -106,12 +105,16 @@ export function extOf(name: string): string | null {
   return ext;
 }
 
-async function fetchIconBlob(ext: string): Promise<string | null> {
+async function fetchIconBlob(ext: string, scope: AbortSignal): Promise<string | null> {
   const headers = authHeaders();
   if (!headers) return null;
-  const resp = await fetch(`/api/v1/files/icon/${encodeURIComponent(ext)}`, { headers });
+  const resp = await fetch(`/api/v1/files/icon/${encodeURIComponent(ext)}`, {
+    headers,
+    signal: scope,
+  });
   if (!resp.ok) return null;
-  return URL.createObjectURL(await resp.blob());
+  const blob = await resp.blob();
+  return scope.aborted ? null : URL.createObjectURL(blob);
 }
 
 /**
@@ -123,21 +126,24 @@ async function fetchIconBlob(ext: string): Promise<string | null> {
  * 就被永久当成了「不支持」。
  */
 function probe(): Promise<boolean> {
+  const scope = sessionSignal();
   if (availability !== null) return availability;
   const headers = authHeaders();
   if (!headers) return Promise.resolve(false); // 还没登录：不定论
   const p = (async () => {
     try {
-      const resp = await fetch(`/api/v1/files/icon/${PROBE_EXT}`, { headers });
+      const resp = await fetch(`/api/v1/files/icon/${PROBE_EXT}`, { headers, signal: scope });
       if (resp.ok) {
-        cache.set(PROBE_EXT, URL.createObjectURL(await resp.blob()));
+        const blob = await resp.blob();
+        if (scope.aborted) return false;
+        cache.set(PROBE_EXT, URL.createObjectURL(blob));
         return true;
       }
       if (resp.status === 404) return false; // 平台不提供：txt 在支持的平台上必有图
-      availability = null; // 5xx 之类：不定论
+      if (!scope.aborted) availability = null; // 5xx 之类：不定论
       return false;
     } catch {
-      availability = null;
+      if (!scope.aborted) availability = null;
       return false;
     }
   })();
@@ -147,6 +153,7 @@ function probe(): Promise<boolean> {
 
 /** 取一个扩展名的系统图标 object URL；取不到返回 `null`（回落内置集）。 */
 export function fetchTypeIcon(ext: string): Promise<string | null> {
+  const scope = sessionSignal();
   const hit = cache.get(ext);
   if (hit !== undefined) return Promise.resolve(hit);
   const going = inflight.get(ext);
@@ -154,15 +161,16 @@ export function fetchTypeIcon(ext: string): Promise<string | null> {
 
   const p = (async () => {
     try {
-      if (!(await probe())) return null;
-      const url = await fetchIconBlob(ext);
+      if (!(await probe()) || scope.aborted) return null;
+      const url = await fetchIconBlob(ext, scope);
+      if (scope.aborted) return null;
       // 只有确定性的「没有」才负缓存；网络错误留给下次重试。
       if (url !== null || availability !== null) cache.set(ext, url);
       return url;
     } catch {
       return null;
     } finally {
-      inflight.delete(ext);
+      if (!scope.aborted) inflight.delete(ext);
     }
   })();
   inflight.set(ext, p);
@@ -176,6 +184,7 @@ export function fetchTypeIcon(ext: string): Promise<string | null> {
  * 必须只在 unix 平台上传路径进来——探测通过 + unix 平台 ⇒ macOS。
  */
 export function fetchPathIcon(path: string): Promise<string | null> {
+  const scope = sessionSignal();
   const hit = pathCache.get(path);
   if (hit !== undefined) return Promise.resolve(hit);
   const going = pathInflight.get(path);
@@ -183,24 +192,28 @@ export function fetchPathIcon(path: string): Promise<string | null> {
 
   const p = (async () => {
     try {
-      if (!(await probe())) return null;
+      if (!(await probe()) || scope.aborted) return null;
       const headers = authHeaders();
       if (!headers) return null;
       const resp = await fetch(`/api/v1/files/icon-path?path=${encodeURIComponent(path)}`, {
         headers,
+        signal: scope,
       });
+      if (scope.aborted) return null;
       // 404 是确定性的「这条路没有」（非 macOS），负缓存；网络错误留给下次。
       if (!resp.ok) {
         if (resp.status === 404 || resp.status === 403) pathCache.set(path, null);
         return null;
       }
-      const url = URL.createObjectURL(await resp.blob());
+      const blob = await resp.blob();
+      if (scope.aborted) return null;
+      const url = URL.createObjectURL(blob);
       pathCache.set(path, url);
       return url;
     } catch {
       return null;
     } finally {
-      pathInflight.delete(path);
+      if (!scope.aborted) pathInflight.delete(path);
     }
   })();
   pathInflight.set(path, p);
@@ -365,11 +378,13 @@ export function useEntryIcon(subject: IconSubject, platform: Platform): string |
   return pathIcon ?? typeIcon;
 }
 
-/** 测试用：清掉模块级状态（缓存与探测结论都是会话级单例）。 */
-export function resetForTest(): void {
+/** 清掉模块级状态并撤销图片 URL（缓存与探测结论都是会话级单例）。 */
+export function resetIcons(): void {
   cache.clear();
   inflight.clear();
   pathCache.clear();
   pathInflight.clear();
   availability = null;
 }
+
+onSessionReset(resetIcons);

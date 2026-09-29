@@ -1,101 +1,23 @@
 # 12 工作区：终端与文件合成一块
 
-> 前置：无（`10-node-layer.md` 已完成，但本方案不依赖它的任何新接口）。
->
-> **本方案的形态来自一次实测，不是纸上设计。** 动笔前先在真浏览器里把现有的
-> 终端原型跑了一遍，五条「从未验证」的事项里四条通过、一条是真 bug；文件侧
-> 的几个关键前提（PowerShell 的 cwd、挂载点覆盖、二进制读取）也逐条测过。
-> §2 记的全是实测结果，不是推断。
+> A–D 四期已完成；cwd 联动随后移除。本文保留当前设计，旧实施步骤见 git 历史。
 
 ## 1. 目标
 
-把「终端」与「文件」做成**同一个工作区**：终端 `cd` 到哪，文件区就显示哪；在文件区
-进入某个目录，当前终端标签页也 `cd` 过去。
+文件浏览与多标签终端共用工作区，保留 `/files`、`/terminal` 两个入口。
+终端目录与文件浏览目录各自独立。完整预览及写操作见
+[后续文件方案](../HANDOFF-2026-09-21.md)。
 
-这不是把两个页面并排放，而是承认一件事——**管理一台机器时，「我在哪个目录」是一个
-状态，不是两个**。今天它被割成了两半：`/terminal` 与 `/files` 都是
-`StubPage「尚未实现」`，而后端的终端能力其实已经完整。
+## 2. 当前实现
 
-本方案的文件侧**只做只读**（浏览 + 查看文本 + 图标 + 缩略图）。上传、下载、新建、
-改名、删除、权限编辑另写一份方案。
+前端在 `web/src/workspace/`，包含 xterm、快速访问、列表 / 平铺视图、分页、
+虚拟滚动、隐藏项切换、系统图标与缩略图。后端的终端、文件、shell 列表 API 已接线。
+macOS 进程 cwd 与 `TerminalInfo.pid` 已实现，不再列为待办。
 
-## 2. 现状（全部实测）
+## 3. 已完成的分期
 
-### 2.1 终端：后端完整，前端为零
-
-后端 4 个 REST + 1 个 WS 全部实现并接线，Unix PTY 与 Windows ConPTY 两套真实现，
-会话保持、256 KiB 回看、附着顶替、背压、僵尸 WS 判死、尺寸同步、空闲回收、
-每会话上限、登出连带关闭、四路关闭幂等、退出码回传、全路径审计，约 15 个测试。
-
-前端 `/terminal` 是 `StubPage`，`web/package.json` 里**没有任何 xterm 依赖**。
-`/debug` 页有一个功能完整的 xterm 原型，但 release 构建里不存在。
-
-**2026-09-18 在真浏览器里实测**（`/debug`，Windows 10，cmd.exe）：
-
-| 事项 | 结果 |
-|---|---|
-| ConPTY 端到端 | ✅ 建终端、输入、执行、渲染全部正常 |
-| FitAddon 尺寸 | ✅ 附着时把 80×24 改成 291×22，与视口吻合 |
-| 回放落位 | ✅ 断开再附着，缓冲完整、顺序正确、光标位置对 |
-| 面板重绘后 xterm 存活 | ✅ 输入仍有效，且只有一个实例，无泄漏 |
-| **shell 退出后的信号** | ❌ **坏的**，见下 |
-
-**退出信号的具体表现**（可复现）：向一个新建终端发 `exit 42\r`，PTY 回显了
-`exit 42\r\n`（证明命令确实到达 cmd.exe、shell 已退出），此后 **15 秒内**：
-零个文本帧（即没有 `{"t":"exit","code":42}`）、WS 不关闭、`GET /terminals`
-仍把它列为存活且已附着。再过几十秒才被回收，时机不确定。显式 `DELETE` 是好的（204）。
-
-两条后果：**客户端永远拿不到退出码**；**已退出的终端继续占着每会话 8 个的名额**。
-`/debug` 页在这种情况下显示「PTY 仍在服务端运行，再点一次即可恢复」——是错的。
-
-这个 bug 活到今天的原因很具体：注册表那 15 个测试用的是**进程内假 worker**，
-真 ConPTY 只有 `worker/terminal/windows.rs` 底层几个测试碰过，**中间这一整段
-（主进程 registry ⇄ 命名管道 ⇄ worker 双泵 ⇄ ConPTY）没有任何东西端到端跑过**。
-
-### 2.2 文件：只读且可用，前端为零
-
-后端两个 GET（列目录、读 ≤5 MiB 文本），worker 内以登录用户身份执行，
-403/404/400 语义正确且有测试。Windows 侧的虚拟根会枚举驱动器。
-
-前端 `/files` 是 `StubPage`。`/debug` 页有原型，但它的 `joinPath` 硬编码正斜杠，
-**在 Windows 上会拼出非法路径**——而 `providers/fs/windows.rs:33-35` 明确要求
-「前端拿到根列表后应当直接用 `name` 作为下一次请求的 `path`，不要与父路径拼接」。
-
-### 2.3 与本方案相关的其它实测结论
-
-| 结论 | 依据 |
-|---|---|
-| **PowerShell 的 `Set-Location` 不改进程 CWD** | 实测：`$PWD.Path` 已是 `C:\Windows`，而 API 读到的进程 cwd 仍是 `C:\Users\kylin\`。cmd.exe 则跟得上 |
-| **macOS 的进程 `cwd` 恒为 `None`** | `providers/process/macos.rs:155`，因 libc 未声明 `PROC_PIDVNODEPATHINFO` |
-| **`TerminalInfo` 没有 `pid`** | 前端今天无从知道 shell 是哪个进程 |
-| **挂载点三平台都有，且含 NAS** | `read_filesystems()` 只排除伪文件系统（`proc`/`sysfs`/`tmpfs`/`cgroup`…），NFS/CIFS 不在排除之列 |
-| **卡死的网络挂载会从列表里消失** | Linux 侧对每个挂载点 `statvfs`，失败即 `None` 被丢掉——不是显示为「离线」，是不见了 |
-| **`/files/content` 拒绝二进制** | 前 8 KiB 含 NUL → 400。今天拿不到任何图片字节 |
-| **`DirListing` 无分页** | 一次返回全部条目。`C:\Windows\WinSxS` 有 14476 条 |
-| **服务端是 HTTP/1.1** | 实测 `%{http_version}` = 1.1。浏览器每源约 6 条并发连接 |
-| **CI 有 15 MiB 体积门槛** | `ci.yml` 的 `size` job，当前 release 10.5 MB |
-
-## 3. 分期
-
-本方案的范围是三到四个 PR 的量。**分期不是为了好看，是为了每一期结束时都有能用的
-东西**——一次做完意味着很长一段时间里工作区处于「写了一半、跑不起来」的状态。
-
-| 期 | 内容 | 结束时能用的东西 |
-|---|---|---|
-| **A** | 退出信号修复（§4.9）+ `TerminalInfo.pid` | 终端后端可信了。CI 上有真 PTY 的回归测试 |
-| **B** | 工作区骨架 + 终端多标签 + 文件只读列表视图 + 快速访问 | **一个能真正用的工作区**：开终端、敲命令、浏览目录 |
-| **C** | cwd 双向联动（OSC 7 + 兜底）+ macOS `cwd` | 「cd 到哪文件就到哪」成立 |
-| **D** | 平铺图标视图 + 系统图标 + 缩略图 + 分页与虚拟滚动 | 图片目录能看了；大目录不卡 |
-
-目录变化的刷新（焦点刷新 + 手动按钮，§4.8）随 B 期一起做——它只是前端两个事件
-监听，不占单独一期。
-
-**A 必须最先做**，它是其余三期的地基：退出信号不可信的话，B 里的标签页不知道
-什么时候该标成「已退出」，只能猜。
-
-分页与虚拟滚动放在 D 而不是 B，是因为 B 阶段的目录列表即使不分页也能用（只是
-大目录慢），而把它塞进 B 会让 B 迟迟交付不了。**若实施 B 时发现大目录慢到影响
-自测，就把分页提到 B**——这条允许调整，不必回头改方案。
+A 修终端退出并补 pid；B 建工作区；C 实现后移除了 cwd 联动；D 补图标、缩略图、
+分页与虚拟滚动。没有待执行的 B 期实施清单。
 
 ## 4. 设计
 
@@ -134,7 +56,7 @@
    `FilesystemInfo`。Windows 的驱动器与 Unix 的挂载点（含 NAS、含 macOS 挂载的
    DMG）本来就是同一个概念，界面上不分两套。
 
-**卡死的挂载要处理**：它会从 `filesystems` 里整条消失（§2.3）。左栏对「上一次见过、
+**卡死的挂载要处理**：它会从 `filesystems` 里整条消失。左栏对「上一次见过、
 这一次没了」的挂载点保留一条灰显条目并标注「无响应」，而不是让它凭空消失——
 消失会让人以为挂载被卸载了。
 
@@ -143,14 +65,14 @@
 多标签页。每个标签一条 WS，与后端「一终端一附着」的语义天然对应；切走的标签
 保持连接不断。
 
-- **新建**：`+` 旁一个下拉，列出本机可用 shell。需要新端点，见 §4.6。
+- **新建**：`+` 旁一个下拉，列出本机可用 shell。使用 §4.6 的 shell 列表端点。
 - **上限**：每会话 8 个。**UI 自己算并在到达时禁用 `+`**，不等后端回 409。
 - **退出与断线必须分开显示**（这是 `/debug` 原型错的地方）：
   - 收到 `{"t":"exit"}` → 标签标为 `已退出 (code 42)`，**保留回看内容**让人看得见
     最后的输出，由人手动关掉标签。
   - WS 断了但没收到 exit → `连接断开，PTY 仍在运行`，提供重连。
 - 字节流是**裸二进制**，`web/src/lib/ws.ts`（`/ws` 控制面的 envelope 客户端）
-  **不能复用**，另写一个薄客户端。
+  **不能复用**，独立客户端位于 `web/src/workspace/termsocket.ts`。
 
 ### 4.4 cwd 联动（已移除，2026-09-20）
 
@@ -158,23 +80,7 @@
 > 会在终端里回显并重画提示符，切换标签还会牵动文件区跳目录重取，实测有
 > 体感卡顿；轮询兜底则有 2s 滞后的旧值回弹问题。两个方向都拆掉，终端与
 > 文件各自独立。保留下来的独立成果：macOS 进程 cwd（`PROC_PIDVNODEPATHINFO`）
-> 与 `TerminalInfo.pid`。以下原设计仅存档。
-
-**主路径 OSC 7，纯前端。** shell 用 `ESC ] 7 ; file://<host>/<path> BEL` 报出自己的
-cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端一行不改**，
-而且 shell 说的算——PowerShell 也对。
-
-代价是要让 shell 发这个序列：起 shell 时注入提示符配置，三平台各一套写法。
-
-**兜底轮询进程 cwd。** 拿不到 OSC 7 时，按 `TerminalInfo.pid` 轮询
-`/api/v1/processes/{pid}` 的 `cwd`。已知的不可靠：PowerShell 会**静默给出旧目录**
-（§2.3 实测），macOS 恒为 `None`。
-
-**两者都不可靠时明说不知道**，不显示一个错目录。审计里一个错的来源地址会把人引到
-别处去，文件区同理——**宁可空着，不可指错**。已知不跟随的 shell（PowerShell）
-在没有 OSC 7 时直接不联动，并在界面上说明原因。
-
-反向联动：在文件区进入目录 → 给当前标签页发一条 `cd`。
+> 与 `TerminalInfo.pid`。原设计从 git 历史查阅。
 
 ### 4.5 文件区
 
@@ -197,9 +103,9 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 | `GET /terminals/shells` | 本机可用 shell（名字 + 路径 + 哪个是默认） |
 | `GET /files/raw?path=` | 原始字节流，按 ≤256 KiB 分块从 worker 取回再流式转发。将来的下载用它（缩略图 2026-09-21 起改走 `/files/thumb`，见 §4.7） |
 | `GET /files/thumb?path=` | 服务端缩好的缩略图（§4.7 改判）。EXIF 方向随响应头 `x-thumb-orientation` 透传 |
-| `GET /files/icon/{ext}` | 按**扩展名**取系统真图标，返回 PNG（2026-09-20 落地，见 §8 未决 8）。前端优先它、404 回落内置集（§4.7） |
+| `GET /files/icon/{ext}` | 按**扩展名**取系统真图标，返回 PNG（2026-09-20 落地，见 §8）。前端优先它、404 回落内置集（§4.7） |
 | `GET /files` 增加分页与排序参数 | 见 §4.5 |
-| `TerminalInfo` 增加 `pid` | cwd 兜底要它 |
+| `TerminalInfo` 增加 `pid` | 标识真实 shell 进程 |
 
 **`/files/raw` 另开一个端点，不放宽 `/files/content`。** 后者「绝不把二进制当文本
 吐回去」是它的安全属性，不该为缩略图破掉。
@@ -219,14 +125,17 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 |---|---|---|
 | 一 | 相机 JPEG 先取 **EXIF 内嵌预览**，按 TIFF 的 IFD 结构读几个整数偏移量 | 这条路**一个像素都不解码**；实测 18 MiB 原图 → 5 KB、6.4 ms，照片目录绝大多数条目走它 |
 | 二 | 真要解码时**先读文件头拿尺寸**，像素数超 8000 万直接拒绝 | 解压炸弹 |
-| 三 | 解码器是纯 Rust（zune-jpeg / png / image-webp），整段包在 `catch_unwind` 里 | 越界是 panic 而不是可利用的内存破坏；坏图也不掀掉 worker |
+| 三 | 解码器是纯 Rust（zune-jpeg / png / image-webp），整段包在 `catch_unwind` 里 | debug / release 均采用 unwind，捕获 Rust panic；不保证恢复 OOM 或原生库终止 |
 
 没变的两条仍然承重：解码发生在 **worker**（登录用户身份），可见性照旧由文件权限
 裁决；`allowed_roots` 照旧在 `resolve()` 里校验。EXIF 方向标签**透传给前端**用 CSS
 转正——服务端转就得解码，正好违背内嵌预览存在的理由。
 
-**边界**：HEIC / HEIF 没有缩略图。纯 Rust 生态里没有可用的解码器，为它引 libheif（C）
-正是上面第三层要避免的东西；这类文件如实回落系统类型图标。
+**资源预算**：每个 worker 最多并行两个缩略图任务，满额返回 503；配额随阻塞任务
+完成而释放。源文件最多 64 MiB，Rust 解码器分配预算 256 MiB。
+
+**平台边界**：macOS 的 HEIC / HEIF 通过系统 ImageIO 生成缩略图；其他平台回落
+类型图标。系统解码器不受 Rust 解码分配预算控制，原生崩溃也不由 catch_unwind 恢复。
 
 **图标：两套内置，按类别各自优先（2026-09-18 定）。**
 
@@ -255,7 +164,7 @@ cwd，xterm 用 `term.parser.registerOscHandler(7, …)` 接。这条路**后端
 **零缺口**。89 KB 打进前端资源，对 15 MiB 的体积门槛（当前 release 10.5 MB）无影响。
 
 **两套都按扩展名/MIME 映射，所以内置集这条路完全在前端解决、零请求。**
-2026-09-20 起「取系统真图标」也落地了（`GET /files/icon/{ext}`，见 §8 未决 8）：
+2026-09-20 起「取系统真图标」也落地了（`GET /files/icon/{ext}`，见 §8）：
 支持的平台（Windows、有窗口服务器的 macOS）上文件优先显示系统图标，内置集
 降为回落；Linux 后端 404，前端探测一次后整个会话零请求，内置集照旧。
 
@@ -310,111 +219,38 @@ Corresponding Source 范围会把图标源 SVG 一并纳入，且上游 README �
 `cockpit-feature-inventory.md` A3「REST + SSE 为主，WS 仅用于终端与文件传输」
 不矛盾：那里说的「文件传输」指大文件上传下载，属于写操作那一轮。
 
-### 4.9 必须修的：退出信号
+### 4.9 退出信号（已修复）
 
-§2.1 那个 bug 是本方案的**前置修复**，不是附带项：一个不会告诉你它已经退出的终端，
-前端再漂亮也是坏的。
+shell 自退后必须传回真实退出码并释放名额。验证应覆盖注册表、IPC、worker 与
+真实 PTY / ConPTY；进程内假 worker 无法发现中间通道的 EOF 传播缺陷。
 
-回归测试**必须用真 ConPTY / 真 PTY 跑**，不能用进程内假 worker——这个 bug 活到今天
-正是因为那 15 个测试用的是假 worker。
+### 4.10 当前范围之外
 
-### 4.10 不做
+完整预览、下载与文件写操作归下一轮；搜索、终端分屏和跨用户终端 UI 未实现。
+隐藏文件开关已经实现；Linux 系统图标主题尚未接入，当前使用内置图标。
 
-- 一切写操作：上传、下载、新建、改名、删除、chmod/chown/ACL。
-- 搜索、隐藏文件开关（排序与分页做，见 §4.5）。
-- 复用系统当前的图标主题（见 §8 未决 3）。
-- 终端分屏。
-- 跨用户终端的 UI（后端 Unix 支持、Windows 明确拒绝，形态未定）。
+## 5. 实现入口
 
-## 5. 涉及文件
+后端：`strixmaid-node/src/routes/{files,terminals}.rs`、core 的 `providers/fs/`、
+`terminal/`、`worker/terminal/`。前端：`web/src/workspace/`，包括独立的
+`termsocket.ts` 字节流客户端。文件浏览未新增 WebSocket 频道。
 
-**新增（后端）**：`routes/files.rs` 的新端点与分页；`providers/fs/` 的图标与原始字节；
-`platform/{windows,macos}/` 的文件类型图标。**不新增 WS 频道。**
+## 6. 测试约束
 
-**新增（前端）**：`web/src/workspace/`（整个目录）；`web/src/lib/termsocket.ts`。
+- 真 PTY 退出后，客户端收到准确退出状态并释放终端名额。
+- 终端 cd 不牵动文件区，文件导航不向终端注入命令。
+- 大目录后端分页、前端虚拟滚动；Windows 盘根不能重复拼接。
+- 浏览器验证输入、重连、标签切换、文件导航和焦点刷新，不能只测 JS 可解析。
 
-**修改**：`crates/strixmaid-core/src/terminal/mod.rs`（退出信号）；
-`crates/strixmaid-types/src/terminal.rs`（`pid`）；
-`crates/strixmaid-core/src/providers/process/macos.rs`（`cwd`）；
-`crates/strixmaid-core/src/worker/terminal/{unix,windows}.rs`（OSC 7 注入）；
-`web/src/app/{App,pages}.tsx`；`web/package.json`（xterm 依赖）。
+## 7. 验收边界
 
-**文档**：`docs/design.md` §9.1 的文件与终端两节；`docs/roadmap/README.md` 索引。
+A–D 的合并不等于整个文件产品已完成：文本预览与下载仍待下一轮。
+目标环境的验证范围见 [07](07-verification.md)，本轮代码审查结果见
+[审查报告](../reviews/2026-09-27-quality-and-architecture.md)。
 
-## 6. 测试
+## 8. 后续边界
 
-1. **退出信号回归测试，真 PTY**：起一个真 shell，令其以已知退出码退出，断言
-   客户端在若干秒内收到带该退出码的 exit 帧、且终端从列表中消失。
-2. ~~**cwd 联动端到端**~~ / 3. ~~**PowerShell 的退化行为**~~ —— **不再适用**
-   （§4.4 于 2026-09-20 移除整条特性）。反向断言仍留在 e2e 里，防的是它
-   悄悄复活：「终端 `cd` 不再牵动文件区」「文件区导航不再向终端注入 cd」，
-   见 `web/scripts/workspace-check.mjs`。
-4. **大目录**：对一个上万条的目录，断言后端分页生效、前端只渲染可见行。
-5. **Windows 驱动器根**：从虚拟根进入 `C:\` 不产生拼接路径。
-6. **浏览器实测**：在真浏览器里走一遍完整流程。不再只验「JS 能被解析」。
-
-## 7. 验收
-
-1. §6 尚适用的四项（1、4、5、6）全部满足；2、3 随 §4.4 一并作废。
-2. 终端：多标签、退出与断线分开显示、到达 8 个上限时 `+` 禁用。
-3. 文件：两种视图、虚拟滚动、快速访问含挂载点、卡死挂载显示为「无响应」而非消失。
-   在终端里 `mkdir` 后切走窗口再切回来，新目录出现且**滚动位置未跳回顶部**。
-4. ~~cwd 双向联动~~ —— **不再适用**（§4.4 已移除）。
-5. `cargo clippy --workspace --all-targets` 零 warning；`cargo test --workspace` 全绿。
-6. 三平台 CI 全绿；`size` job 不破。
-   （原括注「图标包外置，二进制不应显著增长」已不成立两次：图标包**内置**
-   在前端资源里，不进二进制；而服务端缩略图的解码器确实让二进制涨了约
-   1 MiB，门槛随之 15 → 18 MiB，见 roadmap/06 §5.2。）
-
-## 8. 未决问题
-
-1. ~~**图标包选型与许可证。**~~ **已定（2026-09-18）**：文件夹用 Papirus、文件用
-   vscode-icons，互为回落，两套都内置，见 §4.7。选型依据是一张 54 项的三方对照
-   （Material Icon Theme / vscode-icons / Papirus），逐项实测体积与覆盖缺口。
-   **剩下要做的是合规落地**：`web/src/assets/icons/NOTICE.txt` + `licenses/`，
-   照抄同目录下 `fonts/` 的写法；Papirus 是 GPL-3.0，要随附全文并提供源 SVG。
-
-2. ~~**外置图标包的完整性校验。**~~ **不适用了**：这一轮不接外置包（2026-09-18 定），
-   两套都内置。若将来做外置包，这条要重新拿出来——下载下来的东西要渲染进界面，
-   来源被替换掉不是小事。
-
-3. **复用系统当前的图标主题。** 比自带一套更贴合用户桌面，但要读 icon theme 规范
-   并逐级回退，且装了什么主题因发行版而异。放到后续。
-
-4. ~~**Linux 图标覆盖不全时的表现。**~~ **不存在了**：实测 Papirus + vscode-icons
-   对 54 项是**零缺口**，且两套都内置、三平台一致，不再有「Linux 缺一半」的情形。
-
-5. ~~**OSC 7 注入怎么落地。**~~ **已定（C 期实现时）：只走环境变量，不碰任何
-   用户文件。** bash 从环境继承 `PROMPT_COMMAND`（worker 在起 shell 时注入，
-   用户 bashrc 覆盖即失效、回落轮询）；fish 原生发 OSC 7；zsh/dash 无环境注入点，
-   走 pid 轮询兜底（Linux/macOS 的进程 cwd 都跟得上，macOS 的 cwd 已在 C 期补上）；
-   PowerShell 两条路都不可靠，界面上说明原因并给出一段可复制的 `$PROFILE` 片段。
-
-6. **下载。** 只读、且 `/files/raw` 已经存在，但它是新的用户可见功能，归写操作那一轮。
-
-7. ~~**`files.watch` 的实现代价。**~~ **已定（2026-09-18）：不做推送。** 改为
-   「窗口获得焦点时刷新 + 手动刷新按钮」，见 §4.8。理由是三平台各一套实现
-   （inotify / `ReadDirectoryChangesW` / FSEvents）与收益不匹配，而目录变化通常正是
-   使用者自己在下面那个终端里造成的。
-
-8. ~~**「取系统真图标」这条还做不做。**~~ **做了（2026-09-20，负责人要求）**。
-   端点 `GET /files/icon/{ext}`，key 是扩展名（按类型缓存与请求，§4.6 的账）：
-   - **Windows**：`SHGetFileInfoW(SHGFI_USEFILEATTRIBUTES)`——虚构文件名、只查
-     注册表、不碰磁盘；先 `SHGFI_ICONLOCATION` + `PrivateExtractIconsW` 取精确
-     64px，处理器动态生成的类型回落 `SHGFI_ICON` 大图标档。
-   - **macOS**：objc 桥落在 `platform/appkit.rs`（手写 `objc_msgSend`，与
-     `iokit.rs` 同取向，不引 objc2）：`UTType` → `NSWorkspace iconForContentType:`
-     （老系统回落 `iconForFileType:`）→ `NSBitmapImageRep` 编码 PNG。
-     `available()` 以窗口服务器连接（`CGSessionCopyCurrentDictionary`）为闸——
-     守护进程形态下 AppKit 行为不确定，误开的代价是挂住，宁严勿宽。
-   - **Linux**：不做（未决 3 的图标主题问题原样在），恒 404。
-   - 缓存照搬 `IconCache`（TTL/负缓存/single-flight），不预热（类型集合事先
-     不可知）。前端 `sysicons.ts` 先拿 `txt` 探测一次，404 就整个会话不再问。
-   - **覆盖面（负责人 2026-09-20 追加：Win/Mac 的图标都从系统读，文件夹也是）**：
-     目录与无扩展名文件走保留 key `$dir` / `$file`（`$` 被扩展名消毒拒绝，
-     保留名撞不上真实类型）；macOS 另有 `GET /files/icon-path?path=`——
-     `.app` 这类 bundle 与符号链接按路径 `iconForFile:` 取**这一个条目**的
-     真身（Zed.app 显示 Zed 的 logo）。Windows 不开按路径这条：那是一次以
-     服务进程身份的磁盘访问，与「类型图标不碰磁盘所以可以不经 worker」的
-     前提相抵触；展示范围用与 `/files` 同一对 `normalize`/`is_allowed` 把关。
-     内置图标集降为回落（Linux 的主力）。
+文件预览、下载及写操作见 [后续方案](../HANDOFF-2026-09-21.md)。
+系统图标已实现：Windows 按类型取图标；macOS 支持类型和部分按路径图标；Linux 回落
+内置图标。macOS 有窗口服务器连接才启用 AppKit 路径，避免无窗口服务挂住。
+Windows 不开放按路径图标，不能以服务进程身份任意访问用户文件。

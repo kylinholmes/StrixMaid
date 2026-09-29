@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "@/api/client";
+import { sessionSignal } from "@/session/lifecycle";
 import { useSession } from "@/session/useSession";
 import { needsInput, type Prompt, planRound } from "./pam";
 
@@ -29,9 +30,11 @@ export function usePamFlow() {
     responses: { id: number; value: string }[],
     passwordLeft: string | null,
   ): Promise<void> {
+    const scope = sessionSignal();
     const { data, error: err } = await api.POST("/api/v1/auth/respond", {
       body: { session, responses },
     });
+    if (scope.aborted) return;
     if (err) {
       setError(err.message ?? "认证失败");
       setExtra(null);
@@ -68,14 +71,18 @@ export function usePamFlow() {
     setBusy(true);
     setError(null);
     try {
+      const scope = sessionSignal();
       const { data, error: err } = await api.POST("/api/v1/auth/start", {
         body: { username },
       });
+      if (scope.aborted) return;
       if (err) {
         setError(err.message ?? "无法开始认证");
         return;
       }
       await drive(data.session, data.prompts ?? [], password);
+    } catch {
+      setError("认证连接中断，请重试");
     } finally {
       setBusy(false);
     }
@@ -91,6 +98,8 @@ export function usePamFlow() {
         .filter(needsInput)
         .map((p) => ({ id: p.id, value: extra.values[p.id] ?? "" }));
       await respond(extra.session, responses, null);
+    } catch {
+      setError("认证连接中断，请重试");
     } finally {
       setBusy(false);
     }

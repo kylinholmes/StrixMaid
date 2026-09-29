@@ -41,8 +41,8 @@ use strixmaid_node::{NoReporter, ShutdownKind, StartupReporter};
 use crate::cli::{AgentArgs, GlobalArgs};
 use config::AgentConfig;
 
-/// `strixmaid agent` 的入口：装配 tracing 之后跑到关停信号为止。
-pub async fn run(global: &GlobalArgs, args: &AgentArgs) -> anyhow::Result<()> {
+/// `strixmaid agent` 的入口：先校验；检查模式立即退出，运行模式再装配 tracing。
+pub async fn run(global: &GlobalArgs, args: &AgentArgs, check_config: bool) -> anyhow::Result<()> {
     if global.listen.is_some() {
         anyhow::bail!(
             "`--listen` 只对 `serve` 有意义：Agent 不监听端口，它主动拨号回上级 Server。\
@@ -51,6 +51,10 @@ pub async fn run(global: &GlobalArgs, args: &AgentArgs) -> anyhow::Result<()> {
     }
 
     let cfg = load(global, args)?;
+    if check_config {
+        println!("Agent 配置有效");
+        return Ok(());
+    }
     init_tracing(global)?;
     run_with(cfg, Arc::new(NoReporter), crate::shutdown_signal()).await
 }

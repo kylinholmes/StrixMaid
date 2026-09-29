@@ -1,196 +1,77 @@
-# 06 构建与打包
+# 06 打包与交付
 
-> **Windows 补充（2026-09-16）**：本文的三个产物与 §3.1–§3.5 全部是 Linux 口径，
-> 未因 Windows 支持而改动。Windows 侧另起一套同构的产物，不复用本文的任何结论：
-> `scripts/package-windows.ps1` 产出与 tar.gz 同构的 zip，
-> `packaging/windows/{install,uninstall}.ps1` 对应 `install.sh`，
-> 服务宿主是 SCM 而不是 systemd，没有 pam.d 与静态链接这两件事。
-> 说明见 `packaging/windows/README.md` 与 `docs/windows-platform.md`。
-> CI 里对应 `windows` 与 `package-windows` 两个 job，质量门槛与 §3.6 的 `check` 相同。
->
-> **实施状态（2026-08-28）**：仓库侧已全部落地——`.cargo/config.toml`（musl
-> rustflags）、`ui` feature（默认开，`--no-default-features` 产出全 404 JSON 的
-> 无 UI 变体，两种变体 clippy 均零警告）、`build.rs` 注入 git sha 与 target
-> （`strixmaid --version` → `0.1.0 (<sha>, <target>)`）、`config example` 子命令、
-> `--check-config`（已接进 unit 的 ExecStartPre）、`packaging/`（两个 service、
-> `install.sh`、pam.d 模板副本）、`scripts/package.sh`（构建 + 静态性断言 + §3.5
-> 布局的 tar.gz）、`.github/workflows/ci.yml`（check / build-musl / build-helper /
-> size 四个 job）。
->
-> **本机未能执行的部分**（开发机无 root，装不了 musl-tools，也无 zig）：
-> musl 静态构建、glibc 2.28 基线的 helper、§5 的干净机安装验收与体积上限断言。
-> 这些由 CI 与打包机承担（ci.yml 已含全部断言），并归入 `07-verification.md`。
-> 本机的 gnu release 构建可作体积参考。
->
-> 偏离与决策记录：
->
-> - **CI 不跑 `cargo fmt --check`**：仓库历史上不是 rustfmt-clean
->   （HANDOFF §4），fmt 不在质量门槛里；ci.yml 内有注释。
-> - **`--check-config` 沿用「配置文件缺席不是错误」**（design.md §12 首次启动
->   语义）：它校验的是最终合并结果，文件不存在时校验的就是默认值。
-> - **Agent 的 TLS（05 遗留）在此定案**：与 design.md §14「TLS 走反代」一致，
->   Agent 跨公网连 Server 时由 Server 前的反向代理终结 TLS（反代同时代理
->   `/ws/agent`），Agent 原生 wss 支持维持 P1，不为它引入 rustls 依赖。
-> - helper 无 setuid 位（0755 root:root）：它由 root 主进程 spawn，
->   不需要也不应有 setuid。
+打包已落地。当前命令与产物以 `scripts/package*`、`packaging/` 和
+`.github/workflows/ci.yml` 为准，不再保留创建这些文件的旧实施步骤。
 
-## 1. 目标
+## 1. 产物
 
-产出 `design.md` §2.1 的三个产物并可安装运行：
+只有两个可执行文件：`strixmaid` 与 `strixmaid-helper`。
+`serve`、`agent`、`worker` 是主程序的子命令；`strixmaid-agent` 仍可作为
+服务名或 deb 包名，但不是单独的可执行文件。
 
-| 产物 | 链接 | 目标 |
-|---|---|---|
-| `strixmaid` | 静态 musl | x86_64、aarch64；含 UI、AgentCore、Server、worker 模式 |
-| `strixmaid-agent` | 静态 musl | 同上，无 UI |
-| `strixmaid-helper` | 动态 glibc | 按目标发行版的 glibc 基线构建 |
+## 2. 平台
 
-附带：`strixmaid.service`、`strixmaid-agent.service`、`/etc/pam.d/strixmaid`、`/etc/strixmaid/config.toml` 示例、安装脚本。
+Linux 主程序静态 musl，helper 动态链接 glibc / PAM；macOS 发布 Apple Silicon
+包，使用系统 dylib / OpenPAM / launchd；Windows 使用系统 DLL、LogonUserW 与 SCM。
+安装说明见 `packaging/macos/README.md`、`packaging/windows/README.md`。
 
-## 2. 现状
+## 3. 构建与安装
 
-- `rustup target list --installed` 含 `x86_64-unknown-linux-musl`；无 `.cargo/config.toml`；当前全部产物为 gnu 动态链接。
-- `Cargo.toml` release profile：`lto = "fat"`、`codegen-units = 1`、`strip = true`、`panic = "abort"`。
-- `crates/strixmaid-server/Cargo.toml` 已声明 `[[bin]] name = "strixmaid"`；`apidoc` feature 存在。`ui` feature（§2.1）未实现，`web/dist` 始终嵌入。
-- helper 的 `build.rs` 用 `-l:libpam.so.0` 链接，无需 `libpam0g-dev`。
-- pam.d 模板：`crates/strixmaid-helper/pam.d/strixmaid.{debian,rhel}`。
-- 无 systemd unit、无安装脚本、无 CI。
+### 3.1 Linux 构建
 
-## 3. 方案
+`package.sh` 构建主程序与 helper；CI 对 helper 使用 glibc 2.28 基线。
+跨架构工具链与静态性检查保留在脚本中，不复制第二份命令。
 
-### 3.1 静态构建
+### 3.2 UI feature
 
-`.cargo/config.toml`：
+默认 `ui` 嵌入 `web/dist`。先运行 `bun run build`，再构建 Rust。
+`--no-default-features` 只去掉前端资源，API 保留；非 API / WS 路径返回 404。
+`apidoc` 可显式在 release 中保留 API 文档与调试页。
 
-```toml
-[target.x86_64-unknown-linux-musl]
-rustflags = ["-C", "target-feature=+crt-static"]
+### 3.3 服务
 
-[target.aarch64-unknown-linux-musl]
-rustflags = ["-C", "target-feature=+crt-static"]
-linker = "aarch64-linux-musl-gcc"   # 或改用 cargo-zigbuild
-```
+Linux 的两个 unit 分别执行 `strixmaid serve` 与 `strixmaid agent`。
+macOS 由 launchd 托管，Windows 的 `service` 子命令区分两种模式。
 
-构建命令：
+### 3.4 配置与权限
 
-```
-cargo build --release --target x86_64-unknown-linux-musl -p strixmaid-server -p strixmaid-agent
-cargo build --release --target x86_64-unknown-linux-gnu  -p strixmaid-helper
-```
+helper 为 root:root、0755，无 setuid 位，由服务主进程启动。
+`config example` 输出 Server 模板，`config example --agent` 输出 Agent 模板。
+`--check-config` 在两种模式下都只校验合并配置并退出，不创建数据库或启动采集。
+Server 缺失配置仍使用默认值；Agent 显式给出的配置必须存在。两者都拒绝目录、
+设备等非普通文件，且读取错误不能被命令行覆盖掩盖。
+PAM 模板按发行版安装，不能把一个平台的认证栈直接用于另一个平台。
 
-需要确认的点：
+### 3.5 发布布局
 
-1. `sqlx` 的 `sqlite` feature 经 `libsqlite3-sys` 的 `bundled` 编译 C 源，musl 目标需要 `musl-gcc`（Debian 包 `musl-tools`）。不装的话 `cc` crate 会用默认 `gcc` 生成 glibc 目标文件，链接时报错。
-2. `zbus`、`procfs`、`nix` 均为纯 Rust 或 libc 调用，无 C 依赖。
-3. 验证：`ldd target/x86_64-unknown-linux-musl/release/strixmaid` 输出 `not a dynamic executable`；`file` 输出含 `statically linked`。
-4. aarch64：首选 `cargo-zigbuild`（`cargo zigbuild --target aarch64-unknown-linux-musl`），避免维护交叉工具链。
-
-helper 的 glibc 基线：用 `cargo-zigbuild --target x86_64-unknown-linux-gnu.2.28`（Debian 10 / RHEL 8 的 glibc 2.28）。`libpam.so.0` 的 ABI 自 PAM 1.1 起稳定，运行时链接到目标机自带的库。
-
-### 3.2 `ui` feature
-
-`crates/strixmaid-server/Cargo.toml`：
-
-```toml
-[features]
-default = ["ui"]
-ui = []
-apidoc = []
-```
-
-`embed.rs` 中 `#[cfg(feature = "ui")]` 包住 `WebAssets` 与 SPA 回退；关闭时 `/` 返回 404 JSON。`strixmaid-agent` 不依赖 server crate，本身不含 UI，此 feature 只用于产出无 UI 的 `strixmaid` 变体（`design.md` §2.1 提到的精简版），非必需。
-
-`web/dist` 不存在时 `rust-embed` 编译失败。仓库内保留占位 `index.html`，正式前端构建产物由前端仓库或 CI 放入。
-
-### 3.3 systemd unit
-
-`packaging/strixmaid.service`：
-
-```ini
-[Unit]
-Description=StrixMaid server
-Documentation=https://github.com/<org>/strixmaid
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/strixmaid serve
-Restart=on-failure
-RestartSec=2
-StateDirectory=strixmaid
-RuntimeDirectory=strixmaid
-Environment=RUST_LOG=info
-# worker 与 helper 是本进程的子进程，随主进程停止。
-KillMode=control-group
-TimeoutStopSec=20
-# 主进程需要 root：spawn helper、读全量 /proc、改主机名与时区。不加沙箱限制。
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`strixmaid-agent.service` 同形，`ExecStart=/usr/bin/strixmaid-agent`，`StateDirectory=strixmaid-agent`。
-
-停止顺序：主进程收到 SIGTERM 后 `sessions.shutdown()` 依次 `Shutdown` worker、`CloseSession` helper（`main.rs::serve` 已实现）；`control-group` 兜底杀残留。
-
-### 3.4 pam.d 与配置安装
-
-`packaging/install.sh`（也是 deb / rpm 的 postinst 逻辑来源）：
-
-1. 复制二进制到 `/usr/bin/`（helper 0755，root:root）。
-2. 按 `/etc/os-release` 的 `ID_LIKE` 选择 pam.d 模板：含 `debian` → `strixmaid.debian`；含 `rhel` / `fedora` / `suse` → `strixmaid.rhel`；其它发行版打印提示并退出非零。安装到 `/etc/pam.d/strixmaid`，不覆盖已存在文件。
-3. `/etc/strixmaid/config.toml` 不存在时由 `strixmaid config example > /etc/strixmaid/config.toml` 生成（新增 `config example` 子命令，输出 `Config::example_toml()`）。
-4. 安装 unit 文件，`systemctl daemon-reload`；不自动 enable。
-5. 打印监听地址与「默认只监听 127.0.0.1，对外访问请配置反向代理」的提示。
-
-`strixmaid --check-config` 子命令：加载并校验配置后退出，供 `ExecStartPre` 与安装脚本使用。
-
-### 3.5 发布产物
-
-```
-strixmaid-<version>-x86_64.tar.gz
-├── strixmaid
-├── strixmaid-agent
-├── strixmaid-helper
-├── packaging/strixmaid.service
-├── packaging/strixmaid-agent.service
-├── packaging/pam.d/strixmaid.debian
-├── packaging/pam.d/strixmaid.rhel
-├── packaging/install.sh
-└── LICENSE
-```
-
-`strixmaid --version` 输出 `strixmaid 0.1.0 (<git sha>, <target>)`，git sha 由 `build.rs` 从 `git rev-parse --short HEAD` 注入，无 git 时为 `unknown`。
+发布包包含主程序、helper、安装脚本、服务定义、配置示例与许可证。
+Linux 另有 deb 包。精确清单由打包脚本与 CI 校验，避免文档重复维护。
 
 ### 3.6 CI
 
-GitHub Actions，`.github/workflows/ci.yml`：
+frontend job 检查并构建前端，quality 三平台矩阵跑 clippy / build / test；
+发布与 Linux 容器验收消费构建产物。具体覆盖见 [09](09-ci-verification.md)。
 
-| Job | 内容 |
-|---|---|
-| `check` | `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（gnu，Ubuntu runner） |
-| `build-musl` | 安装 `musl-tools`，构建 `strixmaid` 与 `strixmaid-agent`，断言 `ldd` 为静态；上传 artifact |
-| `build-helper` | `cargo-zigbuild --target x86_64-unknown-linux-gnu.2.28`，`ldd` 断言只链 `libpam.so.0`、`libc.so.6` 及其依赖 |
-| `size` | 记录三个二进制的字节数并与上次比较，增长超过 10% 时在 PR 中标注 |
+## 4. 运行边界
 
-## 4. 涉及文件
-
-`.cargo/config.toml`、`crates/strixmaid-server/Cargo.toml`（features）、`crates/strixmaid-server/src/{embed,cli,main}.rs`（`ui` cfg、`config example`、`--check-config`、`--version`）、`crates/strixmaid-server/build.rs`（新建，git sha）、`packaging/*`、`.github/workflows/ci.yml`。
+TLS 由反向代理终结；当前 Agent 传输没有启用原生 wss。
+Alpine 没有 glibc 时 helper 不能直接使用，Agent 的只读采集不依赖它。
 
 ## 5. 验收
 
-1. 在一台干净的 Ubuntu 24.04 与一台 Rocky 9 上，仅解压 tar.gz 并运行 `install.sh`，`systemctl start strixmaid` 后 `curl 127.0.0.1:9700/api/v1/health` 返回 200；`/api/v1/capabilities` 的 `helper = true`。
-2. `strixmaid` 静态二进制 ≤ **18 MiB**，`strixmaid-agent` ≤ 8 MiB，`strixmaid-helper` ≤ 1 MiB（release，`design.md` Q3）。
+### 5.1 功能
 
-   > **15 → 18 MiB（2026-09-21，负责人定）**。服务端缩略图要一套图片解码器
-   > （roadmap/12 §4.7 的改判），musl 静态链接后是 15.96 MiB，越过了原门槛
-   > 0.22 MiB。可选的三条路里：砍格式（去掉 gif/bmp 实测只省 66 KB，不够且
-   > 丢功能）、为解码器单独降优化档（省得有限、影响缩略图速度）、抬门槛。
-   > 负责人选第三条——门槛本来就是「别让它悄悄变胖」的护栏而不是硬性指标，
-   > 18 MiB 仍留出约 2 MiB 余量，涨到那里仍会红。
-3. Alpine 容器内（无 glibc）`strixmaid-agent` 可运行并采集（helper 不可用属预期，Agent 不需要它）。
+按 [07](07-verification.md) 在目标环境验证安装、认证、提权、服务与卸载。
 
-## 6. 未决问题
+### 5.2 体积
 
-1. deb / rpm 包本身不在本方案内，`install.sh` 先覆盖 tar.gz 分发；包的 postinst 复用其逻辑。
-2. Alpine 上主进程 `strixmaid serve` 的登录不可用（helper 为 glibc 动态链接）。若要支持，helper 需另出 musl 动态链接版本，Alpine 的 `linux-pam` 提供 `libpam.so.0`。属 P1。
+Linux musl 主程序门槛为 18 MiB，helper 为 1 MiB。
+主程序门槛在加入缩略图解码器后由 15 调到 18 MiB；macOS 动态链接体积不能替代此检查。
+
+### 5.3 Alpine
+
+验证 `strixmaid agent` 的采集能力；没有 glibc / PAM helper 不等于可提供登录管理。
+
+## 6. 未完成范围
+
+原生 wss、Alpine 登录支持与 rpm 交付不因现有脚本而自动成立。

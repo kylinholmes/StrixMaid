@@ -32,7 +32,7 @@
 //! 5. 绝不入库：`sessions` 表只存 token 的 hash。
 //!
 //! 反序列化路径同样安全：serde 先产出一个临时 `String`，随即被 [`Zeroizing`] 接管
-//! （见 [`deserialize_zeroizing_string`]），不会留下第二份未受保护的拷贝。
+//! （见 `deserialize_zeroizing_string`），不会留下第二份未受保护的拷贝。
 
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -168,7 +168,7 @@ impl std::fmt::Debug for PromptResponse {
 /// 见模块文档。
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthRespondReq {
-    /// [`AuthStartResp::session`] 或上一轮 [`AuthOutcome::MorePrompts`] 给出的会话 id。
+    /// [`AuthStartResp::session`] 或上一轮 [`AuthOutcome::More`] 给出的会话 id。
     #[schema(example = "0f3c1a9e7b2d4f60")]
     pub session: String,
     /// 对本轮 `prompts` 中所有 [`PromptStyle::needs_input`] 项的回应，顺序无关。

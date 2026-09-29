@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 // 后端在 debug 构建下由 rust-embed 现读磁盘上的 web/dist（见
-// crates/strixmaid-server/src/embed.rs），所以产物直接写进 dist 即可，
+// crates/strixmaid/src/embed.rs），所以产物直接写进 dist 即可，
 // 改前端不需要重编 Rust。开发时走 Vite dev server + 代理。
 export default defineConfig({
   plugins: [react()],

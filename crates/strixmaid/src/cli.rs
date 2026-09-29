@@ -67,7 +67,7 @@ pub struct Cli {
     pub global: GlobalArgs,
 
     /// 加载并校验配置后立即退出（roadmap/06 §3.4）。
-    /// 供 systemd 的 ExecStartPre 与安装脚本使用；校验失败时非零退出。
+    /// Server 与 Agent 均支持；供安装脚本或 ExecStartPre 使用，失败时非零退出。
     #[arg(long, global = true)]
     pub check_config: bool,
 
@@ -258,7 +258,7 @@ pub struct AgentCliOverrides {
 /// （`strixmaid_core::worker::run_from_pipe`）。另外两级能直接交出可继承的
 /// 句柄，走 `--ipc-handle`（`run_from_ipc`），省掉一次连接与一次访问检查。
 ///
-/// 两者**互斥且必须给一个**。判定放在 [`WorkerArgs::endpoint`] 里，
+/// 两者**互斥且必须给一个**。判定放在 [`WorkerArgs`] 里，
 /// 而不是交给 clap 的 `conflicts_with`：这两种参数背后是两条不同的拉起路径，
 /// 给错了该说清「哪一级该用哪个」，而不是甩一句 `cannot be used with`。
 #[derive(Debug, Args)]

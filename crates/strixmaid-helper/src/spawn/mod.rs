@@ -5,7 +5,7 @@
 //!
 //! # 一环一环的对应关系
 //!
-//! | 这一步做什么 | Unix（[`unix`]） | Windows（[`windows`]） |
+//! | 这一步做什么 | Unix（[`unix`]） | Windows（`windows`） |
 //! |---|---|---|
 //! | 建 worker 通道 | `socketpair` | 一条随机名的命名管道（服务端留给主进程、客户端交给 worker） |
 //! | 把通道交给 worker | `fork` 后 `dup2` 到 fd 3 | 句柄标成可继承，值写进命令行 `--ipc-handle` |

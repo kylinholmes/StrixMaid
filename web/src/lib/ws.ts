@@ -32,6 +32,8 @@ export class WsClient {
 
   /** 连接（或换 token 重连）。 */
   connect(token: string): void {
+    this.close();
+    this.retry = 0;
     this.token = token;
     this.closed = false;
     this.open();
@@ -43,9 +45,12 @@ export class WsClient {
     this.token = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.confirmTimer) clearInterval(this.confirmTimer);
+    this.reconnectTimer = null;
     this.confirmTimer = null;
-    this.ws?.close();
+    const previous = this.ws;
     this.ws = null;
+    previous?.close();
+    if (previous) for (const fn of this.statusListeners) fn(false);
   }
 
   get up(): boolean {
@@ -84,6 +89,7 @@ export class WsClient {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       console.info("[ws] 已连接，补发订阅", [...this.subs.keys()]);
       this.retry = 0;
       for (const fn of this.statusListeners) fn(true);
@@ -105,6 +111,7 @@ export class WsClient {
       }, 1_500);
     };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       let env: Envelope;
       try {
         env = JSON.parse(String(ev.data)) as Envelope;
@@ -126,12 +133,18 @@ export class WsClient {
       }
     };
     ws.onclose = (ev) => {
+      if (this.ws !== ws) return;
+      if (this.confirmTimer) clearInterval(this.confirmTimer);
+      this.confirmTimer = null;
       console.info("[ws] 连接关闭", ev.code, ev.reason || "(无原因)");
       for (const fn of this.statusListeners) fn(false);
       this.ws = null;
       if (this.closed) return;
       const delay = Math.min(15_000, 500 * 2 ** this.retry++);
-      this.reconnectTimer = setTimeout(() => this.open(), delay);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.open();
+      }, delay);
     };
     ws.onerror = () => {
       // onclose 会跟着来，重连逻辑在那边

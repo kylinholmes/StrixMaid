@@ -1,7 +1,7 @@
 //! 键值设置表（design.md §8 的 `settings`）。
 //!
 //! 存的是运行期可变的少量配置（例如保留期预设的当前取值），
-//! 与 `/etc/strixmaid/config.toml` 里的启动配置分开——后者由 `config.rs` 负责。
+//! 与 `/etc/strixmaid/config.toml` 里的启动配置分开——后者由 `config` 模块负责。
 
 use sqlx::Row;
 

@@ -13,15 +13,15 @@
 //!
 //! # 这是全部写操作的唯一出口
 //!
-//! `02-audit.md` 的审计写入点就设在这里——所有写操作都从 [`call`] / [`call_escalating`]
+//! `02-audit.md` 的审计写入点就设在这里——所有写操作都从 [`call`] / [`call_escalating_from`]
 //! 过一遍，审计因此不会漏，也不用散落到每个路由里。
 //!
-//! 写入的规则见 [`should_audit`]，落库的字段见 [`describe`]。两条不变式值得单独说：
+//! 写入的规则见 `should_audit`，落库的字段见 `describe`。两条不变式值得单独说：
 //!
-//! - **一次用户操作只写一条记录。** [`call_escalating`] 内部可能调用两次 worker
+//! - **一次用户操作只写一条记录。** [`call_escalating_from`] 内部可能调用两次 worker
 //!   （先以用户身份、被内核拒后再以管理身份），但那是同一次用户操作的两次尝试，
 //!   不是两件事。写两条会让「这台机器上今天重启了几次 nginx」这种最基本的问题
-//!   数出错误的答案。做法是把审计写在**公开入口**里，真正干活的 [`call_inner`]
+//!   数出错误的答案。做法是把审计写在**公开入口**里，真正干活的 `call_inner`
 //!   一个字都不写。
 //! - **读操作不审计。** 读的量比写大两三个数量级（列表页每几秒刷一次），
 //!   全记下来只会把真正要看的那几条淹掉，还把 SQLite 的写入压力变成常态。
@@ -90,7 +90,7 @@ pub enum Privilege {
 /// }
 /// ```
 ///
-/// 尚未改成这样的路由走 [`call`] / [`call_escalating`]，审计照写，只是
+/// 尚未改成这样的路由走 [`call`] / [`call_escalating_from`]，审计照写，只是
 /// `remote_addr` 为空——**缺一列地址，好过为了这一列去改所有处理器的签名**。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestOrigin(Option<String>);
@@ -249,7 +249,7 @@ where
     let params = to_value(method, params)?;
     let (result, used_admin) = escalate(auth, session, method, params.clone()).await;
 
-    // 审计条件与 [`should_audit`] 一致：写操作要记，**以管理身份做成的事也要记**
+    // 审计条件与 `should_audit` 一致：写操作要记，**以管理身份做成的事也要记**
     // （「以 root 身份做的事没有『不值得记』的」）。后半条不能省——升级重试的方法
     // 已不全是写操作：日志读取也走这条路，而它一旦升级就是 root 在读系统日志。
     // 而且**只在这里写一次**——内部那两次 worker 调用是同一次用户操作的两次尝试，

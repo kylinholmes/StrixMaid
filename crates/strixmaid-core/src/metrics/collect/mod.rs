@@ -7,9 +7,9 @@
 //!
 //! | 目录 | 数据源 | 覆盖的采集项 |
 //! |---|---|---|
-//! | [`linux`] | `/proc`、`/sys` | roadmap/08 §4.2 全部八类（GPU 视 sysfs 而定） |
-//! | [`macos`] | mach、`sysctl`、`getifaddrs`、`getmntinfo` | CPU / 内存 / 负载 / 网络 / 文件系统 |
-//! | [`windows`] | `NtQuerySystemInformation`、`GlobalMemoryStatusEx`、`GetIfTable2`、`IOCTL_DISK_PERFORMANCE`、PDH | 除 PSI 与 `load.1m` 外全部 |
+//! | `linux` | `/proc`、`/sys` | roadmap/08 §4.2 全部八类（GPU 视 sysfs 而定） |
+//! | `macos` | mach、`sysctl`、`getifaddrs`、`getmntinfo` | CPU / 内存 / 负载 / 网络 / 文件系统 |
+//! | `windows` | `NtQuerySystemInformation`、`GlobalMemoryStatusEx`、`GetIfTable2`、`IOCTL_DISK_PERFORMANCE`、PDH | 除 PSI 与 `load.1m` 外全部 |
 //!
 //! 每个平台缺的那几项如实缺席，**不需要任何额外处理**——指标是否存在本来就由
 //! `GET /metrics/series` 如实报告，前端据此决定画不画。这正是 `design.md` §1

@@ -2,7 +2,7 @@
 //!
 //! 本文件是 `auth` 的 Unix 实现，向上暴露 [`Pam`]（在[父模块](super)里叫
 //! `Session`）与 [`Pam::lookup_identity`]。Windows 侧的同形实现见
-//! [`super::windows`]，两边接口为什么能对齐、每一步各自对应什么系统调用，
+//! `super::windows`，两边接口为什么能对齐、每一步各自对应什么系统调用，
 //! 写在[父模块文档](super)的对照表里。
 //!
 //! 只声明应用需要的十来个函数与常量，全部来自 Linux-PAM 的 `_pam_types.h` /
@@ -230,7 +230,7 @@ unsafe fn malloc_cstr(s: &str) -> *mut c_char {
         if p.is_null() {
             return p;
         }
-        ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+        ptr::copy_nonoverlapping(bytes.as_ptr(), p.cast::<u8>(), bytes.len());
         *p.add(bytes.len()) = 0;
         p
     }

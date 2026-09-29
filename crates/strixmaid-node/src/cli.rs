@@ -8,7 +8,7 @@
 //! 那这里还剩什么：**值解析器**。`LogLevel` 定义在 `strixmaid-core`，而 core 不
 //! 依赖 clap（那条边界由依赖表守着），所以「把级别名解析成 `LogLevel`」这件事
 //! 既不能放 core、也不该在每个用到的地方各抄一遍——级别名是配置契约的一部分，
-//! 认的字面量必须一致。服务子命令的形状同理，放在 [`crate::winsvc`]，与实现一起。
+//! 认的字面量必须一致。服务子命令的形状同理，放在 `crate::winsvc`，与实现一起。
 
 use strixmaid_core::config::LogLevel;
 

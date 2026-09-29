@@ -1,6 +1,6 @@
-//! StrixMaid AgentCore —— 全部业务逻辑所在地。
+//! StrixMaid 系统能力库：不依赖 HTTP 框架。
 //!
-//! Server 与 Agent 都只是本 crate 的宿主。参见 `docs/design.md` §3。
+//! 单机 API 与运行时编排归 strixmaid-node，进程入口归 strixmaid。参见 `docs/design.md` §3。
 //!
 //! 模块分层：
 //! - [`providers`]：对系统能力的封装（服务 / 日志 / 进程 / 主机信息），每个都能 `probe()` 自报可用性

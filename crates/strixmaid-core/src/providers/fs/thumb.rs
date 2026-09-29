@@ -12,19 +12,19 @@
 //!
 //! | 层 | 做法 | 消掉的风险 |
 //! |---|---|---|
-//! | 一 | 相机 JPEG 先取 **EXIF 内嵌预览**（[`embedded_jpeg`]） | 这条路**一个像素都不解码**，只按 TIFF 目录结构找偏移量；照片目录的绝大多数条目走这里 |
-//! | 二 | 真要解码时**先读文件头拿尺寸**，像素数超 [`MAX_PIXELS`] 直接拒绝 | 「一张 100000×100000 的 PNG 撑爆内存」这类解压炸弹 |
-//! | 三 | 解码器是纯 Rust（zune-jpeg / png / image-webp），且整段包在 [`std::panic::catch_unwind`] 里 | 越界在 Rust 里是 panic 不是可利用的内存破坏；panic 也不会掀掉 worker |
+//! | 一 | 相机 JPEG 先取 **EXIF 内嵌预览**（`embedded_jpeg`） | 这条路**一个像素都不解码**，只按 TIFF 目录结构找偏移量；照片目录的绝大多数条目走这里 |
+//! | 二 | 真要解码时**先读文件头拿尺寸**，像素数超 `MAX_PIXELS` 直接拒绝 | 「一张 100000×100000 的 PNG 撑爆内存」这类解压炸弹 |
+//! | 三 | 解码器是纯 Rust（zune-jpeg / png / image-webp），且整段包在 [`std::panic::catch_unwind`] 里 | debug / release 均为 unwind，捕获 Rust panic；不承诺恢复 OOM 或外部库进程终止 |
 //!
 //! 另外两点没变，仍然是承重的：解码发生在 **worker**（登录用户身份），所以
 //! 「能不能读这个文件」仍由文件权限裁决，主进程一行判断都不写；
-//! `allowed_roots` 的校验也照旧在 [`super::resolve`] 里。
+//! `allowed_roots` 的校验也照旧在 `super::resolve` 里。
 //!
 //! # 为什么内嵌预览值得单独一条路
 //!
 //! 不只是省 CPU——它**完全不经过解码器**，也就完全不暴露上面那类风险面。
 //! 相机与手机拍的 JPEG 几乎都在 EXIF 里放了一张 160×120 上下的预览图，
-//! 找到它只需要按 TIFF 的 IFD 结构读几个整数（[`embedded_jpeg`] 全程只做
+//! 找到它只需要按 TIFF 的 IFD 结构读几个整数（`embedded_jpeg` 全程只做
 //! 边界检查与整数读取，不碰像素）。取出来的那张仍然交给浏览器解码，
 //! 与原方案的信任边界一致。
 //!
@@ -46,6 +46,32 @@ use strixmaid_types::{ApiError, ApiResult};
 
 use super::io_err;
 
+static DECODE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// 门禁在进入阻塞线程池之前执行，permit 随真实工作一起结束，不能随请求取消释放。
+pub(super) async fn render(file: std::path::PathBuf, max_px: u32) -> ApiResult<FsThumb> {
+    bounded_decode(&DECODE_SLOTS, move || thumb_blocking(&file, max_px)).await
+}
+
+async fn bounded_decode<T: Send + 'static>(
+    slots: &'static tokio::sync::Semaphore,
+    work: impl FnOnce() -> ApiResult<T> + Send + 'static,
+) -> ApiResult<T> {
+    let permit = slots.try_acquire().map_err(|_| {
+        ApiError::new(
+            strixmaid_types::ErrorCode::Unavailable,
+            "缩略图解码繁忙，请稍后重试",
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .map_err(|_| ApiError::invalid_request("图片解码失败"))?
+    })
+    .await
+    .map_err(|e| ApiError::internal("fs.thumb 任务异常").with_detail(e.to_string()))?
+}
+
 /// 允许解码的像素总数上限（宽 × 高）。
 ///
 /// 8000 万像素：现役最高像素的消费级相机（1 亿像素的中画幅除外）都在这之下，
@@ -57,7 +83,8 @@ const MAX_PIXELS: u64 = 80_000_000;
 ///
 /// 与旧的 8 MiB 上限不是一回事：那时是「整份下发给浏览器」，所以按带宽定；
 /// 现在字节不出机器，这个上限只防「拿一个几 GiB 的文件让 worker 去读头」。
-const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// JPEG 输出质量。80 在 256 px 这个尺度上看不出与 95 的差别，体积却只有一半。
 const JPEG_QUALITY: u8 = 80;
@@ -99,8 +126,7 @@ fn rust_decodable(file: &Path) -> bool {
 fn system_decodable(file: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        matches!(ext_of(file).as_str(), "heic" | "heif")
-            && crate::platform::appkit::available()
+        matches!(ext_of(file).as_str(), "heic" | "heif") && crate::platform::appkit::available()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -145,7 +171,17 @@ pub fn thumb_blocking(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
         return system_thumb(file, max_px);
     }
 
-    let bytes = std::fs::read(file).map_err(|e| io_err(file, &e))?;
+    // take 防止 metadata 检查后文件继续增长，不能只凭检查时的长度分配。
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .map_err(|e| io_err(file, &e))?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_err(file, &e))?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(ApiError::invalid_request("图片源文件超过读取上限"));
+    }
     // 方向标签对两条路都适用：相机不转像素，只在 EXIF 里记一句要转多少度。
     let orientation = exif_orientation(&bytes);
 
@@ -167,11 +203,7 @@ pub fn thumb_blocking(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
         });
     }
 
-    // 第二条路：真解码 + 缩放。解码器的 panic 不该掀掉 worker——
-    // 它服务着这个会话的全部请求，一张坏图不值得让终端一起断。
-    std::panic::catch_unwind(|| decode_and_scale(&bytes, max_px, orientation)).map_err(|_| {
-        ApiError::invalid_request(format!("{} 解码失败（图片已损坏）", file.display()))
-    })?
+    decode_and_scale(&bytes, max_px, orientation)
 }
 
 /// 借系统解码器出缩略图（见 [`system_decodable`]）。
@@ -187,9 +219,8 @@ fn system_thumb(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
         let (w, h, rgba) = crate::platform::appkit::decode_rgba(path, max_px).ok_or_else(|| {
             ApiError::invalid_request(format!("{} 系统解码器也解不了", file.display()))
         })?;
-        let img = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| {
-            ApiError::internal("系统解码器给出的像素缓冲与尺寸对不上")
-        })?;
+        let img = image::RgbaImage::from_raw(w, h, rgba)
+            .ok_or_else(|| ApiError::internal("系统解码器给出的像素缓冲与尺寸对不上"))?;
         // ImageIO 解码时已经把 EXIF 方向应用过了，这里报正立。
         encode_thumb(&image::DynamicImage::ImageRgba8(img), 1)
     }
@@ -203,8 +234,7 @@ fn system_thumb(file: &Path, max_px: u32) -> ApiResult<FsThumb> {
     }
 }
 
-/// 解码 + 缩放 + 编码。与 [`thumb_blocking`] 分开是为了让 `catch_unwind`
-/// 只包住真正会 panic 的那一段。
+/// 解码 + 缩放 + 编码；并发配额与 panic 恢复在阻塞任务入口统一执行。
 fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsThumb> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -226,6 +256,9 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
     if let Some(f) = format {
         reader.set_format(f);
     }
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
     let img = reader
         .decode()
         .map_err(|e| ApiError::invalid_request(format!("图片解码失败：{e}")))?;
@@ -250,8 +283,7 @@ fn decode_and_scale(bytes: &[u8], max_px: u32, orientation: u8) -> ApiResult<FsT
 /// 按声明判会把一张 20 KB 的照片编成 150 KB 的 PNG。
 fn encode_thumb(img: &image::DynamicImage, orientation: u8) -> ApiResult<FsThumb> {
     let (tw, th) = (img.width(), img.height());
-    let transparent = img.color().has_alpha()
-        && img.to_rgba8().pixels().any(|p| p.0[3] != 255);
+    let transparent = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] != 255);
 
     let mut out = Vec::with_capacity(64 * 1024);
     let mime = if transparent {
@@ -450,6 +482,67 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 源文件超限在读取前拒绝() {
+        let dir = TempDir::new("source-limit");
+        let path = dir.join("large.jpg");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .unwrap();
+        let error = thumb_blocking(&path, 128).unwrap_err();
+        assert!(error.message.contains("文件过大"));
+    }
+
+    #[tokio::test]
+    async fn 取消请求仍持有解码配额直到阻塞工作退出() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let (started, mut ready) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let barrier = barrier.clone();
+            let started = started.clone();
+            tasks.push(tokio::spawn(bounded_decode(&SLOTS, move || {
+                started.send(()).unwrap();
+                barrier.wait();
+                Ok(())
+            })));
+        }
+        for _ in 0..2 {
+            ready.recv().await.unwrap();
+        }
+        let full = bounded_decode(&SLOTS, || -> ApiResult<()> {
+            panic!("超额工作不应执行")
+        })
+        .await;
+        for task in tasks {
+            task.abort();
+        }
+        let still_full = SLOTS.available_permits() == 0;
+        // 先释放工作再断言，失败时也不能把阻塞线程留在 barrier 上。
+        barrier.wait();
+        assert_eq!(
+            full.unwrap_err().code,
+            strixmaid_types::ErrorCode::Unavailable
+        );
+        assert!(still_full, "请求取消不能提前释放实际仍在解码的 permit");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while SLOTS.available_permits() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn 解码_panic_变成错误且释放配额_下次请求仍可执行() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let bad = bounded_decode(&SLOTS, || -> ApiResult<()> { panic!("注入解码故障") }).await;
+        assert!(bad.is_err());
+        assert_eq!(bounded_decode(&SLOTS, || Ok(42)).await.unwrap(), 42);
+    }
     use super::*;
     use image::{Rgb, RgbImage, Rgba, RgbaImage};
 
@@ -494,7 +587,12 @@ mod tests {
 
         let t = thumb_blocking(&f, 256).expect("应当出得了缩略图");
         assert_eq!(t.mime, "image/jpeg");
-        assert!(t.width.max(t.height) <= 256, "缩略图 {}×{} 超尺寸", t.width, t.height);
+        assert!(
+            t.width.max(t.height) <= 256,
+            "缩略图 {}×{} 超尺寸",
+            t.width,
+            t.height
+        );
         // 4:3 的源，256 的长边 → 256×192。
         assert_eq!((t.width, t.height), (256, 192));
         assert!(!t.embedded, "这张没有内嵌预览，应当走解码路");
@@ -533,7 +631,9 @@ mod tests {
     fn 小图不会被放大() {
         let dir = TempDir::new("small");
         let f = dir.join("s.png");
-        RgbImage::new(32, 24).save_with_format(&f, ImageFormat::Png).unwrap();
+        RgbImage::new(32, 24)
+            .save_with_format(&f, ImageFormat::Png)
+            .unwrap();
         let t = thumb_blocking(&f, 256).unwrap();
         assert_eq!((t.width, t.height), (32, 24), "缩略图不该放大源图");
     }
@@ -545,7 +645,8 @@ mod tests {
         let small = {
             let mut buf = Vec::new();
             let img = RgbImage::from_fn(160, 120, |x, _| Rgb([(x % 256) as u8, 7, 9]));
-            img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg).unwrap();
+            img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+                .unwrap();
             buf
         };
         let main = {
@@ -589,7 +690,11 @@ mod tests {
         let t = thumb_blocking(&f, 256).unwrap();
         assert!(t.embedded, "应当走 EXIF 内嵌预览这条路（不解码）");
         assert_eq!((t.width, t.height), (160, 120));
-        assert_eq!(hex::decode(&t.data_hex).unwrap(), small, "取出的应当是内嵌的那张");
+        assert_eq!(
+            hex::decode(&t.data_hex).unwrap(),
+            small,
+            "取出的应当是内嵌的那张"
+        );
     }
 
     #[test]
@@ -648,7 +753,12 @@ mod tests {
             return;
         };
         let t = thumb_blocking(src, 256).expect("HEIC 应当出得了缩略图");
-        assert!(t.width.max(t.height) <= 256, "{}×{} 超尺寸", t.width, t.height);
+        assert!(
+            t.width.max(t.height) <= 256,
+            "{}×{} 超尺寸",
+            t.width,
+            t.height
+        );
         assert!(!t.embedded, "HEIC 没有内嵌预览可捡，只能是解码出来的");
         assert_eq!(t.orientation, 1, "ImageIO 已应用方向，不该再让前端转一次");
         let bytes = hex::decode(&t.data_hex).unwrap();
@@ -679,7 +789,8 @@ mod tests {
         assert!(find_app1(&[0xFF, 0xD8, 0x00, 0x01, 0xFF, 0xE1, 0x00, 0x08]).is_none());
         // 长度字段撒谎（超出缓冲）时不 panic。
         assert!(find_app1(&[0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF, 0x01]).is_none());
-        assert!(embedded_jpeg(&[0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f']).is_none());
+        assert!(
+            embedded_jpeg(&[0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f']).is_none()
+        );
     }
 }
-

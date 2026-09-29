@@ -225,7 +225,7 @@ pub struct Session {
     pub node: String,
     /// 认证到的系统身份。
     pub user: AuthUser,
-    /// 是否已提权（admin worker 就绪）。
+    /// 是否已提权（admin worker 就绪且管理访问尚未超时）。
     pub elevated: bool,
     /// 提权时刻。
     pub elevated_ts: Option<i64>,
@@ -385,15 +385,19 @@ struct Live {
 }
 
 impl Live {
-    async fn snapshot(&self) -> Session {
+    async fn snapshot(&self, elevated_timeout: Duration) -> Session {
         let activity = self.activity.lock().await;
         let admin = self.admin.lock().await;
+        // 回收周期只决定何时释放资源，不能延长管理访问的有效期。
+        let admin = admin
+            .as_ref()
+            .filter(|a| a.last_active.elapsed() <= elevated_timeout);
         Session {
             token_hash: self.token_hash.clone(),
             node: self.node.clone(),
             user: self.user.clone(),
             elevated: admin.is_some(),
-            elevated_ts: admin.as_ref().map(|a| a.elevated_ts),
+            elevated_ts: admin.map(|a| a.elevated_ts),
             authed_ts: self.authed_ts,
             created_ts: self.created_ts,
             last_active_ts: activity.last_active_ts,
@@ -574,7 +578,9 @@ impl SessionManager {
             }),
             admin: Mutex::new(None),
         });
-        let session = live.snapshot().await;
+        let session = live
+            .snapshot(self.inner.cfg.effective_elevated_timeout())
+            .await;
         self.inner.sessions.write().await.insert(token_hash, live);
         Ok(LoginOutcome::Complete { token, session })
     }
@@ -673,7 +679,10 @@ impl SessionManager {
             // 重复提权：换掉旧的 admin worker。
             teardown_admin(old).await;
         }
-        Ok(ElevateOutcome::Complete(live.snapshot().await))
+        Ok(ElevateOutcome::Complete(
+            live.snapshot(self.inner.cfg.effective_elevated_timeout())
+                .await,
+        ))
     }
 
     /// 主动放弃管理访问：回收 admin worker、`elevated = false`。返回之前是否处于提权状态。
@@ -734,7 +743,10 @@ impl SessionManager {
                 tracing::warn!(error = %e, "刷新 node_sessions.last_active 失败");
             }
         }
-        Some(live.snapshot().await)
+        Some(
+            live.snapshot(self.inner.cfg.effective_elevated_timeout())
+                .await,
+        )
     }
 
     /// 会话的 user worker。
@@ -742,12 +754,17 @@ impl SessionManager {
         self.live(token_hash).await.map(|l| l.worker.clone())
     }
 
-    /// 会话的 admin worker（未提权 → `None`）。取用即视为一次管理操作，刷新提权计时。
+    /// 会话的 admin worker（未提权或已超时 → `None`）。
+    /// 仅在有效期内取用才刷新提权计时；已超时的资源交给 sweeper 回收。
     pub async fn admin_worker(&self, token_hash: &str) -> Option<Arc<WorkerHandle>> {
         let live = self.live(token_hash).await?;
         let mut admin = live.admin.lock().await;
         let admin = admin.as_mut()?;
-        admin.last_active = Instant::now();
+        let now = Instant::now();
+        if now.duration_since(admin.last_active) > self.inner.cfg.effective_elevated_timeout() {
+            return None;
+        }
+        admin.last_active = now;
         Some(admin.worker.clone())
     }
 

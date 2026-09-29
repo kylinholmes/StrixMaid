@@ -46,3 +46,7 @@ web/dist/
 *.db
 *.db-wal
 *.db-shm
+
+# 浏览器回归测试产物
+web/test-results/
+web/playwright-report/

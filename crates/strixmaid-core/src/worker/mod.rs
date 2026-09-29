@@ -21,7 +21,7 @@
 //! 内运行，请求—响应式的 RPC 不够用。[`Dispatcher::register_stream`] 注册一个
 //! **流工厂**：拿订阅参数，返回一个 `Stream<Item = Value>`。
 //!
-//! 每个订阅一个独立 task（[`run_subscription`]），职责边界是刻意划的：
+//! 每个订阅一个独立 task（`run_subscription`），职责边界是刻意划的：
 //!
 //! - 读循环只负责起 / 停任务，永远不在流上等待——否则一个安静的 follow 就能
 //!   让整个 worker 收不到下一条 `Call`；
@@ -63,7 +63,7 @@ use crate::session::framing::{self, FdFrameReader};
 pub mod probe;
 pub mod providers;
 /// Unix 专属：`fork` + 切身份 + `exec`。Windows 上对应的能力在
-/// [`terminal::windows`] 里由 `CreateProcessAsUserW` + ConPTY 一并完成，
+/// `terminal::windows` 里由 `CreateProcessAsUserW` + ConPTY 一并完成，
 /// 没有可以单独抽出来的「切身份后 exec」步骤。
 #[cfg(unix)]
 pub mod spawn_as;

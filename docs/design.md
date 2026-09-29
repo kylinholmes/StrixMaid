@@ -2,7 +2,7 @@
 
 > 轻量、通用、现代化的服务器观测与管理平台。
 > 定位参照 Cockpit（见 `cockpit-feature-inventory.md`），但去除其对 DBus 系统服务的重度依赖、补上历史指标、重做多节点模型。
-> 本文档为第 1 版设计基线，全部条目均已逐项确认。
+> 本文记录设计边界；当前完成范围见 [项目现状](README.md)，未实现的多主机目标在 §11 单列。
 
 ---
 
@@ -32,7 +32,7 @@
 
 ## 2. 产物与进程模型
 
-### 2.1 三个产物
+### 2.1 两个产物
 
 | 产物 | 链接方式 | 内容 |
 |---|---|---|
@@ -53,12 +53,11 @@
 -- -D warnings` 与 `cargo test --workspace` 各跑一遍），取舍标准仍是 §1 的第 2 条。
 完整说明见 [`windows-platform.md`](./windows-platform.md)。
 
-三个产物在 Windows 上的形态：
+两个产物在 Windows 上的形态：
 
 | 产物 | 链接方式 | 与 Linux 的差别 |
 |---|---|---|
 | `strixmaid.exe` | MSVC 动态（系统 DLL） | 多一组 `service` 子命令：注册 / 注销 / 启停 / 查询，以及被 SCM 拉起的 `service run` 入口 |
-| `strixmaid-agent.exe` | 同上 | 暂不随发布包分发——还没有被 SCM 托管的入口 |
 | `strixmaid-helper.exe` | 同上 | 没有 PAM：认证走 `LogonUserW`，会话走 `LoadUserProfileW`，身份切换走 `CreateProcessAsUserW` |
 
 「静态单二进制优先」（§1 第 4 条）在 Windows 上表现为另一种形式：不依赖任何需要单独
@@ -78,12 +77,11 @@ Linux 与 macOS 实现的内容未因此改动一个字节。
 的实现未变，变的是「缺项要说清楚是平台没有还是还没做」以及多了一整套交付物。
 完整说明见 [`macos-platform.md`](./macos-platform.md)。
 
-三个产物在 macOS 上的形态：
+两个产物在 macOS 上的形态：
 
 | 产物 | 链接方式 | 与 Linux 的差别 |
 |---|---|---|
 | `strixmaid` | 系统 dylib（libSystem 等） | 无额外子命令；服务宿主是 launchd，不需要 Windows 那种 `service` 子命令族 |
-| `strixmaid-agent` | 同上 | 随发布包分发 |
 | `strixmaid-helper` | 同上，外加 `/usr/lib/libpam.2.dylib` | PAM 是 **OpenPAM**，常量数值与 Linux-PAM 不同；服务文件缺失时整体回退到全拒的 `/etc/pam.d/other`，所以模板必须装 |
 
 两条边界写在这里，免得下游误以为漏了：
@@ -162,20 +160,19 @@ strixmaid/
 ├─ crates/
 │  ├─ strixmaid-types/              纯 serde 类型：DTO / WS envelope / IPC 消息 / 错误
 │  │                              ★ 同时拥有 MetricLayer / RetentionPreset（API 契约，core 复用）
-│  ├─ strixmaid-core/               ★ AgentCore —— 全部业务逻辑
+│  ├─ strixmaid-core/               系统能力库，不依赖 HTTP 框架
 │  │   ├─ providers/
 │  │   │   ├─ mod.rs                Provider trait + Registry + probe()
 │  │   │   ├─ service/              ServiceProvider: systemd(zbus) → systemctl(降级)
 │  │   │   ├─ log/                  LogProvider: journalctl
 │  │   │   ├─ process/              ProcessProvider: /proc
 │  │   │   ├─ system/              主机信息 / DMI / 虚拟化识别 / 重启检测 / 时间
-│  │   │   ├─ fs/                   FsProvider（P0 仅留壳）
-│  │   │   └─ net/                  netlink 只读（P1）
+│  │   │   └─ fs/                   FsProvider：只读浏览、内容、图标与缩略图
 │  │   ├─ metrics/
 │  │   │   ├─ collect/              各采集器
 │  │   │   ├─ ring.rs               内存环形缓冲
 │  │   │   ├─ rollup.rs             分层聚合与保留期清理
-│  │   │   └─ scheduler.rs          采集调度
+│  │   │   └─ engine.rs             采集调度
 │  │   ├─ store/                    sqlx + migrations（Agent / Server 共用）
 │  │   ├─ session/                  会话与 worker 生命周期、提权状态
 │  │   ├─ worker/                   worker 模式的 RPC 服务端
@@ -183,8 +180,8 @@ strixmaid/
 │  ├─ strixmaid-node/               ★ 一台主机的完整 API：axum Router + 认证与会话
 │  │                                  + 审计 + WS 频道 + Windows 服务托管。
 │  │                                  core 是「能力库」，node 是「把能力做成 API」，
-│  │                                  两个宿主装载同一个 node（§11）
-│  ├─ strixmaid/                    薄：node + 前端嵌入 + 节点目录 + 管道 + 拨号回上级。
+│  │                                  serve 已装载；agent 的装载属于 §11 目标
+│  ├─ strixmaid/                    宿主：node + 前端嵌入 + 节点目录 + 指标传输。
 │  │                                  产物就叫 `strixmaid`，`serve` 与 `agent`
 │  │                                  是它的两种模式（2026-09-17 合并，见 §11）
 │  └─ strixmaid-helper/             独立二进制，动态链接
@@ -332,20 +329,18 @@ helper 会额外补一个规范名，配置里照写 `Administrators` 即可。
 
 ## 7. 指标：采集、聚合、存储
 
-> 本节对应 [`roadmap/08-metrics-and-panel.md`](./roadmap/08-metrics-and-panel.md)。
-> 其**采集侧已实施**（2026-08-28）：7.1 的采集项从 58 种裁到 34 种（含新增的
-> GPU 四条），实施状态与决策记录见该文件开头。面板重做与静态拓扑部分仍为提案。
-> 7.2 的分层聚合、7.3 的 median 选型、7.5 的 band 展示形式**不受影响**。
+> 采集、静态拓扑与性能面板已实现；设计见
+> [指标与面板](roadmap/08-metrics-and-panel.md)，实际能力以平台探测为准。
 
 ### 7.1 采集项（P0）
 
-共 34 项（`roadmap/08` §4.2 的口径，权威定义在 `metrics/catalog.rs` 的 `CATALOG`）。
+共 36 项（`roadmap/08` §4.2 的口径，权威定义在 `metrics/catalog.rs` 的 `CATALOG`）。
 裁剪的三条规则：派生量不存、同向计数器合成一条异常信号、慢变量进健康检查。
 
 | 类别 | 内容 |
 |---|---|
 | CPU | 总量：usage / system / iowait / irq（含软中断）/ steal；每核仅 `cpu.core.usage` |
-| GPU | 每卡：usage / mem_used / mem_total / temp（Linux sysfs，`gpu_busy_percent` 可读才采；NVIDIA 见 roadmap/08 §12 Q1） |
+| GPU | 每卡：usage / engine.usage / mem_used / mem_alloc / mem_total / temp（Linux sysfs，`gpu_busy_percent` 可读才采；NVIDIA 见 roadmap/08 §12 Q1） |
 | 内存 | total / used / available / cached（含 Buffers）/ swap_total / swap_used |
 | 负载 | `load.1m`、运行队列长度、进程总数（5m / 15m 是 1m 的移动平均，不入库） |
 | **PSI** | `/proc/pressure/{cpu,memory,io}` 的 avg10 —— 差异化项，见下；cpu 无 full（整机层面恒 0） |
@@ -649,22 +644,11 @@ worker 的 socketpair 一端由 helper 经 `SCM_RIGHTS` 传回主进程；此后
 
 fd 本身走 `SCM_RIGHTS` 带外通道、不在帧里，但**帧头要记这一帧附带几个 fd**（`roadmap/03-terminal.md` §4.1）。原因是 `SOCK_STREAM` 上的一条硬性质：用普通 `read()` 读过附着了 fd 的那些字节，**内核会把 fd 直接丢掉**——不报错、无痕迹。因此可能收到 fd 的那一侧必须每一帧都走 `recvmsg`，而它需要提前知道该不该去控制缓冲里取。收到的个数与帧头不符即为协议错误。
 
-```rust
-// 主进程 → helper
-AuthStart   { service: "strixmaid", username }
-AuthRespond { responses: Vec<(PromptId, Zeroizing<String>)> }
-SpawnWorker { open_session: bool }   // 用已认证的身份
-CloseSession
-GetPasswd   { uid }        // NSS 代理，P1
-GetGroups   { uid }
-
-// helper → 主进程
-Prompts       { prompts: Vec<Prompt> }
-AuthOk        { uid, gid, username, groups }
-AuthFail      { reason }
-WorkerSpawned { pid }      // 随后一帧 SCM_RIGHTS 传 fd
-Error         { message }
-```
+实际帧定义以 `strixmaid-types/src/ipc.rs` 的 `ToHelper` / `FromHelper` 为准。
+`AuthStart` 下发认证服务、用户、worker 路径、提权组和来源地址；
+`AuthRespond` 承载认证回应，敏感内容禁止写入日志；`SpawnWorker` 指定 open_session / as_root；
+`CloseSession` 结束会话。worker 附件传递按平台实现，不能只照搬 Unix fd 流程。
+尚未实现的 NSS 查询不作为现有协议列出。
 
 ### PAM 接入方式
 
@@ -672,29 +656,33 @@ Error         { message }
 
 ### helper 的职责边界
 
-helper 是「需要动态链接或需要切换身份的操作」的唯一出口：
+helper 负责系统认证、worker 身份切换和会话资源持有；PTY 在 worker 内创建：
 
 | 职责 | 为什么必须在 helper | 阶段 |
 |---|---|---|
 | PAM 认证 | libpam 只能动态链接 | P0 |
-| 以指定用户身份 fork PTY / worker | 需要 setuid | P0 |
-| `--user` unit 访问 | setuid 后才能连 session bus | P1 |
+| 以指定用户身份启动 worker | 需要身份切换；PTY 由 worker 创建 | P0 |
+| 用户会话建立 | helper 打开系统会话，用户 worker 再访问 session bus | 已实现 |
 | NSS 用户 / 组解析 | 静态 musl 的 `getpwnam` 不走 NSS，接 LDAP/SSSD 的机器会静默漏用户 | P1 |
 
 ---
 
 ## 11. 节点模型
 
-- Server = 转发层 + API 提供者 + 中心存储；**业务逻辑全在 AgentCore**。
-- Server 内含一个 AgentCore 实例，即 `local` 节点，与远程节点走完全相同的代码路径。
-- **Agent 与 Server 是同一个二进制的两种模式**（2026-09-17 合并）。`strixmaid serve` 监听端口、带前端、管下级；`strixmaid agent` 拨号回上级、不监听。此前是两个二进制，而 4.18 MB 与 10.5 MB 的差距几乎全是 node 层——Agent 补全管理能力之后本来就要拿到那一层，那个体积躲不掉，合并真正多花的只有前端资源 0.83 MB。换来的是产物矩阵减半、远程推装时推的就是自己这份二进制，以及「级联」与「就地提升成 Server」从换二进制变成改一个参数。Windows 上两种模式的服务名不同（`StrixMaid` / `StrixMaidAgent`），可以装在同一台机器上。
-- **Agent 也有完整的存储与分层聚合能力**，本地保留自己的历史数据。
-- Agent 主动连 Server，**一条双向复用的 WS 同时承载「Agent → Server 指标推送」与「Server → Agent 管理请求」**。好处：NAT 后的 Agent 可用，Server 不需要维护 N 个拉取定时器。
-- Server 重启或网络中断后，凭时间戳游标向 Agent 请求补发**整个断连期间**的数据，曲线不留洞。
-- HTTP 路径带节点标识：`/nodes/<id>/api/v1/**`，`local` 即 Server 自身那个实例。`/api/v1/**` 保留为 `local` 的别名。
-- **Agent 接受远程管理操作**（2026-09-17 修订，方案见 `roadmap/11-multi-host.md`）。此前写的是「MVP 仅只读，有真实场景再设计」——场景出现了：在面板里添加一台空白主机，输入其本地账户口令，自动装好 agent，此后该主机与 Server 本机完全等价。
-- 跨节点**不做身份映射**。操作者用的是目标主机的本地账户，认证对话经 Server 透传到该主机，PAM / `LogonUserW` 在那一侧发生，Server 只搬字节、不持有可复用的凭据。因此每个节点一套会话。
-- Server 对远程节点是**管道而非翻译器**：不为任何端点写转发代码。业务逻辑装在 `strixmaid-node`（见下面的目录树），Agent 与 Server 提供同一个 `axum::Router`；Server 把浏览器的请求原样送进那条 WS 上的一条多路复用流，由对侧的 `Router` 直接处理。
+### 当前实现
+
+`strixmaid serve` 监听端口、提供本机 API 与 UI，并接收 Agent 指标；
+`strixmaid agent` 不监听端口，启动采集、环形缓冲、分层聚合和本地存储，主动拨号
+到 `/ws/agent` 推送指标并补发断连数据。两种模式使用同一个可执行文件。
+
+node 层已抽出 `Node::start` / `router` / `shutdown`，并验证 Router 可以运行在
+任意字节流上。但 Agent 尚未装载该运行时，现有 WS 没有承载远程管理请求。
+
+### 暂停中的目标
+
+[多主机方案](roadmap/11-multi-host.md) 规划 yamux 管道、
+`/nodes/<id>/api/v1/**` 代理、SSH 推装和每节点独立会话。目标主机用本地账户认证，
+宿主只转发字节，业务逻辑复用 node。上述代理与远程管理当前未实现。
 
 ---
 
@@ -804,7 +792,7 @@ macOS 既不是 FHS 也不是 Windows，而是 BSD 的 hier(7) 布局：有 `/et
 
 被 gate 的有：`GET /api/v1/openapi.json`、`GET /api/docs`（含其 JS 资源）、以及 **`GET /debug` 开发调试页**；业务 API 端点在 release 下照常工作。
 
-**`/debug` 调试页**：开发期用来验证各接口的单文件页面（内联 JS/CSS，vendored uPlot），按模块分面板直接调 API 并展示结果，图表类数据可绘图；不做刻意的 UI 设计。每个面板独立容错——某个端点未实现或返回错误时只影响该面板。正式前端到位前 `/` 重定向到 `/debug`（同样受 cfg 门控），之后删除。`debug_assertions` 对应默认行为，额外的 `apidoc` feature（默认关闭）保留「构建一个带文档的 release 版」这条路。
+**`/debug` 调试页**：开发期用来验证各接口的单文件页面（内联 JS/CSS，vendored uPlot），按模块分面板直接调 API 并展示结果，图表类数据可绘图；不做刻意的 UI 设计。每个面板独立容错——某个端点未实现或返回错误时只影响该面板。正式前端已提供 `/`，`/debug` 仍作为开发诊断入口保留。`debug_assertions` 对应默认行为，额外的 `apidoc` feature（默认关闭）保留「构建一个带文档的 release 版」这条路。
 
 **关于 `oneOf` 的判别方式**：utoipa 5.5 的 `#[schema(discriminator = ...)]` 只支持 `#[serde(untagged)]` + 单字段 `$ref` 变体——想拿到 OpenAPI 的 `discriminator` 关键字就必须退回 untagged，正是本项目要避开的东西。因此 `AuthOutcome` 这类多形状响应改用 **JSON Schema 原生判别**：每个 `oneOf` 分支把判别字段声明为必填的单值枚举（`{"status": {"type":"string","enum":["complete"]}}`）。openapi-generator / openapi-typescript / orval 均支持，且**比 `discriminator` 更严格**——校验器会真的拒绝判别字段与内容不匹配的响应，而 `discriminator` 仅是提示。
 
@@ -812,77 +800,24 @@ macOS 既不是 FHS 也不是 Windows，而是 BSD 的 hier(7) 布局：有 `/et
 
 ---
 
-## 13. 实现顺序
+## 13. 开发约束与进度
 
-### Phase 0 — 骨架 ✅ 已完成（2026-08-27）
+当前实现与本地检查见 [项目现状](README.md)，后续顺序见
+[路线索引](roadmap/README.md)。已完成阶段的逐步实施清单从 git 历史查阅。
 
-实际产出：5 个 crate、64 个测试、clippy 零 warning。release 二进制 2.86 MiB（不含文档）/ 4.00 MiB（含 Scalar）。
+- SPA fallback 按静态资源扩展名白名单判断，不把含点的前端路由当成文件。
+- 除 `--config` 外，环境变量统一由 figment 合并，避免两个变量名和优先级。
+- 配置文件路径确定、不向上搜索、允许缺失；存在但格式错误必须报错。
+- `ApiError` 归 types，node 用 `ApiErr` 适配 HTTP；不注册未实现的空壳路由。
+- Scalar JS 随包提供，不依赖运行时 CDN。
 
-Phase 0 期间固化的几条实现约定：
-- **静态资源 SPA fallback 按扩展名白名单判断**：只有已知静态资源扩展名（js/css/png/woff2…）未命中时才 404，其余路径一律回退 `index.html`。不能用「含点即文件」的启发式——本应用的前端路由天然带点（`/services/nginx.service`）。
-- **命令行参数除 `--config` 外不声明 `env`**，环境变量统一由 figment 处理。否则同一设置会有两个变量名（`STRIXMAID_LOG_LEVEL` vs `STRIXMAID_LOG__LEVEL`）、两种优先级。
-- **配置文件路径确定、不向上搜索、允许缺失**：`is_file()` 判断后才 merge `Toml::file_exact`；文件存在但语法错必须报错并带路径。
-- **`ApiError` 归 types，server 用 newtype `ApiErr` 适配 `IntoResponse`**（孤儿规则，且 types 不能依赖 axum）。
-- **不建空壳路由**：未实现的端点不注册——空壳会进 OpenAPI，给调用方错误的可用性信号。
-- Scalar JS 以 gzip 形态入库与嵌入（1.04 MiB），`Content-Encoding: gzip` 原样发出；`withDefaultFonts=false`、`proxyUrl=""` 关闭其两处运行时外部请求。
+## 14. 初版范围与后续扩展
 
-原计划：
-1. workspace + 5 个 crate 骨架
-2. `strixmaid-types` 基础 DTO
-3. axum server + rust-embed + 一个静态页面跑通
-4. sqlx + migrations + 基础 schema
-5. 配置加载（TOML + env + CLI）
+初版不包含：虚拟机管理、SELinux、kdump、sosreport、会话录制、SCAP、高级存储（LVM / RAID / LUKS / iSCSI / Stratis / btrfs）、firewalld、完整告警系统（规则引擎 + 通知渠道）、插件机制、发行版特有功能、MOTD、TLS。
 
-### Phase 1–3 ✅ 已完成（2026-08-27）
-
-实际产出：认证链路（自写 PAM FFI、socketpair IPC、setuid worker、提权）、7 类采集器 + 环形缓冲 + 落盘、主机/进程/能力 provider、systemd（zbus + systemctl 降级）与 journald provider、WS hub 三个频道、`/debug` 调试页。29 个 REST 端点，273 个测试，clippy 零 warning。
-
-本机（无 root）实测：PAM 错误密码路径经 HTTP → helper → `pam_authenticate` 走通；`polkit` 对 `ssh.service` restart 返回 403 `permission_denied` + `can_retry_elevated=true`。
-
-### Phase 1 — 认证链路（最难的部分最先做）
-6. `strixmaid-helper`：PAM challenge-response
-7. IPC 协议 + `socketpair` fd 传递 + `SO_PEERCRED` 校验
-8. worker fork + setuid + exec
-9. 会话管理 + `node_sessions`
-10. 提权流程（admin worker）
-11. 前端登录页
-
-> 认证放最前，因为它牵涉三个进程、特权切换与协议设计，是**整个系统最难返工的部分**。链路打通后，其余功能都只是往上挂。
-
-### Phase 2 — 只读观测
-12. capability 两层探测
-13. system provider：主机信息 / 健康聚合 / 时间
-14. metrics 采集器 + 环形缓冲 + WS 推送
-15. 分层聚合 + 保留期清理
-16. process provider + 进程页（含 cgroup → unit 反查）
-17. 概览页
-
-### Phase 3 — 服务与日志
-18. service provider（zbus + systemctl 降级）
-19. zbus 信号 → `services.changed` 推送
-20. log provider（journalctl）+ 游标分页 + follow
-21. 服务页 + 日志页（**必须虚拟滚动**）
-
-### Phase 4 — 终端
-22. worker 内 PTY + WS 桥接
-23. 会话保持 + 回看环形缓冲
-24. xterm.js 前端
-
-### Phase 5 — 收尾
-25. 审计日志
-26. 文件管理壳
-27. `strixmaid-agent` + WS 同步 + 断连补发
-28. 打包：musl 静态构建、systemd unit、pam.d 模板
+VM 管理与一键诊断已进入后续路线，不能把初版排除项当成永久禁令。初版取舍见 `cockpit-feature-inventory.md` §0 与 §14——这些恰是 Cockpit 投入最大、使用频率最低、且移植性最差的部分。
 
 ---
 
-## 14. 明确不做（MVP）
-
-虚拟机管理、SELinux、kdump、sosreport、会话录制、SCAP、高级存储（LVM / RAID / LUKS / iSCSI / Stratis / btrfs）、firewalld、完整告警系统（规则引擎 + 通知渠道）、插件机制、发行版特有功能、MOTD、TLS。
-
-理由见 `cockpit-feature-inventory.md` §0 与 §14——这些恰是 Cockpit 投入最大、使用频率最低、且移植性最差的部分。
-
----
-
-> 现状与目标的差距分析见 [`gap-analysis.md`](./gap-analysis.md)，后续工作方案见 [`roadmap/`](./roadmap/README.md)。
-> macOS 开发平台的适配说明见 [`macos-platform.md`](./macos-platform.md)。
+> 当前实现见 [项目现状](README.md)，后续工作见 [路线索引](roadmap/README.md)。
+> macOS 交付平台的适配说明见 [`macos-platform.md`](./macos-platform.md)。
