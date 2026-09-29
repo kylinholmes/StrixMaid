@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import { Button, Menu } from "@/components";
 import { cx } from "@/lib/cx";
 import { useDismiss } from "@/lib/useDismiss";
+import { sessionSignal } from "@/session/lifecycle";
 import { atTabLimit, MAX_TABS, useWorkspace } from "./store";
 import { TerminalTab } from "./TerminalTab";
 import s from "./Workspace.module.css";
@@ -64,12 +65,14 @@ export function TerminalPanel() {
     async (shell?: string) => {
       // 连点保护：POST 在途时不再发第二个。
       if (creating.current) return;
+      const scope = sessionSignal();
       creating.current = true;
       setCreateError(null);
       try {
         const { data, error } = await api.POST("/api/v1/terminals", {
           body: shell ? { shell } : {},
         });
+        if (scope.aborted) return;
         if (error || !data) {
           // 静默失败会让人对着一个没反应的按钮连点：本页数不到的 409
           // （另一个窗口占着同一会话的名额）、5xx、断网都要说出来。
@@ -78,8 +81,9 @@ export function TerminalPanel() {
           );
           return;
         }
-        // 列表接口才有 shell / pid 等元数据（cwd 联动要用 pid 与 shell 方言）。
+        // 列表接口提供 shell / pid 等终端元数据。
         const { data: list } = await api.GET("/api/v1/terminals");
+        if (scope.aborted) return;
         const info = list?.find((t) => t.id === data.id);
         addTab({
           id: data.id,
@@ -89,6 +93,8 @@ export function TerminalPanel() {
           pid: info?.pid,
         });
         setPanelCollapsed(false);
+      } catch {
+        if (!scope.aborted) setCreateError("连接失败，请重试");
       } finally {
         creating.current = false;
       }
@@ -102,7 +108,9 @@ export function TerminalPanel() {
       // 已退出的终端后端已经不在了；对活着的先关 PTY。失败也移除标签：
       // 404 说明它本来就没了，别的错误由空闲回收兜底。
       if (tab && tab.status !== "exited") {
-        void api.DELETE("/api/v1/terminals/{id}", { params: { path: { id } } });
+        void api
+          .DELETE("/api/v1/terminals/{id}", { params: { path: { id } } })
+          .catch(() => undefined);
       }
       removeTab(id);
     },
@@ -127,11 +135,12 @@ export function TerminalPanel() {
     const timer = setTimeout(() => {
       const st = useWorkspace.getState();
       if (st.panelCollapsed || st.tabs.length > 0 || adopting.current) return;
+      const scope = sessionSignal();
       adopting.current = true;
       void (async () => {
         try {
           const { data: list } = await api.GET("/api/v1/terminals");
-          if (useWorkspace.getState().tabs.length > 0) return;
+          if (scope.aborted || useWorkspace.getState().tabs.length > 0) return;
           if (list && list.length > 0) {
             for (const t of list) {
               addTab({
@@ -145,6 +154,8 @@ export function TerminalPanel() {
           } else {
             await create();
           }
+        } catch {
+          if (!scope.aborted) setCreateError("读取终端失败，请重试");
         } finally {
           adopting.current = false;
         }

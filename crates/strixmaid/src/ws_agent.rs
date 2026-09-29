@@ -386,7 +386,7 @@ async fn send_env(
     sink.send(Message::Text(text.into())).await
 }
 
-/// 把注册表接到 node 的 [`RemoteSnapshots`] 缝上。
+/// 把注册表接到 node 的 [`strixmaid_node::RemoteSnapshots`] 缝上。
 ///
 /// node 只认识本机这一个节点，「别的节点」的概念由宿主注入（依赖倒置，见
 /// `strixmaid_node::RemoteSnapshots`）。方法体逐字转发给同名的固有方法——

@@ -4,7 +4,7 @@
 //! 3. debug 构建：`/api/docs`、`/api/v1/openapi.json`、`/debug`
 //!
 //! **不含**前端资源、fallback、压缩与 trace 层、`/` 重定向——那些是「这个进程怎么
-//! 对外服务」，不是「这台主机提供什么 API」。宿主自己加，见 `strixmaid-server`
+//! 对外服务」，不是「这台主机提供什么 API」。宿主自己加，见 `strixmaid`
 //! 的 `app.rs`。`/ws/agent`（Agent 拨进来的那条连接）同理，它属于 Server。
 
 use std::sync::Arc;

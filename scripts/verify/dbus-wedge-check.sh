@@ -71,16 +71,16 @@ else
 fi
 
 say "2. dbus-daemon 拒绝日志"
-TOTAL=$(journalctl -u dbus --no-pager 2>/dev/null | grep -c 'full message queue')
+TOTAL=$(journalctl -u dbus -u dbus-broker --no-pager 2>/dev/null | grep -c 'full message queue')
 note "本次开机累计: $TOTAL 行（历史事故为 7121 行 / 25 小时；历史行按时间戳区分）"
-RECENT=$(journalctl -u dbus --since "$WIN" --no-pager 2>/dev/null | grep -c 'full message queue')
+RECENT=$(journalctl -u dbus -u dbus-broker --since "$WIN" --no-pager 2>/dev/null | grep -c 'full message queue')
 if [[ "$RECENT" -eq 0 ]]; then
   ok "$WIN_DESC 内 0 行拒绝日志"
 else
   bad "$WIN_DESC 内出现 $RECENT 行拒绝日志（下面是最新 3 行）"
-  journalctl -u dbus --since "$WIN" --no-pager 2>/dev/null | grep 'full message queue' | tail -3
+  journalctl -u dbus -u dbus-broker --since "$WIN" --no-pager 2>/dev/null | grep 'full message queue' | tail -3
 fi
-RECENT_T=$(journalctl -u dbus --since "$WIN" --no-pager 2>/dev/null | grep -c 'max_replies_per_connection')
+RECENT_T=$(journalctl -u dbus -u dbus-broker --since "$WIN" --no-pager 2>/dev/null | grep -c 'max_replies_per_connection')
 [[ "$RECENT_T" -eq 0 ]] && ok "未触及 max_replies_per_connection 上限" \
                         || bad "触及 max_replies_per_connection 上限 $RECENT_T 次"
 
@@ -88,7 +88,7 @@ say "3. dbus-daemon 资源"
 DBUS_PID=$(pgrep -x dbus-daemon | head -1)
 if [[ -n "${DBUS_PID:-}" ]]; then
   RSS=$(ps -o rss= -p "$DBUS_PID" | tr -d ' ')
-  FRESH=$(journalctl -u dbus --since '-2 min' --no-pager 2>/dev/null | grep -c 'full message queue')
+  FRESH=$(journalctl -u dbus -u dbus-broker --since '-2 min' --no-pager 2>/dev/null | grep -c 'full message queue')
   note "dbus-daemon PID=$DBUS_PID RSS=${RSS} KB（事故时 138340 KB）"
   if [[ "$RSS" -lt 61440 ]]; then
     ok "RSS 正常 (<60 MB)"
@@ -97,6 +97,8 @@ if [[ -n "${DBUS_PID:-}" ]]; then
   else
     bad "RSS 偏高 (${RSS} KB) 且近 2 分钟仍有 $FRESH 行拒绝日志，可能有连接在积压"
   fi
+else
+  note "跳过 dbus-daemon RSS 检查（例如 Fedora 使用 dbus-broker）；拒绝日志同时查询 dbus 与 dbus-broker"
 fi
 
 say "4. strixmaid 总线 socket Recv-Q（监控 ${MONITOR_SECS}s）"
@@ -142,14 +144,14 @@ note "systemctl is-system-running → ${SYSD_MS} ms"
 
 say "6. logind / sshd 关联症状"
 T1=$(journalctl -u systemd-logind --since "$WIN" --no-pager 2>/dev/null | grep -c 'Connection timed out')
-T2=$(journalctl -u ssh --since "$WIN" --no-pager 2>/dev/null | grep -c 'pam_systemd.*Failed')
+T2=$(journalctl -u ssh -u sshd --since "$WIN" --no-pager 2>/dev/null | grep -c 'pam_systemd.*Failed')
 note "窗口: $WIN_DESC"
 [[ "$T1" -eq 0 ]] && ok "logind 无 Connection timed out" || bad "logind 出现 $T1 次 Connection timed out"
 [[ "$T2" -eq 0 ]] && ok "sshd 无 pam_systemd 失败" || bad "sshd 出现 $T2 次 pam_systemd 失败（登录会卡 25 s）"
 
 say "7. strixmaid 自身健康端点"
 if [[ -n "$PID" ]]; then
-  CODE=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' http://127.0.0.1:9700/ 2>/dev/null)
+  CODE=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' http://127.0.0.1:9700/api/v1/health 2>/dev/null)
   [[ "$CODE" == "200" ]] && ok "HTTP 200" || bad "HTTP 探活返回 '$CODE'"
 fi
 

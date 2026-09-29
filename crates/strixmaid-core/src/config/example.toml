@@ -1,0 +1,116 @@
+# StrixMaid 配置文件 —— @CONFIG_PATH@
+#
+# 优先级（从低到高）：
+#   内置默认值 < 本文件 < 环境变量 STRIXMAID_* < 命令行参数
+#
+# 环境变量命名：顶层字段直接大写加前缀（STRIXMAID_LISTEN、STRIXMAID_DATA_DIR），
+# 嵌套字段用【双】下划线分隔（STRIXMAID_METRICS__INTERVAL_SECS、STRIXMAID_LOG__LEVEL）。
+# 本文件的路径本身可用 STRIXMAID_CONFIG 覆盖。
+#
+# 所有时长字段统一以「秒」为单位，字段名带 _secs 后缀。
+# 下面每一项的取值都等于内置默认值，可以按需修改或整行删除。
+#
+# 路径一律用【单引号】的 TOML 字面量字符串：Windows 的路径里全是反斜杠，
+# 双引号字符串会把它们当转义符（"C:\Users" 直接是语法错误）。
+@PLATFORM_NOTE@
+# 监听地址。只接受 `IP:端口`，不支持主机名。
+# MVP 不提供 TLS：需要对外暴露时请放在 nginx / Caddy 等反向代理之后。
+listen = "127.0.0.1:9700"
+
+# 数据目录。SQLite 数据库（指标 / 会话 / 审计）存放于 <data_dir>/strixmaid.db。
+data_dir = @DATA_DIR@
+
+# 运行目录。
+# Linux：helper 的 Unix socket（helper.sock，权限 0600）存放于此，
+# 通常由 systemd unit 的 RuntimeDirectory=strixmaid 自动创建。
+# macOS：位置同理（/var/run 下），但 launchd 没有 RuntimeDirectory 的对应物，
+# 且 /var/run 的内容每次开机都会重置，目录要由安装脚本或进程自己建。
+# Windows：helper 走命名管道，不落文件系统，本项当前用不到。
+run_dir = @RUN_DIR@
+
+# 受信任的反向代理地址。只有直连地址在这个列表里时，才采信 X-Forwarded-For。
+# 默认空 = 谁都不信、一律用直连地址。
+#
+# 这个默认值是有意的：审计记录里的来源地址若能被任意客户端用一个请求头伪造，
+# 那条记录就失去了意义。放在 nginx / Caddy 之后时，把反代的地址填进来。
+#
+# 取值是【精确的 IP 字面量】，如 ["127.0.0.1", "::1"]。暂不支持 CIDR 网段，
+# 写成网段会在启动时报错（而不是静默地永不匹配）。
+trusted_proxies = []
+
+# strixmaid-helper 二进制路径。
+# 不含路径分隔符时按 PATH 查找；需要固定位置就写绝对路径。
+# Windows 上不必写 .exe 后缀，查找时会自动补。
+helper_path = 'strixmaid-helper'
+
+# PAM 服务名，对应 /etc/pam.d/<名字>。安装包会按发行版写入对应模板。
+# 【Windows 上本项无意义】：那里的认证走 LogonUserW，不读 pam.d。
+# 字段保留只为配置形状三平台一致，helper 收到后直接忽略。
+pam_service = "strixmaid"
+
+[log]
+# 日志级别：off | error | warn | info | debug | trace
+# 日志只写 stderr，交由 journald 收集，不自写日志文件。
+level = "info"
+
+[metrics]
+# 采集间隔（秒），允许 1 – 60。默认 2 秒。
+# 调小会线性增加 CPU 与内存占用，调大则丢失短时尖峰。
+interval_secs = 2
+
+# 内存环形缓冲保留时长（秒）。3600 = 1 小时，约 3MB。
+# 这段数据只在内存里，用于实时曲线与 m_1m 层的聚合来源，进程重启即丢失。
+# 允许 60 – 86400（1 分钟 – 1 天）。
+ring_secs = 3600
+
+# 落盘保留期预设，只有两档（不支持逐层自定义）：
+#
+#   层      桶宽     less     normal（默认）
+#   m_1m    60s      6 小时   1 天
+#   m_5m    300s     3 天     7 天
+#   m_15m   900s     14 天    30 天
+#   m_12h   43200s   90 天    90 天
+#   m_1d    86400s   1 年     1 年
+#
+# 以一台 16 核 / 4 盘 / 2 网卡 / 3 挂载点 / 1 GPU（约 71 条 series）的机器估算
+# （roadmap/08 §4.5）：less 约 12MB，normal 约 35MB（含索引）。
+retention = "normal"
+
+[session]
+# 会话空闲超时（秒）。900 = 15 分钟。
+# 超过该时长没有任何请求，会话失效，需要重新用系统账户登录。
+# 允许 60 – 604800（1 分钟 – 7 天）。
+idle_timeout_secs = 900
+
+# 提权状态的【独立】空闲超时（秒）。300 = 5 分钟，与 sudo 的 timestamp_timeout 一致。
+# 会话本身仍然有效，但超过该时长没有管理操作，admin worker 会被回收、
+# 权限降回普通用户，再做写操作需要重新提权。
+# 允许 30 – 86400（30 秒 – 1 天）。
+elevated_idle_timeout_secs = 300
+
+# 允许启用管理访问（提权）的系统组。用户属于其中任一组才能提权；root 无条件可以。
+# Linux / macOS 默认覆盖 Debian 系的 sudo、RHEL / Arch 系的 wheel、
+# macOS 与老 Ubuntu 的 admin；Windows 默认是内建的 Administrators。
+#
+# 这不是自建 RBAC，而是把「谁能成为管理员」交给系统的组策略，
+# 与 sudo 的默认配置、与 Cockpit 的管理访问模型一致。
+#
+# 组名按【英文规范名】匹配。本地化的 Windows 上内建组的显示名可能是
+# 德文 / 法文的，helper 会额外补一个英文名，因此这里照写 Administrators 即可。
+#
+# 【配成空列表 [] 表示禁止任何人提权】——这是合法配置，不是「不限制」。
+elevate_groups = @ELEVATE_GROUPS@
+
+[audit]
+# 审计记录保留天数。超过即被每小时一次的后台任务清理。
+# 允许 7 – 3650。下限是一周：审计要用于事后追查，而「事后」往往是几天之后
+# 才有人发现异常，保留期短于一周基本等于没有。
+retention_days = 90
+
+[files]
+# 文件面板允许浏览的根路径（绝对路径，列表不能为空）。
+# 这不是安全边界——文件可见性由登录用户的文件权限裁决——只是界面的展示范围。
+#
+# Windows 上单独一个 '\' 表示【全部驱动器】（此时浏览根目录列出的是各个盘），
+# 要限定到某几个盘就写成 ['C:\', 'D:\Data']。
+allowed_roots = @ALLOWED_ROOTS@

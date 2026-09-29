@@ -21,7 +21,7 @@
 //! # 历史
 //!
 //! 这个目录曾经因 `.gitignore` 里一条裸的 `debug` 规则被整个吞掉、从未进入版本库
-//! （见 `docs/gap-analysis.md` §7）。规则已改为锚定的 `/debug/`，页面按 §12.1 重写。
+//! （历史原因：未锚定的 gitignore debug 规则）。规则已改为锚定的 `/debug/`，页面按 §12.1 重写。
 
 use axum::Router;
 use axum::extract::Path;

@@ -3,6 +3,8 @@
   "files": {
     "includes": [
       "src/**",
+      "e2e/**",
+      "playwright.config.ts",
       "!src/api/schema.d.ts",
       "!src/assets/icons/**"
     ]

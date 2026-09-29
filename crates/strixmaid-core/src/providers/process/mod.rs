@@ -10,9 +10,9 @@
 //!
 //! | 模块 | 数据源 | 备注 |
 //! |---|---|---|
-//! | [`linux`] | `/proc`（`procfs` crate） | |
-//! | [`macos`] | `libproc`（`proc_listpids` / `proc_pidinfo`） | 无 cgroup，`unit` 恒为 `None` |
-//! | [`windows`] | `NtQuerySystemInformation(SystemProcessInformation)` | 一次调用取全表；`cgroup` 恒为 `None`，`unit` 由服务的 pid 反查 |
+//! | `linux` | `/proc`（`procfs` crate） | |
+//! | `macos` | `libproc`（`proc_listpids` / `proc_pidinfo`） | 无 cgroup，`unit` 恒为 `None` |
+//! | `windows` | `NtQuerySystemInformation(SystemProcessInformation)` | 一次调用取全表；`cgroup` 恒为 `None`，`unit` 由服务的 pid 反查 |
 //!
 //! 三个后端产出同一套 DTO（`strixmaid_types::process`），差异由字段的 `Option` 表达，
 //! 不新增平台分支到 API 契约里。
@@ -171,7 +171,7 @@ impl ProcProvider {
     /// `POST /processes/{pid}/signal`。
     ///
     /// Unix 上是 `kill(2)`；Windows 没有信号，映射见
-    /// [`windows::send_signal`](sys::send_signal)。
+    /// `signals::send_signal`。
     pub fn signal(&self, pid: u32, signal: SignalName) -> ApiResult<()> {
         let raw_pid = checked_pid(pid)?;
         if raw_pid == 1 {
@@ -183,7 +183,7 @@ impl ProcProvider {
     /// `POST /processes/{pid}/renice`。
     ///
     /// Unix 上是 `setpriority(2)`；Windows 上映射成优先级类，见
-    /// [`windows::set_nice`](sys::set_nice)。
+    /// `signals::set_nice`。
     pub fn renice(&self, pid: u32, nice: i32) -> ApiResult<()> {
         if !(-20..=19).contains(&nice) {
             return Err(ApiError::invalid_request("nice 值必须在 -20..=19 之间"));

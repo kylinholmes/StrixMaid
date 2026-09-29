@@ -18,7 +18,7 @@
 //!    用户名与结果。`Zeroizing<String>` 连 `Serialize` 都没实现，编译期就到不了
 //!    审计；但「顺手把整个请求体 `format!("{:?}")` 进 detail」这类绕过是人写得出来的，
 //!    所以这里干脆一个字段都不给认证事件填 `params`。
-//! 3. **失败要分清「被拒」还是「出错」。** 见 [`auth_outcome`]。
+//! 3. **失败要分清「被拒」还是「出错」。** 见 `auth_outcome`。
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 # CI（roadmap/06 §3.6）。
 #
 # 与方案的一处偏离：不跑 `cargo fmt --check`——仓库历史上不是 rustfmt-clean
-# （docs/HANDOFF.md §4），全量格式化会制造噪声 diff，fmt 不在质量门槛里。
+# （docs/README.md），全量格式化会制造噪声 diff，fmt 不在质量门槛里。
 name: ci
 
 on:
@@ -47,6 +47,18 @@ jobs:
       - name: 构建
         working-directory: web
         run: bun run build
+      - name: 安装浏览器测试运行时
+        working-directory: web
+        run: bun node_modules/playwright/cli.js install --with-deps chromium
+      - name: 浏览器回归（会话隔离与日志分页）
+        working-directory: web
+        run: bun run test:browser
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: browser-failure-traces
+          path: web/test-results
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         with:
           name: web-dist
@@ -104,6 +116,12 @@ jobs:
         run: cargo build --workspace
       - name: test
         run: cargo test --workspace
+      # macOS 是已清零 rustdoc 警告的平台；其余平台的文档门槛待对应环境核验后扩展。
+      - name: rustdoc（零警告）
+        if: matrix.os == 'macos-latest'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
       # 结构性验收（scripts/acceptance.sh 的静态部分）。接进 CI 是 2026-09-17 补的：
       # 此前它只在人手动跑时才执行，结果是——路径在 node 抽取后指着已经搬走的目录、
       # 「路由不得持有 provider」那条在图标功能落地后就与设计不符，两件事都没人发现。
@@ -390,7 +408,7 @@ jobs:
 
   # 组装可安装的发布物（roadmap/06 §3.5）。与 scripts/package.sh 的产物同构，
   # 区别只在二进制来自上面两个 job 而不是本地工具链——CI 是唯一同时具备
-  # musl-tools 与 zigbuild 的环境（开发机两样都没有，见 HANDOFF-2026-08-28 §3）。
+  # musl-tools 与 zigbuild 的环境（由 CI 明确安装）。
   # 07 验证（root 容器）直接下载这个产物，无需在被测机器上编译。
   package:
     needs: [build-musl, build-helper]

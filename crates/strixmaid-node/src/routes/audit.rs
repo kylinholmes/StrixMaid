@@ -35,7 +35,7 @@
 //! [`strixmaid_types::audit`] 里的同名类型是 **API DTO**。二者刻意不合并：前者的
 //! `params` 是一段 JSON 文本、`uid` 是 `i64`（SQLite 只有有符号整数），后者的 `params`
 //! 是结构化的 `serde_json::Value`、`uid` 是 `u32`（与 `AuthUser::uid` 一致）。
-//! 转换集中在本文件的 [`entry_to_dto`]。
+//! 转换集中在本文件的 `entry_to_dto`。
 //!
 //! # 保留期清理
 //!

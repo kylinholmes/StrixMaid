@@ -185,7 +185,7 @@ impl MetricsEngine {
         catalog::CATALOG
     }
 
-    /// 订阅每轮快照。返回的 receiver 落后超过 [`BROADCAST_CAPACITY`] 轮会收到
+    /// 订阅每轮快照。返回的 receiver 落后超过 `BROADCAST_CAPACITY` 轮会收到
     /// `RecvError::Lagged(n)`，调用方应把它翻译成一条 `err` 帧而不是断开。
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<MetricSnapshot>> {
         self.inner.tx.subscribe()

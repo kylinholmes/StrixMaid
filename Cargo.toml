@@ -14,4 +14,5 @@ opt-level     = 3
 lto           = "fat"
 codegen-units = 1
 strip         = true
-panic         = "abort"
+# 缩略图解码通过 catch_unwind 恢复；发布构建也必须展开栈。
+panic         = "unwind"

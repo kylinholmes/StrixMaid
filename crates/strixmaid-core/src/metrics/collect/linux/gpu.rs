@@ -6,7 +6,7 @@
 //! 可读（amdgpu 有；多数 i915 与所有 NVIDIA 专有驱动没有）。NVIDIA 的利用率
 //! 只有 NVML（`libnvidia-ml.so`）给得出来，而静态链接 musl 的主进程不能
 //! `dlopen`（design.md §2）；把 NVML 下放给 PAM 会话 helper 又有生命周期冲突
-//! （helper 每会话一个，指标引擎常驻，见 `docs/HANDOFF.md` §6）——正确做法是
+//! （helper 每会话一个，指标引擎常驻，见 `docs/roadmap/08-metrics-and-panel.md` §12）——正确做法是
 //! 一个独立的长命采集进程，那是一项未决策的架构改动（roadmap/08 §12 Q1）。
 //! 因此 P0 按选项 (c)：sysfs 读不到的卡不产出任何样本，如实缺席。
 //!

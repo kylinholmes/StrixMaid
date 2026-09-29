@@ -74,7 +74,7 @@ impl HelperConn {
     ///
     /// Windows 上没有这一步：worker 通道的句柄**写在 `WorkerSpawned` 帧里**
     /// （`worker_handle` 字段），由 `channel::PeerProcess::take` 从 helper 进程里取，
-    /// 见 [`crate::session::framing::windows`] 的模块文档。
+    /// 见 `crate::session::framing::windows` 的模块文档。
     #[cfg(unix)]
     pub async fn recv_fd(&mut self) -> IpcResult<OwnedFd> {
         framing::recv_fd(&self.stream).await

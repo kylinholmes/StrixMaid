@@ -292,7 +292,9 @@ export function LogsPage() {
         )}
         {live.pending > 0 && (
           <button type="button" className={s.pill} onClick={live.flush}>
-            ↑ {live.pending} 条新日志
+            ↑ {live.pendingTruncated ? "最新 " : ""}
+            {live.pending} 条新日志
+            {live.pendingTruncated && "（更早记录可翻页查看）"}
           </button>
         )}
         {selected !== null && <LogDetail cursor={selected} onClose={() => setSelected(null)} />}

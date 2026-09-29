@@ -40,13 +40,11 @@ strixmaid-types = { version = "0.1.0", path = "../strixmaid-types" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "io-util"] }
 # Agent 模式拨号回上级 Server 的那条 WS（三个平台都要）。
 tokio-tungstenite = "0.30.0"
-tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["trace", "compression-gzip", "cors"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
-utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 
 # Windows 服务（SCM）：`strixmaid service run` 由 SCM 拉起时要向它报告状态
 # 并接受停止请求，`service install` 等子命令反过来调用 SCM。见 src/service/。

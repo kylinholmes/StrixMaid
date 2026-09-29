@@ -6,7 +6,7 @@
 //!   与 SQLite 聚合函数同名，所有 SQL 中一律加双引号。
 //! * 连接分两个池：`write` 池固定 1 条连接，把写入串行化到单个连接上，
 //!   彻底避免 `SQLITE_BUSY`；`read` 池若干条连接，靠 WAL 与写入并发。
-//! * 全部 SQL 走 **运行时查询**（[`sqlx::query`] / [`sqlx::query_as`]），
+//! * 全部 SQL 走 **运行时查询**（[`sqlx::query!`] / [`sqlx::query_as!`]），
 //!   不使用编译期宏 `query!`，因此不需要 `DATABASE_URL` 或 `.sqlx` 离线缓存。
 //!
 //! 少数 SQL 需要按分层拼接表名（表名来自 [`MetricLayer`] 枚举，不含任何外部输入），

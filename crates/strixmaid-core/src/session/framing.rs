@@ -9,7 +9,7 @@
 //! |---|---|
 //! | 本文件 | 与平台无关的部分：[`read_frame`] / [`read_msg`] / [`write_msg`]，泛型于 `AsyncRead` / `AsyncWrite` |
 //! | [`unix`] | `SCM_RIGHTS` 收发 fd、`set_cloexec` |
-//! | [`windows`] | 帧尾附带句柄值、由读端 `DuplicateHandle` 取走 |
+//! | `windows` | 帧尾附带句柄值、由读端 `DuplicateHandle` 取走 |
 //!
 //! 两个平台侧暴露**同名同形**的 [`FdFrameReader`] 与 [`write_msg_with_fds`]，
 //! 调用方（`worker_handle`、`worker::serve`、`terminal`）因此不必写 `cfg`。

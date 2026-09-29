@@ -44,12 +44,14 @@ fi
 # 发布物的架构与宿主不同时（典型：Apple Silicon 上跑 CI 的 x86_64 产物），
 # 必须让容器的整个用户态也是那个架构——`strixmaid` 是静态的无所谓，但
 # `strixmaid-helper` 动态链接 glibc，还要 dlopen 发行版的 PAM 模块，
-# 它们只在同架构的镜像里存在。不指定就会拉到与宿主同架构的镜像，
-# helper 起不来，而报错（"failed to open elf at /lib64/ld-linux-x86-64.so.2"）
-# 离原因很远。
+# 它们只在同架构的镜像里存在。不指定就会拉到与宿主同架构的镜像，helper
+# 起不来，而报错（"failed to open elf at /lib64/ld-linux-x86-64.so.2"）离原因很远。
 #
-# 宿主侧要有对应的 binfmt 处理器：Apple 虚拟化框架的 Rosetta（Lima 的
-# `vmOpts.vz.rosetta`）或 qemu-user-static。
+# 宿主侧要有对应的 binfmt 处理器（Rosetta 或 qemu-user-static）。
+# **注意**：翻译只对普通进程成立。x86_64 的 systemd 一旦当 PID 1，
+# Rosetta 与 qemu-user 下都会 SIGSEGV（实测 Apple Silicon + Fedora 44 客机），
+# 所以 `--arch amd64` 目前只在 x86_64 宿主上真正可用；在 Apple Silicon 上
+# 请用原生 aarch64 发布物（scripts/package.sh aarch64），架构那一维交给 CI。
 if [ -z "$ARCH" ] && command -v file >/dev/null 2>&1; then
   case "$(file -b "$DIST/strixmaid")" in
     *x86-64*)  ARCH=amd64 ;;
@@ -67,6 +69,15 @@ if [ -n "$ARCH" ]; then
     *) echo "--arch 支持 amd64 / arm64" >&2; exit 2 ;;
   esac
   PLATFORM=(--platform "linux/$ARCH")
+  # 把上面那条限制在运行时也说一遍——只写在注释里没人会看见。
+  host="$(uname -m)"
+  case "$host-$ARCH" in
+    x86_64-amd64|aarch64-arm64|arm64-arm64) ;;
+    *) echo "注意：宿主是 $host，要起的是 linux/$ARCH 容器。" >&2
+       echo "      容器里的 systemd 作为 PID 1 极可能 SIGSEGV——翻译层支持不到那一层。" >&2
+       echo "      本机验收请改用与宿主同架构的发布物（scripts/package.sh $host），" >&2
+       echo "      架构那一维交给 CI。见 README.md 的「本机虚拟机」一节。" >&2 ;;
+  esac
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

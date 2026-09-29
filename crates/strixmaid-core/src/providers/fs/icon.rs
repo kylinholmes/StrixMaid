@@ -24,8 +24,8 @@
 //!
 //! | 平台 | 实现 | [`available`] |
 //! |---|---|---|
-//! | Windows | `SHGetFileInfoW`（[`crate::platform::windows::icon::file_type_icon_png`]） | 恒 true |
-//! | macOS | `NSWorkspace`（[`crate::platform::appkit`]） | 有窗口服务器连接才 true |
+//! | Windows | `SHGetFileInfoW`（`crate::platform::windows::icon::file_type_icon_png`） | 恒 true |
+//! | macOS | `NSWorkspace`（`crate::platform::appkit`） | 有窗口服务器连接才 true |
 //! | Linux | 无（服务器常态没有图标主题，见 §8 未决 3） | 恒 false |
 //!
 //! `available` 为 false 时端点一律 404，前端探测一次后整个会话不再来问
@@ -48,7 +48,7 @@ use crate::providers::process::icon::IconCache;
 ///
 /// 与进程图标的 32 不同档：类型图标要撑平铺视图 68 CSS 像素的格子，
 /// 32 放大到那里明显发糊。Windows 侧的常量与此对齐
-/// （[`crate::platform::windows::icon::FILE_ICON_SIZE`]，那边的回落路径可能
+/// （`crate::platform::windows::icon::FILE_ICON_SIZE`，那边的回落路径可能
 /// 给出系统大图标档的尺寸，见其文档——PNG 自带尺寸，前端按 CSS 定尺渲染）。
 pub const FILE_ICON_SIZE: u32 = 64;
 

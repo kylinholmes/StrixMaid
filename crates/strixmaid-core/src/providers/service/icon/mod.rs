@@ -1,14 +1,14 @@
 //! 服务图标：按**服务名**取一张 PNG，另有一张所有服务共用的通用图标。
 //!
 //! 本文件是与平台无关的那一半：名字消毒、缓存的接线、两个端点的语义。
-//! 平台那一半只有四个函数，见 [`windows`] / [`unix`]。
+//! 平台那一半只有四个函数，见 `windows` / `unix`。
 //!
 //! # 两个端点，不是一个
 //!
 //! | 端点 | 给什么 | 取不到时 |
 //! |---|---|---|
-//! | [`ServiceIcons::icon_png`] | **这个服务自己**的可执行文件里的图标 | 404 |
-//! | [`ServiceIcons::generic_icon_png`] | 「服务」这个类别的通用齿轮 | 404 |
+//! | [`crate::providers::service::icon::ServiceIcons::icon_png`] | **这个服务自己**的可执行文件里的图标 | 404 |
+//! | [`crate::providers::service::icon::ServiceIcons::generic_icon_png`] | 「服务」这个类别的通用齿轮 | 404 |
 //!
 //! 按名字那个端点**不会**在取不到时回落到齿轮。分开的理由是诚实性：404 明确
 //! 表示「这个服务没有自己的图标」，混在一起则调用方拿到一张图却分不清它是这个
@@ -108,7 +108,7 @@ pub fn available() -> bool {
 /// 服务名允许空格（`Net Driver HPZ12`）、括号（`Intel(R) ...`）与逗号
 /// （`SangforDnsDrv_7,6,9,1`），所以这里不套 systemd 那套 unit 名字符集——
 /// 按那套规则，列表里看得见的服务点开却会 400。理由与
-/// [`super::scm::map::validate_service_unit`] 完全一致。
+/// `super::scm::map::validate_service_unit` 完全一致。
 pub fn validate_service_name(name: &str) -> ApiResult<()> {
     if name.is_empty() {
         return Err(ApiError::invalid_request("服务名不能为空"));
@@ -181,7 +181,7 @@ impl ServiceIcons {
     /// `GET /services/icon-generic`：所有服务共用的那张齿轮。
     ///
     /// Windows 上取的是服务管理单元自己的 DLL 里的图标（见
-    /// [`windows::GENERIC_ICON_SOURCE`]），**运行时提取**，不随代码分发。
+    /// `windows::GENERIC_ICON_SOURCE`），**运行时提取**，不随代码分发。
     /// 非 Windows 上没有可报的事实，一律 404。
     pub async fn generic_icon_png(&self) -> ApiResult<Arc<Vec<u8>>> {
         if !available() {

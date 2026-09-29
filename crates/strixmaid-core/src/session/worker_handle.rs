@@ -5,7 +5,7 @@
 //!
 //! 通道本身是 [`IpcChannel`]：Unix 上是一条 `socketpair`，Windows 上是一条命名管道。
 //! 本文件只在两处需要区分平台——终止 worker（信号 vs `TerminateProcess`）与
-//! 半关写方向（Windows 上无此概念），都收敛在 [`stop_process`] 与
+//! 半关写方向（Windows 上无此概念），都收敛在 `stop_process` 与
 //! [`IpcChannel::shutdown_write`] 里。
 //!
 //! # 订阅（`roadmap/01-worker-execution.md` §4.4）
@@ -21,7 +21,7 @@
 //! 靠调用方记得调一个 `unsubscribe()` 是不可靠的：WS 连接断开、任务被 abort、
 //! panic 展开，任何一条路径漏掉都会在 worker 里留下一个永远跑着的子进程。
 //!
-//! 因此每个订阅配一个后台守望任务，它拿着 [`SubscriptionGuard`]，只做一件事：
+//! 因此每个订阅配一个后台守望任务，它拿着 `SubscriptionGuard`，只做一件事：
 //! 等 `Sender::closed()`（即接收端被 drop）。一旦等到，guard 的 `Drop` 把订阅从
 //! 表里摘掉并发出 `Unsubscribe`。守望任务本身被 abort 或运行时关停时，guard 同样
 //! 会 drop，清理照做——把清理绑在 `Drop` 上而不是绑在某条代码路径上，就是为了
@@ -38,7 +38,7 @@
 //! 让内存涨。
 //!
 //! 代价是读循环被占住期间，这个 worker 上其它 RPC 的响应也读不出来。所以等待
-//! 有上限 [`SUBSCRIBER_STALL_LIMIT`]：超过这个时间还塞不进去，就判定该订阅者
+//! 有上限 `SUBSCRIBER_STALL_LIMIT`：超过这个时间还塞不进去，就判定该订阅者
 //! 已经死了，退订并关掉它的流，让整条连接恢复。宁可丢一个订阅，也不能让一个
 //! 不读数据的客户端把整个会话拖住。
 
@@ -400,7 +400,7 @@ impl WorkerHandle {
 
     /// 请 worker 退出：先 `Shutdown` 帧，超时后礼貌终止，再超时强制终止。
     ///
-    /// Windows 上没有 SIGTERM 那一档（见 [`stop_process`]），因此
+    /// Windows 上没有 SIGTERM 那一档（见 `stop_process`），因此
     /// `Stop::Graceful` 直接报告「没做成」，流程落到强制终止那一步。
     pub async fn shutdown(&self) {
         let _ = self.inner.send(&ToWorker::Shutdown).await;

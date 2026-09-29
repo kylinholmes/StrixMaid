@@ -22,14 +22,14 @@
 //!
 //! | 分叉点 | Unix | Windows |
 //! |---|---|---|
-//! | [`normalize`] | 以 `/` 开头，前缀一律拒绝 | 盘符 / UNC / 裸 `\`（= 全部驱动器），见 [`windows`] |
+//! | [`normalize`] | 以 `/` 开头，前缀一律拒绝 | 盘符 / UNC / 裸 `\`（= 全部驱动器），见 `windows` |
 //! | [`is_allowed`] | `Path::starts_with` | 裸根匹配一切绝对路径；段比较不区分大小写 |
 //! | `EntryMapper` | `st_mode` / `st_uid` / NSS | 文件属性合成 mode、SID 的 RID、`GetNamedSecurityInfoW` |
-//! | [`kind_of`] | 七种文件类型 | 只有 `Dir` / `File` / `Symlink` / `Unknown` |
+//! | `kind_of` | 七种文件类型 | 只有 `Dir` / `File` / `Symlink` / `Unknown` |
 //! | `list_blocking` | —— | 列虚拟根 `\` 时改为枚举驱动器 |
 //!
 //! Windows 侧的取数与它对 `mode` / `uid` / `gid` 所做**近似**的全部说明，
-//! 见 [`windows`] 的模块文档。
+//! 见 `windows` 的模块文档。
 
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -326,9 +326,7 @@ impl FsProvider {
         max_px: u32,
     ) -> ApiResult<strixmaid_types::rpc::FsThumb> {
         let file = resolve(path, roots)?;
-        tokio::task::spawn_blocking(move || thumb::thumb_blocking(&file, max_px))
-            .await
-            .map_err(|e| ApiError::internal("fs.thumb 任务异常").with_detail(e.to_string()))?
+        thumb::render(file, max_px).await
     }
 }
 

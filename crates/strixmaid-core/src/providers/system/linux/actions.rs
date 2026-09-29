@@ -2,7 +2,7 @@
 //!
 //! 现在**没有权限体系**（认证由另一模块提供，最后接线）。这里只实现逻辑：
 //! 以当前进程身份执行，非 root 时由内核 / 文件权限拒绝，映射为
-//! [`ErrorCode::PermissionDenied`](strixmaid_types::ErrorCode::PermissionDenied) 并标记
+//! [`ErrorCode::PermissionDenied`] 并标记
 //! `can_retry_elevated`。`systemctl reboot|poweroff` 是本模块唯一允许调用的外部命令。
 
 use std::fs;

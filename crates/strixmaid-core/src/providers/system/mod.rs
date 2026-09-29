@@ -7,9 +7,9 @@
 //!
 //! | 目录 | 数据源 |
 //! |---|---|
-//! | [`linux`] | `/proc`、`/sys`、`/etc`（`docs/design.md` §1） |
-//! | [`macos`] | `sysctl`、`SystemVersion.plist`、`getfsstat`、`scutil` |
-//! | [`windows`] | 注册表、`GlobalMemoryStatusEx`、`GetIfTable2`、卷与物理盘枚举、`SetComputerNameExW` |
+//! | `linux` | `/proc`、`/sys`、`/etc`（`docs/design.md` §1） |
+//! | `macos` | `sysctl`、`SystemVersion.plist`、`getfsstat`、`scutil` |
+//! | `windows` | 注册表、`GlobalMemoryStatusEx`、`GetIfTable2`、卷与物理盘枚举、`SetComputerNameExW` |
 //!
 //! [`health`] 是三个平台共用的判定逻辑（阈值、严重级别、版本比较），不做 I/O。
 //!

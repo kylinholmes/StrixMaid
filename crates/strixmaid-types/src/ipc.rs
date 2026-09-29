@@ -174,7 +174,7 @@ impl fmt::Debug for IpcPromptResponse {
 /// 主进程发给 helper 的消息。
 ///
 /// 一个 helper 进程的生命周期内消息顺序固定为：
-/// `AuthStart` → (`AuthRespond`)* → [`SpawnWorker`] → … → `CloseSession`。
+/// `AuthStart` → (`AuthRespond`)* → [`ToHelper::SpawnWorker`] → … → `CloseSession`。
 /// helper 在 `AuthFail` / `Error` 之后会自行退出。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

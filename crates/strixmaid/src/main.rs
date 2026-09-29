@@ -90,7 +90,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // Agent 模式：读的是另一个配置文件，也不监听端口，与下面 server 那条路径
     // 从第一步就分岔，所以在这里整个截住。
     if let Some(Command::Agent(args)) = &cli.command {
-        return crate::agent::run(&cli.global, args).await;
+        return crate::agent::run(&cli.global, args, cli.check_config).await;
     }
 
     // 先加载配置再起 tracing —— 日志级别本身来自配置。
@@ -315,7 +315,7 @@ async fn bind(addr: std::net::SocketAddr) -> anyhow::Result<tokio::net::TcpListe
 ///
 /// 第二行是本质限制而非实现取舍：那一级的进程由 seclogon 服务代建，函数签名里
 /// 连 `bInheritHandles` 都没有，helper 句柄表里的东西到不了 worker，只能把名字
-/// 告诉它、由它自己连一次。选哪一条由 [`crate::cli::WorkerArgs::endpoint`] 判定。
+/// 告诉它、由它自己连一次。选哪一条由 [`crate::cli::WorkerArgs`] 判定。
 async fn run_worker(global: &GlobalArgs, args: WorkerArgs) -> anyhow::Result<()> {
     let filter = match global.log_level {
         Some(level) => EnvFilter::new(level.as_str()),

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { onSessionReset } from "@/session/lifecycle";
 
 /**
  * 工作区的可变状态（`docs/roadmap/12-workspace.md` §4.1、§4.3）。
@@ -22,9 +23,9 @@ export interface Tab {
   status: "live" | "disconnected" | "exited";
   /** `exited` 时的展示文字，如 `已退出 (code 42)`。 */
   exitLabel?: string;
-  /** 实际启动的 shell 路径（cwd 联动要按方言组 `cd` 命令、判可不可轮询）。 */
+  /** 实际启动的 shell 路径；终端与文件目录不联动。 */
   shell?: string;
-  /** worker 内 shell 的 pid（cwd 兜底轮询的目标）。 */
+  /** worker 内 shell 的 pid。 */
   pid?: number;
 }
 
@@ -147,3 +148,6 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
   setDirSort: (sort) => set({ dirSort: sort }),
 }));
+
+// 路由切换保留布局和终端；身份切换只保留无身份含义的布局偏好。
+onSessionReset(() => useWorkspace.setState({ tabs: [], activeId: null, cwd: null }));

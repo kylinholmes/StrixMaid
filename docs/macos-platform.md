@@ -244,12 +244,11 @@ macOS 侧唯一的额外注意点：`03-terminal.md` 的 fd 传递依赖帧头�
 
 ### 7.1 产物与发布包
 
-三个产物与 Linux 一一对应，`worker` 同样不是独立二进制而是 `strixmaid` 的子命令：
+两个产物与 Linux 一一对应，`worker` 同样不是独立二进制而是 `strixmaid` 的子命令：
 
 | 产物 | macOS 上的链接方式 |
 |---|---|
 | `strixmaid` | 系统 dylib（libSystem 等）；前端由 rust-embed 嵌在里面 |
-| `strixmaid-agent` | 同上 |
 | `strixmaid-helper` | 同上，外加 `/usr/lib/libpam.2.dylib`（OpenPAM） |
 
 `design.md` §1 第 4 条的「静态单二进制优先」在这里与 Windows 是同一种落地形式：
@@ -282,7 +281,7 @@ PAM 用系统自带的那一份。
 ### 7.2 路径默认值
 
 macOS 此前跟着 Linux 走 `#[cfg(not(windows))]`，其中 `/run/strixmaid` 是一条
-**在 macOS 上根本不存在的路径**。现在单列一组（`crates/strixmaid-core/src/config.rs`），
+**在 macOS 上根本不存在的路径**。现在单列一组（`crates/strixmaid-core/src/config/defaults.rs`），
 每条的依据都写在常量的文档注释里：
 
 | 项 | Linux | macOS | macOS 侧的依据 |

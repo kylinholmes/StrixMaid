@@ -9,9 +9,9 @@
 //! # 内存规则（CF 的 Create/Get 约定）
 //!
 //! - `IORegistryEntryCreateCFProperties` / `IORegistryEntryCreateCFProperty` 是
-//!   **Create**：调用方持有，[`OwnedCf`] 负责 `CFRelease`；
+//!   **Create**：调用方持有，`OwnedCf` 负责 `CFRelease`；
 //! - `CFDictionaryGetValue` 是 **Get**：借用，不释放；
-//! - `io_object_t` 一律 [`IoObj`] RAII 释放。
+//! - `io_object_t` 一律 `IoObj` RAII 释放。
 //!
 //! 全模块无写操作、无特权要求——这些统计对普通用户可读。
 

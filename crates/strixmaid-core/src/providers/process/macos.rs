@@ -26,7 +26,7 @@
 //! | `tty` | `e_tdev` 是设备号，映射回名字要扫 `/dev` |
 //!
 //! `cwd` 曾在此列（`libc` 未声明 `proc_vnodepathinfo`），12 号方案 C 期需要它做
-//! 终端 cwd 的兜底轮询，改为自带结构体声明取之（见 [`cwd_path`]）。
+//! 终端 cwd 的兜底轮询，改为自带结构体声明取之（见 `cwd_path`）。
 //!
 //! # 磁盘 IO
 //!
@@ -509,7 +509,7 @@ impl ProcArgs {
     ///
     /// 非同 uid 且非 root 时内核直接拒绝，返回 `None`。
     ///
-    /// `buf` 的长度必须至少是 [`argmax`]——`KERN_PROCARGS2` 不支持
+    /// `buf` 的长度必须至少是 `argmax`——`KERN_PROCARGS2` 不支持
     /// 「先用 `oldp = NULL` 问实际长度」那套：空指针时它返回的是 `kern.argmax`
     /// 这个**上限**而非实际长度，所以只能一次给足再按返回值截断。
     pub fn read_into(pid: i32, buf: &mut [u8]) -> Option<ProcArgs> {

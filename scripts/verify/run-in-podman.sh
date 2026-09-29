@@ -9,7 +9,7 @@
 # 静态 musl 二进制在任何发行版容器里都能跑，这正是它的用处。
 #
 # 前置：rootless podman、cgroup v2、能访问镜像与软件源。
-# **本脚本尚未实际跑通**（开发机无法验证 rootless systemd 容器），首次运行按报错微调。
+# 已在 Fedora 44 aarch64 客机上跑通（2026-09-25，rootless、原生 arm64 容器）。
 set -euo pipefail
 
 DIST=''; DISTRO=ubuntu; ARCH=''; LONG=0
@@ -32,12 +32,14 @@ esac
 # 发布物的架构与宿主不同时（典型：Apple Silicon 上跑 CI 的 x86_64 产物），
 # 必须让容器的整个用户态也是那个架构——`strixmaid` 是静态的无所谓，但
 # `strixmaid-helper` 动态链接 glibc，还要 dlopen 发行版的 PAM 模块，
-# 它们只在同架构的镜像里存在。不指定就会拉到与宿主同架构的镜像，
-# helper 起不来，而报错（"failed to open elf at /lib64/ld-linux-x86-64.so.2"）
-# 离原因很远。
+# 它们只在同架构的镜像里存在。不指定就会拉到与宿主同架构的镜像，helper
+# 起不来，而报错（"failed to open elf at /lib64/ld-linux-x86-64.so.2"）离原因很远。
 #
-# 宿主侧要有对应的 binfmt 处理器：Apple 虚拟化框架的 Rosetta（Lima 的
-# `vmOpts.vz.rosetta`）或 qemu-user-static。
+# 宿主侧要有对应的 binfmt 处理器（Rosetta 或 qemu-user-static）。
+# **注意**：翻译只对普通进程成立。x86_64 的 systemd 一旦当 PID 1，
+# Rosetta 与 qemu-user 下都会 SIGSEGV（实测 Apple Silicon + Fedora 44 客机），
+# 所以 `--arch amd64` 目前只在 x86_64 宿主上真正可用；在 Apple Silicon 上
+# 请用原生 aarch64 发布物（scripts/package.sh aarch64），架构那一维交给 CI。
 if [ -z "$ARCH" ] && command -v file >/dev/null 2>&1; then
   case "$(file -b "$DIST/strixmaid")" in
     *x86-64*)  ARCH=amd64 ;;
@@ -55,6 +57,15 @@ if [ -n "$ARCH" ]; then
     *) echo "--arch 支持 amd64 / arm64" >&2; exit 2 ;;
   esac
   PLATFORM=(--platform "linux/$ARCH")
+  # 把上面那条限制在运行时也说一遍——只写在注释里没人会看见。
+  host="$(uname -m)"
+  case "$host-$ARCH" in
+    x86_64-amd64|aarch64-arm64|arm64-arm64) ;;
+    *) echo "注意：宿主是 $host，要起的是 linux/$ARCH 容器。" >&2
+       echo "      容器里的 systemd 作为 PID 1 极可能 SIGSEGV——翻译层支持不到那一层。" >&2
+       echo "      本机验收请改用与宿主同架构的发布物（scripts/package.sh $host），" >&2
+       echo "      架构那一维交给 CI。见 README.md 的「本机虚拟机」一节。" >&2 ;;
+  esac
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -66,8 +77,20 @@ echo "== 构建镜像 $IMG（BASE=$BASE）=="
 podman build ${PLATFORM[@]+"${PLATFORM[@]}"} --build-arg "BASE=$BASE" -t "$IMG" -f "$ROOT/scripts/verify/Containerfile" "$ROOT"
 
 echo "== 起 systemd 容器 $NAME =="
+# --privileged 不是偷懒：roadmap/07 §1.1 就写着「以 --privileged 或至少
+# --cap-add SYS_ADMIN」，docker 驱动一直是这么起的，podman 驱动漏了。
+# 少了它，**Ubuntu 上 polkit.service 根本起不来**——
+#   polkit.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+#   ... status=217/USER
+# 于是 #7 / #13 / #18 三条全红，报的却是
+#   "Failed to activate service 'org.freedesktop.PolicyKit1': timed out"
+# 这么一句离原因很远的话。实测 --cap-add=SYS_ADMIN 单独不够（接着卡在
+# cgroup 委派：memory.pressure Permission denied，226/NAMESPACE），
+# 配 --cgroupns=private 或 unmask=/sys/fs/cgroup 也不行，只有 --privileged 成。
+# Rocky 9 不受影响（它的 polkit.service 没有那几条 hardening），
+# 这正是跨发行版矩阵的意义。
 podman run -d ${PLATFORM[@]+"${PLATFORM[@]}"} --name "$NAME" --systemd=always --hostname strix-verify \
-  --cgroupns=host "$IMG" >/dev/null
+  --privileged --cgroupns=host "$IMG" >/dev/null
 trap 'podman rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 
 echo "== 等 systemd 就绪 =="
@@ -82,6 +105,10 @@ echo "== 设置测试用户密码 =="
 podman exec "$NAME" bash -c "echo 'alice:$ALICE_PW' | chpasswd; echo 'bob:$BOB_PW' | chpasswd"
 
 echo "== 拷入发布物与验证脚本 =="
+# podman 5.x 与 docker 一样不会替你建目标目录（报 "could not be found on
+# container ...: no such file or directory"）。docker 版一直有这一步，
+# podman 版漏了——两个脚本本该逐条对齐。
+podman exec "$NAME" mkdir -p /opt/strixmaid-dist
 podman cp "$DIST/." "$NAME:/opt/strixmaid-dist/"
 podman cp "$ROOT/scripts/verify" "$NAME:/opt/verify"
 

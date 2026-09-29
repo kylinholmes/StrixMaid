@@ -189,7 +189,9 @@ fn spawn_mock_worker() -> channel::Attachment {
         rt.block_on(async move {
             let stream = IpcChannel::from_owned_fd(channel::Attachment::from(worker_side))
                 .expect("worker 通道注册到 tokio 失败");
-            let _ = crate::worker::serve(stream, Arc::new(Dispatcher::new())).await;
+            if let Err(error) = crate::worker::serve(stream, Arc::new(Dispatcher::new())).await {
+                eprintln!("mock worker failed: {error:#}");
+            }
         });
     });
     channel::Attachment::from(main_side)
@@ -322,6 +324,12 @@ impl MockLauncher {
         )
         .unwrap();
 
+        // 本机 macOS 的同进程 SCM_RIGHTS 并发交接中，发出后立即关闭最后一个
+        // 普通 fd 会让接收端偶发读到 EOF（独立 socketpair 最小复现同样失败）。
+        // 假 helper / worker 都是线程，保留发送端副本直到 helper 会话结束；
+        // 通道仍真实经 SCM_RIGHTS 接收，不能用重试 Hello 掩盖断开的连接。
+        #[cfg(target_os = "macos")]
+        let mut sent_channels = Vec::new();
         loop {
             match ipc::read_msg::<_, ToHelper>(&mut s) {
                 Ok(Some(ToHelper::SpawnWorker { as_root, .. })) => {
@@ -370,6 +378,9 @@ impl MockLauncher {
                     // 本进程手里这一份的处置两个平台是相反的，见 `channel::release_sent`：
                     // Unix 必须 drop（否则对端等不到 EOF），Windows 必须 forget
                     // （句柄已被读端连所有权一起搬走）。
+                    #[cfg(target_os = "macos")]
+                    sent_channels.push(att);
+                    #[cfg(not(target_os = "macos"))]
                     channel::release_sent(vec![att]);
                 }
                 Ok(Some(ToHelper::CloseSession)) => {
@@ -935,6 +946,85 @@ async fn 在_elevate_groups_的用户提权正常() {
     match m.elevate_respond(&pending, answer(PASSWORD)).await.unwrap() {
         ElevateOutcome::Complete(session) => assert!(session.elevated),
         ElevateOutcome::More { .. } => panic!("单轮不该 More"),
+    }
+}
+
+/// 到期即撤销执行资格，不能靠两次 sweep 之间的请求把提权续活。
+#[tokio::test]
+async fn expired_elevation_cannot_be_revived_before_sweep() {
+    // 同时覆盖普通配置和 elevated_timeout 被 idle_timeout 截短的配置。
+    for (idle_secs, elevated_secs) in [(600, 300), (300, 600)] {
+        let mock = MockLauncher::new(true, 1);
+        let m = manager(
+            Arc::new(mock.clone()),
+            cfg(
+                Duration::from_secs(idle_secs),
+                Duration::from_secs(elevated_secs),
+                Duration::from_secs(60),
+            ),
+        )
+        .await;
+        let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
+        let LoginOutcome::Complete { token, session } =
+            m.login_respond(&pending, answer(PASSWORD)).await.unwrap()
+        else {
+            panic!("single-round login expected");
+        };
+        let hash = &session.token_hash;
+        let (pending, _) = m.elevate_start(hash, None).await.unwrap();
+        assert!(matches!(
+            m.elevate_respond(&pending, answer(PASSWORD)).await.unwrap(),
+            ElevateOutcome::Complete(_)
+        ));
+        let live = m.live(hash).await.unwrap();
+        // 不跑 sweeper，精确构造「权限已过期，但资源尚未回收」的窗口。
+        let expired_at =
+            Instant::now() - m.config().effective_elevated_timeout() - Duration::from_secs(1);
+        live.admin.lock().await.as_mut().unwrap().last_active = expired_at;
+        assert!(
+            m.admin_worker(hash).await.is_none(),
+            "expired elevation must not supply an admin worker or renew its timeout"
+        );
+        assert_eq!(
+            live.admin.lock().await.as_ref().unwrap().last_active,
+            expired_at
+        );
+        let resolved = m.resolve(&token).await.unwrap();
+        assert!(
+            !resolved.elevated,
+            "session response must not advertise expired elevation"
+        );
+        assert!(resolved.elevated_ts.is_none());
+        m.user_worker(hash).await.unwrap().ping().await.unwrap();
+
+        // sweeper 仍负责资源、库表与审计，不能因为请求提前拒绝而漏回收。
+        assert_eq!(m.sweep().await.elevations_expired, 1);
+        assert_eq!(m.sweep().await.elevations_expired, 0);
+        wait_for(&mock.closed, 1).await;
+        assert!(
+            !m.store()
+                .get_node_session(hash, LOCAL_NODE_ID)
+                .await
+                .unwrap()
+                .unwrap()
+                .elevated
+        );
+        let audit = m
+            .store()
+            .audit_query(&strixmaid_core_audit_filter())
+            .await
+            .unwrap();
+        assert_eq!(
+            audit.entries.iter().filter(|e| e.action == AUDIT_DROP_ELEVATION).count(),
+            1
+        );
+
+        // 重新通过认证后才恢复管理访问。
+        let (pending, _) = m.elevate_start(hash, None).await.unwrap();
+        m.elevate_respond(&pending, answer(PASSWORD)).await.unwrap();
+        m.admin_worker(hash).await.unwrap().ping().await.unwrap();
+        assert!(m.resolve(&token).await.unwrap().elevated);
+        m.shutdown().await;
     }
 }
 

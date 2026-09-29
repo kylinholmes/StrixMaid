@@ -5,6 +5,7 @@ import type { components } from "@/api/schema";
 import { capabilitiesQuery } from "@/app/queries";
 import { cx } from "@/lib/cx";
 import { fmtBytes } from "@/lib/fmt";
+import { onSessionReset } from "@/session/lifecycle";
 import { useSession } from "@/session/useSession";
 import { folderIconUrl } from "./icons";
 import { guessHome, joinPath, type Platform, platformOf } from "./path";
@@ -72,6 +73,7 @@ function mountLabel(f: FilesystemInfo): string {
  * 消失」——恰是这条需求要防的事。
  */
 const seenMounts = new Map<string, FilesystemInfo>();
+onSessionReset(() => seenMounts.clear());
 
 /**
  * 左栏条目的图标：系统真身优先（mac 上主目录/桌面/下载有带徽标的专属图标、

@@ -1,44 +1,8 @@
 # 08 指标裁剪与性能面板
 
-> **实施状态（2026-08-28）**：**§4 采集侧已完成**——`CATALOG` 34 项（含 `panel`
-> 字段与快照测试）、四个合并项（`cpu.irq` / `mem.cached` / `disk.iops` /
-> `net.errors`）在采集器内做加法并有算术测试、`metrics.per_core_detail` 配置项
-> 已删除、`migrations/0002_metrics_trim.sql` 按 §4.3 名单清理老库（幂等有测试）、
-> Linux 新增 sysfs GPU 采集器（`collect/linux/gpu.rs`）、macOS 采集器同步裁剪；
-> §4.4 的 `disk.inodes` 健康项在实施前已存在于 `providers/system/health.rs`。
->
-> **2026-09-09 增补**：GPU 页信息量不足，评审后加 2 项到 36 项——
-> `gpu.engine.usage`（标签 `engine`+`gpu`，Apple AGX 报 renderer/tiler，
-> 其他平台测不到则不产出）与 `gpu.mem_alloc`（统一内存 Mac 没有
-> `gpu.mem_total`，已分配内存是显存条唯一诚实的分母）。
->
-> §12 的决策记录：**Q1 按 (c) 实施**——sysfs 能读到 `gpu_busy_percent` 的卡才采，
-> NVIDIA 如实缺席。不选 (a) 的原因：helper 是**每会话一个**的 PAM 组件，而指标
-> 引擎常驻、与登录无关，照 (a) 实现则没人登录就没有 GPU 指标（此前记录在
-> `HANDOFF.md` §6）；接 NVML 的正确形态是 daemon 拉起的独立长命采集进程，
-> 属进程拓扑改动，留待面板里程碑一并决策。Q2 删（已删）；Q3 合并（已合并）；
-> Q4 不加。
->
-> **§5 静态拓扑四项已实施（2026-08-28）**：`FilesystemInfo.backing_dev`
-> （mountinfo major:minor → `/sys/dev/block` → 整盘，靠 `partition` 文件判定，
-> 正确处理 dm-*/md*）、`CpuInfo.packages`（`topology/physical_package_id`）、
-> `SystemInfo.gpus`（枚举 `/sys/class/drm/card*`，任何驱动的卡都列出，`GpuSource`
-> 指明指标可用性——amdgpu=Sysfs、NVIDIA/Intel集显/BMC=Unavailable）、
-> `SystemInfo.networks`（`/sys/class/net` + getifaddrs，排除 lo/veth）。本机
-> （双路 EPYC + mgag200 BMC + Mellanox 25G）实测全部正确。§5.5 的磁盘类型 /
-> SMART 本就已存在(`rotational`/`smart_healthy`),未新增。
->
-> **§6–§8 面板：接了一版实时的到 `/debug` 门控的 `/perf`（2026-08-28）**——由
-> `08-metrics-and-panel.mockup.html` 实时化而来:渲染层逐字保留,数据层换成接
-> `/system/info`(拓扑) + `/metrics/current`(实时,每 2s) + `/metrics/query`(band 历史) +
-> `psi.*`(真值),并按 §6.7 修正(成员格不画 PSI 压力带,`psiIoOf` 恒 0)。复用
-> `/debug` 的会话(sessionStorage `strix_token`)。**渲染未在浏览器验证**(开发机无
-> 浏览器、也无登录密码);服务端 200、CSP 自包含、JS 语法与取数形状已验。它是
-> 「跑起来看效果 + 将来前端照抄」的实时蓝本,不是最终产品 UI(前端框架由项目
-> 负责人定,见下)。
->
-> **仍未实施**：正式前端(框架待定)、design.md §6 能力清单的 GPU 项、
-> macOS 的 IOKit GPU / 网卡拓扑(dev-only,Linux 上验证即可,macOS 返回空)。
+> 采集裁剪、静态拓扑和 React 性能面板均已落地。当前指标目录为 36 项，
+> 以 `metrics/catalog.rs` 为准；面板实现位于 `web/src/perf/`。
+> 本文保留指标语义和图表设计，样稿仅供设计比较，不替代正式前端。
 
 ## 1. 目标
 
@@ -49,26 +13,12 @@
 
 裁剪的动机不是采集成本（读几个 `/proc` 文件而已），是**面板上没有主次**——一次铺两百条曲线等于什么都没显示。
 
-本文件供后续实施者（人或 AI）直接执行。配套的**可交互样稿**见 `08-metrics-and-panel.mockup.html`（自包含单文件，双击即可打开，内联了 uPlot v1.6.32）。样稿里的每一条曲线都是真实的 uPlot 实例，不是示意图；所有尺寸、阈值、配色都可以从中直接量取。
+本文件记录已落地设计。配套的**可交互样稿**见 `08-metrics-and-panel.mockup.html`（自包含单文件，双击即可打开，内联了 uPlot v1.6.32）。样稿里的每一条曲线都是真实的 uPlot 实例，不是示意图；所有尺寸、阈值、配色都可以从中直接量取。
 
-## 2. 现状
+## 2. 实现入口
 
-| 项 | 位置 | 状态 |
-|---|---|---|
-| 指标常量表 | `crates/strixmaid-core/src/metrics/catalog.rs` | `CATALOG: &[MetricDef]`，58 种；`MetricDef { name, unit, desc, labels }` |
-| 采集器 | `crates/strixmaid-core/src/metrics/collect/linux/{cpu,mem,load,psi,disk,fs,net}.rs` | 按 `catalog` 常量产出 |
-| macOS 采集器 | `.../collect/macos/{cpu,mem,load,fs,net}.rs` | 无 `disk`（IOKit，未做）/ `psi`（平台没有该特性） |
-| 每核明细开关 | `config.rs:293` `per_core_detail: bool`（默认 `false`） | 关闭时每核只留 `cpu.core.usage` |
-| 存储与聚合 | `metrics/{ring,engine,scheduler}.rs`、`store/` | 五层桶，`design.md` §7.2 |
-| 静态信息 | `strixmaid-types/src/system.rs` | `SystemInfo{ cpu, memory, disks, filesystems, … }` |
-| 健康聚合 | `HealthReport` / `HealthItem` | `HealthItem.id` 文档里**已预留** `"disk.inodes"`，尚未实现 |
-| 前端 | `web/` | 只有 `dist/index.html` 占位，从零起 |
-
-现状的三个具体问题：
-
-- 每核 9 条 × N。128 核机器开了明细就是 1152 条 series，而面板上没人看第 97 核的 softirq 历史。
-- 存了大量**派生量**：`fs.usage` = `used/total`，`mem.swap_free` = `swap_total − swap_used`，`cpu.idle` = 100 减其余。
-- 存了**恒零列**：`psi.cpu.full` 在整机层面内核没有定义，只在 cgroup 层有意义。
+`core/src/metrics/{catalog,engine,ring,rollup}.rs`、`metrics/collect/` 与
+`web/src/{metrics,perf}/`。三平台采集能力按实际探测提供，PSI 是 Linux 能力。
 
 ## 3. 设计约束
 
@@ -89,7 +39,7 @@
 2. **同向计数器合成一条异常信号。** 四条平时全零、出事一起涨的计数器，回答的是同一个问题，合成一条即可。
 3. **慢变量不进时序库。** 一天动不了一个百分点的量是**健康检查项**，不是曲线。
 
-### 4.2 新 `CATALOG`（34 种）
+### 4.2 `CATALOG`（36 种）
 
 `unit` 取值沿用 `catalog::unit`，`labels` 沿用 `catalog::label`。
 
@@ -106,7 +56,7 @@
 | | `gpu.mem_used` | bytes | `gpu` | **新增** |
 | | `gpu.mem_alloc` | bytes | `gpu` | **新增（2026-09-09）**；GPU 已向系统申请的内存,统一内存架构下显存条唯一诚实的分母 |
 | | `gpu.mem_total` | bytes | `gpu` | **新增** |
-| | `gpu.temp` | celsius | `gpu` | **新增**；`unit` 需新增常量 `CELSIUS = "celsius"` |
+| | `gpu.temp` | celsius | `gpu` | **新增**；单位为 `celsius` |
 | 内存 | `mem.total` | bytes | — | |
 | | `mem.used` | bytes | — | |
 | | `mem.available` | bytes | — | Linux 上唯一能回答「还能开多大进程」的数 |
@@ -516,7 +466,7 @@ bands:  [{ series:[1,2], fill: rgba(hue, 0.20~0.26) }]
 | `.../collect/macos/{cpu,mem,load,fs,net}.rs` | 同步裁剪；`gpu.rs` 用 IOKit `PerformanceStatistics`，联调时不至于整页空白 |
 | `.../collect/mod.rs` · `metrics/engine.rs` · `config.rs` | `default_collectors` 去掉 `per_core_detail` 形参；`MetricsConfig` 删该字段并从 TOML 样例（`config.rs:820`）移除 |
 | `crates/strixmaid-types/src/system.rs` | 新增 `CpuPackage`、`GpuInfo`、`GpuSource`、`NetInfo`；`FilesystemInfo` 加 `backing_dev`；`CpuInfo` 加 `packages`；`SystemInfo` 加 `gpus` / `networks` |
-| `crates/strixmaid-server/src/routes/system.rs` | 填充上述新字段 |
+| `crates/strixmaid-node/src/routes/system.rs` | 填充上述新字段 |
 | `crates/strixmaid-core/src/providers/`（health） | 实现 `disk.inodes` 检查项 |
 | `crates/strixmaid-core/src/store/` | 一次性迁移：按 §4.3 名单 `DELETE FROM series` + 五张桶表级联清理，避免老库留下永不更新的孤儿 series |
 | `web/` | 前端从零起，按 §6–§8 实现 |
@@ -541,18 +491,12 @@ bands:  [{ series:[1,2], fill: rgba(hue, 0.20~0.26) }]
 6. 亮暗两套主题下，五个资源色按左栏相邻序通过配色校验的五项检查。
 7. `cargo clippy --workspace --all-targets` 零 warning，`cargo test --workspace` 全绿。
 
-## 12. 未决事项
+## 12. 已定的取舍
 
-实施前需要决策，**Q1 是唯一会动进程拓扑的**：
-
-| # | 问题 | 选项 | 倾向 |
-|---|---|---|---|
-| **Q1** | **NVIDIA 怎么接？** amdgpu 走 sysfs 是白捡的；但 NVIDIA 的利用率只有 NVML（`libnvidia-ml.so`）给得出来，而**静态链接 musl 的二进制不能 dlopen** | (a) 下放 `strixmaid-helper`——它本来就是动态 glibc，符合 `design.md` §1 原则四，但要给 IPC 加一组指标帧；(b) 每 2 秒 fork `nvidia-smi --query-gpu`；(c) P0 只支持 sysfs 能读的，NVIDIA 标 unavailable | (a) |
-| Q2 | `load.5m` / `load.15m` 真的删？论证成立，但三元组是运维肌肉记忆 | 删 / 保留采集但只在 CPU 页角落显示一行文字 | 删 |
-| Q3 | `disk.iops` 合并是否太狠？读写分离的 IOPS 在诊断写放大时有用 | 合并 / 保留两条 | 合并 |
-| Q4 | 加不加 `cpu.freq`？任务管理器 CPU 页最显眼的第二个数字，取自 `scaling_cur_freq`，虚拟机上常读不到 | 加（+1 种）/ 不加 | 待定 |
-| Q5 | 成员区的排序：24 块盘按什么排？ | 按名字（稳定）/ 按繁忙（有用但行会跳） | 按名字，不给排序开关——颜色已经让最烫的自己跳出来 |
-| Q6 | 成员数极多（>32）时组页是否也要转热力图？现方案是 B 形态一路到底靠内滚 | 一路到底 / 加阈值 | 一路到底 |
+- Linux GPU 只采 sysfs 可用项，NVIDIA 没有该入口时如实缺席。不将 NVML 放进每会话
+  一个的 PAM helper；若将来支持，需要独立的常驻采集进程。
+- 不存 load.5m / load.15m；IOPS 合并读写；不新增 cpu.freq 时序项。
+- 成员按名字稳定排序，资源组成员区滚动；CPU 核数多时使用热力图。
 
 ## 13. 样稿
 

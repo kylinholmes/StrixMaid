@@ -22,6 +22,10 @@
 //! URL 里，而 URL 会进浏览器历史、反代日志、截图。
 
 use std::sync::Arc;
+use std::time::Duration;
+
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -70,7 +74,16 @@ async fn upgrade(
     };
 
     ws.protocols([crate::auth::extract::WS_BEARER_PROTOCOL])
-        .on_upgrade(move |socket| serve(socket, attachment, registry, session.token_hash, id))
+        .on_upgrade(move |socket| {
+            serve(
+                socket,
+                attachment,
+                registry,
+                session.token_hash,
+                id,
+                IO_TIMEOUT,
+            )
+        })
 }
 
 /// 在 WS 与终端之间双向泵字节，直到任一侧结束。
@@ -80,19 +93,22 @@ async fn serve(
     registry: Arc<TerminalRegistry>,
     session_hash: String,
     id: String,
+    io_timeout: Duration,
 ) {
     let (mut sink, mut stream) = socket.split();
     // 终端侧结束的原因与退出状态。`None` 表示是浏览器先走的（关标签页、断网），
     // 那种情况下终端还活着，不该给它发 exit。
     let mut closed: Option<(CloseReason, Option<TermExit>)> = None;
+    let mut stalled = false;
 
     loop {
         tokio::select! {
             // 终端 → 浏览器
             event = attachment.next() => match event {
                 Some(AttachEvent::Data(bytes)) => {
-                    if sink.send(Message::Binary(bytes.into())).await.is_err() {
-                        break; // 浏览器已经不在了
+                    if !matches!(tokio::time::timeout(io_timeout, sink.send(Message::Binary(bytes.into()))).await, Ok(Ok(()))) {
+                        stalled = true;
+                        break; // 浏览器已经不在了或不再消费
                     }
                 }
                 Some(AttachEvent::Closed { reason, exit }) => {
@@ -107,14 +123,17 @@ async fn serve(
             // 浏览器 → 终端
             msg = stream.next() => match msg {
                 Some(Ok(Message::Binary(data))) => {
-                    if attachment.write(&data).await.is_err() {
-                        // 写不进 PTY = shell 那头没了。等下一轮从 attachment
-                        // 收 Closed 拿到准确原因，这里不猜。
-                        continue;
+                    match tokio::time::timeout(io_timeout, attachment.write(&data)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => continue, // 下一轮领取真实退出状态。
+                        Err(_) => { stalled = true; break; } // PTY 停止消费。
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
-                    handle_control(&registry, &session_hash, &id, &text).await;
+                    if tokio::time::timeout(io_timeout, handle_control(&registry, &session_hash, &id, &text)).await.is_err() {
+                        stalled = true;
+                        break;
+                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -126,15 +145,22 @@ async fn serve(
         }
     }
 
-    // 终端真的没了才发 exit；只是换了个 WS（Replaced）或本端被判死（Stalled）不发。
-    if let Some((reason, exit)) = closed.filter(|(r, _)| r.is_terminal_gone()) {
-        let _ = sink
-            .send(Message::Text(exit_frame(reason, exit).into()))
-            .await;
+    // 先释放附着：关闭握手卡住不能延长资源所有权。
+    drop(attachment);
+    // 已超时的泵直接丢掉 socket，避免 close 再次 flush 卡住的发送。
+    if stalled {
+        return;
     }
-    let _ = sink.close().await;
-    // attachment 在这里 drop → 解除附着。终端本身继续跑（除非它自己没了），
-    // 刷新页面重新连上即可（`roadmap/03-terminal.md` §4.3）。
+    // 正常结束的退出帧与关闭握手也必须有上限。
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+        if let Some((reason, exit)) = closed.filter(|(r, _)| r.is_terminal_gone()) {
+            let _ = sink
+                .send(Message::Text(exit_frame(reason, exit).into()))
+                .await;
+        }
+        let _ = sink.close().await;
+    })
+    .await;
 }
 
 /// 处理一条文本控制帧。
@@ -172,11 +198,107 @@ fn exit_frame(reason: CloseReason, exit: Option<TermExit>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 真 IPC、PTY、WebSocket；客户端只写命令，刻意不消费输出。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 慢_websocket_在发送超时后释放附着() {
+        use strixmaid_core::terminal::TerminalOwner;
+        use strixmaid_core::{
+            config::TerminalConfig,
+            session::{WorkerHandle, channel::IpcChannel},
+            worker,
+        };
+        use strixmaid_types::rpc::TermOpenParams;
+        use tokio::sync::{Mutex, oneshot};
+        let mut dispatcher = worker::Dispatcher::new();
+        let _table = worker::terminal::register(&mut dispatcher);
+        let (main, child) = IpcChannel::pair().unwrap();
+        let worker_task = tokio::spawn(worker::serve(child, Arc::new(dispatcher)));
+        let worker = WorkerHandle::connect(main, -1, None).await.unwrap();
+        let registry = TerminalRegistry::new(TerminalConfig::default());
+        let info = registry
+            .open(
+                "test",
+                TerminalOwner {
+                    username: "test".into(),
+                    uid: 0,
+                    elevated: false,
+                },
+                &worker,
+                TermOpenParams {
+                    shell: Some("/bin/sh".into()),
+                    user: None,
+                    cols: 80,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+        let attachment = Arc::new(Mutex::new(Some(registry.attach("test", &info.id).unwrap())));
+        let (done_tx, done_rx) = oneshot::channel();
+        let done = Arc::new(Mutex::new(Some(done_tx)));
+        let reg = registry.clone();
+        let id = info.id.clone();
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let attachment = attachment.clone();
+                let reg = reg.clone();
+                let id = id.clone();
+                let done = done.clone();
+                async move {
+                    let attachment = attachment.lock().await.take().unwrap();
+                    ws.on_upgrade(move |socket| async move {
+                        serve(
+                            socket,
+                            attachment,
+                            reg,
+                            "test".into(),
+                            id,
+                            Duration::from_millis(100),
+                        )
+                        .await;
+                        let _ = done.lock().await.take().unwrap().send(());
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        client
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                b"dd if=/dev/zero bs=65536 count=1024 2>/dev/null\r"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        // 不 poll client：真实 TCP 缓冲最终填满，send 必须有界结束。
+        let finished = tokio::time::timeout(Duration::from_secs(8), done_rx).await;
+        let attached = registry.get("test", &info.id).unwrap().info().attached;
+        drop(client);
+        let _ = registry.close("test", &info.id, CloseReason::Deleted).await;
+        worker.shutdown().await;
+        server.abort();
+        worker_task.abort();
+        assert!(
+            matches!(finished, Ok(Ok(()))),
+            "慢连接没有退出: {finished:?}"
+        );
+        assert!(!attached, "退出 WS 后仍占着附着");
+    }
     use super::*;
 
     #[test]
     fn 只认识_resize_控制帧() {
-        let ok: ClientControl = serde_json::from_str(r#"{"t":"resize","cols":120,"rows":32}"#).unwrap();
+        let ok: ClientControl =
+            serde_json::from_str(r#"{"t":"resize","cols":120,"rows":32}"#).unwrap();
         assert!(matches!(
             ok,
             ClientControl::Resize {
@@ -209,7 +331,11 @@ mod tests {
             CloseReason::Logout,
             CloseReason::Failed,
         ] {
-            assert!(r.is_terminal_gone(), "{} 应当意味着终端已经没了", r.as_str());
+            assert!(
+                r.is_terminal_gone(),
+                "{} 应当意味着终端已经没了",
+                r.as_str()
+            );
         }
     }
 

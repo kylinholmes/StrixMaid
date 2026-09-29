@@ -18,7 +18,7 @@
 //! 因此这里把顺序拆开：**在 fork 之前**用 `getgrouplist` 把组列表算好（那时还在
 //! 正常的多线程环境里，随便分配内存），fork 之后的子进程只调用
 //! `setgroups`/`setgid`/`setuid` 这类纯系统调用。同理，argv / envp / 路径全部
-//! 在 [`PreparedExec::new`] 里备成 `CString`，子进程一次分配都不做。
+//! 在 `PreparedExec::new` 里备成 `CString`，子进程一次分配都不做。
 //!
 //! # 子进程里做的事，一件都不能少
 //!

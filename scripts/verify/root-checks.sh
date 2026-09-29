@@ -15,8 +15,7 @@
 # 退出码：有 FAIL 即非零。SKIP 不算失败——它标注「这条需要更长时间 / 更多前置 /
 # 只能人工」，如实说清没测，而不是假装通过。
 #
-# **本脚本尚未在真实 root 环境执行过**（开发机无 root）。首次运行若有环境相关的
-# 小问题（unit 名、发行版差异），按 ok/bad 的具体消息调整即可。
+# 历史 Ubuntu / Rocky 验证见 roadmap/07；每次运行以实际 ok/bad/skip 为准。
 #
 # 兼容 bash 3.2；变量紧跟中文一律 ${var}。
 set -uo pipefail
@@ -26,7 +25,7 @@ ALICE="${ALICE:-alice}"; ALICE_PW="${ALICE_PW:-alicepw}"
 BOB="${BOB:-bob}";       BOB_PW="${BOB_PW:-bobpw}"
 TEST_UNIT="${TEST_UNIT:-strixtest.service}"
 DB="${DB:-/var/lib/strixmaid/strixmaid.db}"
-LONG="${LONG:-0}"          # =1 时跑空闲超时等耗时用例
+LONG="${LONG:-0}"          # 兼容旧调用；超时验证已独立为 vm/session-lifecycle.py
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 PASS=0; FAIL=0; SKIP=0
@@ -58,7 +57,7 @@ worker_count() { pgrep -u "$1" -f 'strixmaid worker' 2>/dev/null | wc -l | tr -d
 #
 # 1. Linux 的 comm 只有 15 个字符，而 `strixmaid-helper` 是 16 个——内核把它截成
 #    `strixmaid-helpe`，于是 `pgrep -x strixmaid-helper` **永远匹配不到**。这条
-#    检查一直在拿 0 和 0 比，恒真（HANDOFF.md §5：只断言没报错的测试等于没测）。
+#    检查一直在拿 0 和 0 比，恒真（必须验证预期值，不能只断言没报错）。
 #    模式写成 `strixmaid-helpe.?`，截断与不截断的系统都能覆盖。
 #    不用 `pgrep -f`：它匹配整条 cmdline，连「命令行里碰巧出现过这个词的 shell」
 #    都会算进去——实测能多数出一个。
@@ -221,10 +220,10 @@ else
     else bad "#18 PUT hostname 应成功" "$C $BODY"; fi
 
     if [ "$LONG" = 1 ]; then
-      skip "#15/#16 空闲超时（300s/900s）" "LONG=1 但本工装未实现计时等待，请人工观察或加睡眠"
+      skip "#15/#16 空闲超时（300s/900s）" "改用 vm/session-lifecycle.py --idle-timeout 900 --elevated-timeout 300"
     else
-      skip "#15 提权空闲超时(300s)回收 admin worker" "耗时，LONG=1 启用"
-      skip "#16 会话空闲超时(900s)失效" "耗时，LONG=1 启用"
+      skip "#15 提权空闲超时(300s)回收 admin worker" "由 vm/session-lifecycle.py 独立验证"
+      skip "#16 会话空闲超时(900s)失效" "由 vm/session-lifecycle.py 独立验证"
     fi
     skip "#17 连续 5 次登录失败触发 faillock" "依赖发行版 faillock 配置，人工核对"
     skip "#20 alice 登录 20 次 RSS 线性" "属容量观测，人工或长测跑"

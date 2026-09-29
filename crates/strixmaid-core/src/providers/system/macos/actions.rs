@@ -12,7 +12,7 @@
 //! - 关机重启走 `shutdown(8)`。
 //!
 //! 三者都要 root。非 root 时命令本身会失败，按其输出映射成
-//! [`ErrorCode::PermissionDenied`](strixmaid_types::ErrorCode::PermissionDenied)
+//! [`ErrorCode::PermissionDenied`]
 //! 并置 `can_retry_elevated`，与 Linux 侧 polkit 被拒时的表现一致。
 //!
 //! # 参数校验在前

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { authHeaders } from "@/api/client";
+import { onSessionReset, sessionSignal } from "@/session/lifecycle";
 import { BlobCache } from "./blobcache";
 import type { DirEntry } from "./useDirListing";
 
@@ -31,8 +32,8 @@ const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "
  * 这个条目该不该出缩略图。
  *
  * 只看类型不看大小：大小的账已经由服务端接管（见模块文档）。
- * SVG / ICO / AVIF / HEIC 不在其中——服务端的纯 Rust 解码器不认它们，
- * 发请求只会换回一个 400。
+ * SVG / ICO / AVIF 不在其中，服务端不支持这些缩略图格式。
+ * HEIC / HEIF 则由 macOS 系统解码器支持，其他平台会拒绝。
  */
 export function thumbEligible(e: DirEntry): boolean {
   if (e.kind !== "file") return false;
@@ -47,11 +48,17 @@ export interface Thumb {
   orientation: number;
 }
 
-/** path → 缩略图。会话级缓存：同一目录反复进出不重取。
- *  上限 512：每张 5～40 KB，封顶约 20 MB；超出按最久未用逐出并回收
- *  object URL（背景见 `blobcache.ts`——此前无上限也从不 revoke）。 */
+/** path → 缩略图。会话级缓存：同一目录反复进出不重取。 */
 const cache = new BlobCache<Thumb>(512, (t) => t.url);
 const inflight = new Map<string, Promise<Thumb | null>>();
+let lanes = [Promise.resolve(), Promise.resolve()];
+let nextLane = 0;
+onSessionReset(() => {
+  lanes = [Promise.resolve(), Promise.resolve()];
+  nextLane = 0;
+  cache.clear();
+  inflight.clear();
+});
 
 /**
  * EXIF 方向 → CSS `transform`。
@@ -124,23 +131,32 @@ export function fetchThumb(path: string): Promise<Thumb | null> {
   const going = inflight.get(path);
   if (going) return going;
 
+  const scope = sessionSignal();
   const headers = authHeaders();
   if (!headers) return Promise.resolve(null);
-  const p = (async () => {
+  const lane = nextLane++ % lanes.length;
+  const p = (lanes[lane] ?? Promise.resolve()).then(async () => {
+    if (scope.aborted) return null;
     try {
-      const resp = await fetch(`/api/v1/files/thumb?path=${encodeURIComponent(path)}`, { headers });
+      const resp = await fetch(`/api/v1/files/thumb?path=${encodeURIComponent(path)}`, {
+        headers,
+        signal: scope,
+      });
       // 400 = 这个文件服务端缩不了（格式不支持、图已损坏），不是故障。
       if (!resp.ok) return null;
       const orientation = Number(resp.headers.get("x-thumb-orientation") ?? "1") || 1;
-      const thumb = { url: URL.createObjectURL(await resp.blob()), orientation };
+      const blob = await resp.blob();
+      if (scope.aborted) return null;
+      const thumb = { url: URL.createObjectURL(blob), orientation };
       cache.set(path, thumb);
       return thumb;
     } catch {
       return null;
     } finally {
-      inflight.delete(path);
+      if (!scope.aborted) inflight.delete(path);
     }
-  })();
+  });
+  lanes[lane] = p.then(() => undefined);
   inflight.set(path, p);
   return p;
 }

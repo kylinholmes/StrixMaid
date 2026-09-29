@@ -1,6 +1,6 @@
 # 07 验证清单
 
-本文件列出当前代码已实现但未在目标环境验证的部分（`gap-analysis.md` §4），给出环境要求、步骤与预期结果。每项验证的结果应回写到本文件的「结果」列。
+本文件列出当前代码已实现但未在目标环境验证的部分，给出环境要求、步骤与预期结果。每项验证的结果应回写到本文件的「结果」列。
 
 > **验证工装（2026-08-28）**：本清单能自动化的部分已做成脚本，在 `scripts/verify/`：
 >
@@ -21,7 +21,7 @@
 ## 0. 结果说明（2026-08-29）
 
 在两个 systemd 容器里各跑一遍，产物取自 CI 的 `strixmaid-dist-x86_64`
-（musl 静态的 `strixmaid` / `strixmaid-agent` + glibc 2.28 基线的 helper）：
+（musl 静态的 `strixmaid`，含 serve / agent 模式，及 glibc 2.28 基线的 helper）：
 
 | 记号 | 环境 |
 |---|---|
@@ -59,14 +59,14 @@ Ubuntu 上永远复现不了——那里 journald 的 ACL 让用户至少打得�
 | 6 | `GET /processes/<worker pid>` | `uid` 为 alice；`cgroup` 在 `user.slice/user-<uid>.slice/session-*.scope` 下 | **U ✓ R ✓**（cgroup 形状属人工核对） |
 | 7 | `POST /services/<测试 unit>/action { restart }` | 403 且带 `can_retry_elevated`。**码是 `permission_denied` 而非 `elevation_required`**：服务操作走 `exec::call_escalating_from`，先让 polkit 裁决并返回它的真实理由；`elevation_required` 是 `Privilege::Admin` 那类路由在「压根没有 admin worker」时的回答 | **U ✓ R ✓** `permission_denied` + `Interactive authentication required.` |
 | 8 | `POST /auth/elevate/start` | 403 `permission_denied`，helper 进程数不增加（`01` §4.8） | **U ✓ R ✓**。注意 `pgrep -x strixmaid-helper` **永远匹配不到**：Linux 的 `comm` 只有 15 字符，实际是 `strixmaid-helpe` |
-| 9 | `GET /services?scope=user` | 列出 alice 的用户级 unit；session bus 连不上时 503 `unavailable`（**不是 501**——501 是「本机没装」，页面该隐藏；503 是暂时不可用，页面不该隐藏） | **R ✓** 200；**U** 503 —— 容器里没起 `user@.service`，属环境。VM 上应为 200 |
+| 9 | `GET /services?scope=user` | 列出 alice 的用户级 unit；session bus 连不上时 503 `unavailable`（**不是 501**——501 是「本机没装」，页面该隐藏；503 是暂时不可用，页面不该隐藏） | **R ✓** 200；**U** 503 —— 容器里没起 `user@.service`，属环境。**VM ✓ 200**（2026-09-25，Fedora 44 aarch64 本机虚拟机，`user_units=true`，`loginctl` 中有该用户的真实会话，见 `scripts/verify/README.md` 的「本机虚拟机」一节） |
 | 10 | `POST /auth/logout` | worker 与 helper 进程退出；`loginctl` 中会话消失 | **U ✓ R ✓** |
 | 11 | 以 `bob` 登录后 `POST /auth/elevate/start` → `respond` | 200；`ps` 出现 uid 0 的第二个 worker | **U ✓ R ✓** — 实测已提权会话共 **2 个 helper**（会话一个、提权一个）+ 2 个 worker |
 | 12 | `GET /capabilities` | `elevated = true`、`can_manage_units = true`、`can_read_journal = true` | **U ✓ R ✓**。`can_read_journal` 靠**升级到 admin worker** 成立（`exec::escalate`），与「bob 以自己身份读不读得到」不是一回事 |
 | 13 | `POST /services/<测试 unit>/action { restart }` | 200，返回 `job`；`systemctl status` 显示刚重启 | **U ✓ R ✓** |
 | 14 | `GET /logs?limit=50` | 含系统日志 | **U ✓ R ✓** 200（内容属人工核对） |
-| 15 | 等待 `elevated_idle_timeout_secs`（默认 300 s）不做任何管理操作 | admin worker 退出；`GET /auth/session` 的 `elevated = false`；user worker 仍在 | **未测** — 耗时，`LONG=1`；宜按 `09` P2 做成定时任务 |
-| 16 | 等待 `idle_timeout_secs`（默认 900 s） | 会话失效，下一请求 401；全部进程退出 | **未测** — 同上 |
+| 15 | 等待 `elevated_idle_timeout_secs`（默认 300 s）不做任何管理操作 | admin worker 退出；`GET /auth/session` 的 `elevated = false`；user worker 仍在 | **VM 短档 ✓**（2026-09-29，Fedora ARM，30 s）；默认 300 s 未测。独立工装及证据见 [会话生命周期](../reviews/2026-09-29-session-lifecycle.md) |
+| 16 | 等待 `idle_timeout_secs`（默认 900 s） | 会话失效，下一请求 401；全部进程退出 | **VM 短档 ✓**（2026-09-29，60 s），包含 PTY shell 与库表清理；默认 900 s 未测。见同上报告 |
 | 17 | 连续登录失败 5 次 | 每次约 2 s（`pam_unix` 失败延迟）；`faillock`（RHEL）或等效机制生效时第 6 次被锁定，响应为 401 且 detail 含锁定信息 | **未测** — 依赖发行版 faillock 配置，人工 |
 | 18 | `PUT /system/hostname`（bob 已提权） | 200；`hostnamectl` 显示新值；`/etc/hostname` 已改 | **U ✓ R ✓** |
 | 19 | `kill -9` 主进程后重启 | `sessions` 表为空；旧 token 401；无残留 worker / helper | **U ✓ R ✓** 三项全中 |
@@ -93,15 +93,15 @@ warning（比如缺模块、次序可疑）。这条仍算未完成。
 
 ## 2. 浏览器
 
-> **未测（2026-08-29）**：需要无头浏览器驱动真实渲染，且正式前端框架未定
-> （`HANDOFF-2026-08-28.md` §2.2 —— 属架构决定）。方案见 `09-ci-verification.md` P4。
+> 以下是待补齐的统一验收清单，不表示此前从未做过浏览器检查。
+> React 前端与工作区已实现，浏览器 CI 仍待接入，见 `09-ci-verification.md` P4。
 
 环境：任一现代浏览器，SSH 隧道到 9700。
 
 | # | 检查 | 预期 | 结果 |
 |---|---|---|---|
-| 1 | `/api/docs` | Scalar 渲染，左侧 29 个端点；「Try it」对 `/health` 成功；开发者工具 Network 面板无外部域名请求 | |
-| 2 | `/` | 302 到 `/debug` | |
+| 1 | `/api/docs` | Scalar 渲染，端点与当前 OpenAPI 一致；「Try it」对 `/health` 成功；开发者工具 Network 面板无外部域名请求 | |
+| 2 | `/` | 加载正式前端，未登录显示登录界面 | |
 | 3 | `/debug` 登录 | prompts 渲染为密码框；错误密码显示 401 detail；正确密码后顶部显示用户名，`sessionStorage` 有 token | |
 | 4 | 指标面板 | 勾选 `cpu.usage` 后 uPlot 显示 band（min–max 区间）、avg 实线、med 虚线；切换 1h / 1d 曲线刷新 | |
 | 5 | 实时开关 | Network 面板中 `/ws` 握手请求头含 `Sec-WebSocket-Protocol: bearer, …`，响应头含 `Sec-WebSocket-Protocol: bearer`；每 2 s 收到 `metrics.live` 帧 | |
@@ -150,10 +150,10 @@ warning（比如缺模块、次序可疑）。这条仍算未完成。
 
 | # | 检查 | 方法 | 预期 | 结果 |
 |---|---|---|---|---|
-| 1 | 密码不进日志 | `RUST_LOG=trace` 下登录一次，`grep` 密码明文 | 0 处 | **U ✓ R ✓**（0 处）。**但工装的 unit 用 `RUST_LOG=info`，这只是弱检验**——严格版要 `trace`，未做 |
+| 1 | 密码不进日志 | `RUST_LOG=trace` 下登录一次，`grep` 密码明文 | 0 处 | **VM trace ✓**（2026-09-29，真实 PAM 登录/提权，无明文密码或 token）；历史 U/R 使用 info，只算弱检验 |
 | 2 | 密码不入库 | `strings strixmaid.db \| grep` 密码 | 0 处 | **R ✓**（alice / bob 两个密码各 0 处）；**U 未测** —— `ubuntu:24.04` 里没有 `strings` |
 | 3 | token 只存 hash | `SELECT id FROM sessions` 与响应中的 token 比较 | 不相等，`id` 为 64 位 hex | **U ✓ R ✓** |
 | 4 | worker uid 校验 | 修改测试用 helper 使 `Hello.uid` 与声称不符 | 主进程拒绝并 kill worker | **未测** — 需篡改过的 helper；core 单测已覆盖，工装不重复 |
 | 5 | helper 的 fd 3 | 直接从终端运行 `strixmaid-helper` | 立即退出并报「fd 3 不是 socket」 | **U ✓ R ✓** |
-| 6 | WS 无 token | 见 `gap-analysis.md` 已验证 | 401 | **U ✓ R ✓** |
+| 6 | WS 无 token | 不带 token 连接 `/ws` | 401 | **U ✓ R ✓** |
 | 7 | 反代头伪造 | 无 `trusted_proxies` 时带 `X-Forwarded-For` | 审计中 `remote_addr` 为直连地址 | **U ✓ R ✓** 审计记的是 `127.0.0.1:<port>`，未采信伪造头 |
