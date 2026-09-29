@@ -1,0 +1,77 @@
+.dialog {
+  width: min(1000px, 90vw);
+  max-height: 88vh;
+  height: min(760px, 88vh);
+  padding: var(--sp-4);
+  color: var(--ink);
+  background: var(--surface);
+  border: var(--stroke) solid var(--line-strong);
+  box-shadow: var(--shadow-dialog);
+  border-radius: var(--radius-md);
+}
+.dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.dialog::backdrop {
+  background: var(--scrim);
+}
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-3);
+  border-bottom: var(--stroke) solid var(--line);
+}
+.header > div {
+  flex: 1;
+  min-width: 0;
+}
+.header h2 {
+  font-size: var(--fs-500);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.header span {
+  color: var(--ink-3);
+}
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.image,
+.video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+.pdf {
+  width: 100%;
+  height: calc(100% - 3em);
+  border: 0;
+}
+.text {
+  user-select: text;
+  cursor: text;
+  margin: 0;
+  white-space: pre;
+  tab-size: 4;
+  font-family: var(--mono);
+  font-size: var(--fs-300);
+}
+.text [data-token="keyword"] {
+  color: #9972d9;
+}
+.text [data-token="string"] {
+  color: #38966c;
+}
+.text [data-token="comment"] {
+  color: var(--ink-3);
+}
+.text [data-token="number"] {
+  color: #c57930;
+}

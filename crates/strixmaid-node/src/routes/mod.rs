@@ -13,6 +13,7 @@ pub mod audit;
 pub mod auth;
 pub mod capabilities;
 pub mod files;
+pub mod file_access;
 pub mod health;
 pub mod logs;
 pub mod metrics;
@@ -40,7 +41,7 @@ use crate::state::AppState;
         description = "轻量、通用、现代化的服务器观测与管理平台。\n\n\
                        所有路径以 /api/v1 为前缀；写操作一律走 REST，实时流走 WebSocket `/ws`。\n\n\
                        除 /health、/auth/start、/auth/respond、/capabilities 外，其余端点需要 \
-                       `Authorization: Bearer <token>`；WebSocket 握手用子协议携带：\
+                       `Authorization: Bearer <token>`；文件 content 端点例外，使用文件专用 HttpOnly Cookie。WebSocket 握手用子协议携带：\
                        `Sec-WebSocket-Protocol: bearer, <token>`。",
     ),
     modifiers(&SecurityAddon),
@@ -91,6 +92,7 @@ pub struct ApiStates {
     pub metrics: Arc<metrics::MetricsState>,
     pub terminals: terminals::TerminalState,
     pub files: files::FilesState,
+    pub file_access: file_access::FileAccessState,
     /// 宿主追加的受保护路由。
     ///
     /// Server 用它挂 `/nodes`（节点目录是 Server 的职责，node 只认识本机这一个
@@ -126,5 +128,5 @@ pub fn api_v1(s: ApiStates) -> OpenApiRouter<()> {
     };
     let protected = protect_openapi(protected, s.auth);
 
-    public.merge(soft).merge(protected)
+    public.merge(soft).merge(protected).merge(file_access::router(s.file_access))
 }

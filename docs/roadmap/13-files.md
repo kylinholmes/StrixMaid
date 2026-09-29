@@ -1,6 +1,6 @@
 # 13 文件模块：预览、下载与后续写操作
 
-状态：**方案已于 2026-09-29 获负责人批准，尚未进入实现**。
+状态：**A1–A3 已实现；A4 正在进行最终 Linux 资源与发布物验收（2026-09-29）**。
 批准范围包括专用字节通道、文件专用 HttpOnly Cookie，以及并行分派相互独立的子任务；
 按 A1–A4 推进，由协调者统一共享契约、集成验收并回收子任务。
 来源：[09-21 交接](../HANDOFF-2026-09-21.md) §4–§5。八个模块的原定顺序不变，
@@ -18,7 +18,7 @@
 沿用已定决策：确认后直接执行，不增加回收站或短时撤销。A 不发布写入端点，
 但数据通道不能只支持下载；B/C/D 的具体交互在各阶段开始前细化。
 
-## 2. 当前代码与需要补上的接缝
+## 2. 实施前基线与接缝
 
 - `web/src/workspace/activate.ts` 对普通文件返回 `null`，列表和平铺都没有预览动作。
 - `GET /files/content` 已可读文本；实际 `MAX_READ_BYTES` 为 640 KiB，部分 DTO /
@@ -40,8 +40,9 @@
                                   控制 RPC 只传元数据/请求/附件
 ```
 
-读通道的控制请求至少包含 path、allowed_roots、offset 和 length。
-worker 打开普通文件、基于已打开的句柄取长度并定位，返回元数据和一个通道附件。
+读通道的控制请求包含 path、allowed_roots 和 preview 用途。
+worker 打开普通文件，返回已打开句柄的元数据和一个通道附件；node 根据长度解析
+Range，再经附件发送两个大端 u64（offset、length），worker 据此定位并开始搬运。
 单次响应只读同一个已打开文件，不能逐块重新打开路径，否则移动/替换文件可能拼接
 两个版本。FIFO、设备、目录、socket 不进入读流，避免打开特殊文件挂住任务。
 
@@ -68,10 +69,11 @@ Range/206/416 的协议依据为 [RFC 9110 §14](https://www.rfc-editor.org/rfc/
 | `POST /api/v1/file-access/{id}/renew` | Bearer；只允许所属会话续期，预览仍打开时由前端调用 |
 | `DELETE /api/v1/file-access/{id}` | Bearer；关闭预览后释放该记录，不取消用户已明确开始的另一条下载 |
 
-以上名称是拟定契约，实施后须同步 DTO、OpenAPI 和前端生成类型。
+以上契约已同步 DTO、OpenAPI 和前端生成类型。
 
 文件 Cookie 只用于这些读端点，不成为普通管理 API 的 Cookie 登录入口。
-不写入长会话 Bearer：另生成随机秘密，服务端仅保存摘要及所属会话 hash。
+不写入长会话 Bearer：用进程内随机密钥与会话 hash 经 HMAC-SHA256 派生秘密，
+并发初始化得到同一 Cookie；注册表仅保存摘要及所属会话 hash，密钥不持久化。
 Cookie 设置 HttpOnly、SameSite=Strict、限定 Path、不设置 Domain；HTTPS 设置 Secure。
 本地 HTTP 开发必须明确处理 Secure 属性，不能盲目信任任意 X-Forwarded-Proto。
 Cookie 的发送范围和 HttpOnly 语义参见

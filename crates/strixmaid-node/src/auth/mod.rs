@@ -87,6 +87,7 @@ pub struct SecurityAddon;
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme("file_cookie", SecurityScheme::ApiKey(utoipa::openapi::security::ApiKey::Cookie(utoipa::openapi::security::ApiKeyValue::new("strixmaid_file"))));
         components.add_security_scheme(
             SECURITY_SCHEME,
             SecurityScheme::Http(

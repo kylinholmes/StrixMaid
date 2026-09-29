@@ -1110,3 +1110,24 @@ fn strixmaid_core_audit_filter() -> crate::store::AuditFilter {
         ..Default::default()
     }
 }
+
+#[tokio::test]
+async fn revocation_subscription_closes_on_logout_and_does_not_renew_idle() {
+    let mock = MockLauncher::new(true, 1);
+    let m = manager(Arc::new(mock), cfg(Duration::from_secs(60), Duration::from_secs(30), Duration::from_secs(60))).await;
+    let (pending, _) = m.login_start("alice", ClientMeta::default()).await.unwrap();
+    let session = match m.login_respond(&pending, answer(PASSWORD)).await.unwrap() {
+        LoginOutcome::Complete { session, .. } => session,
+        _ => panic!("expected completed login"),
+    };
+    let mut revoked = m.revocation(&session.token_hash).await.unwrap();
+    assert!(!*revoked.borrow());
+    let live = m.live(&session.token_hash).await.unwrap();
+    let at = live.activity.lock().await.last_active;
+    let _another = m.revocation(&session.token_hash).await.unwrap();
+    assert_eq!(at, live.activity.lock().await.last_active);
+    m.logout(&session.token_hash).await;
+    revoked.changed().await.unwrap();
+    assert!(*revoked.borrow());
+    assert!(m.revocation(&session.token_hash).await.is_none());
+}

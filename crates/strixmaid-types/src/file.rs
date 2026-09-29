@@ -169,11 +169,34 @@ pub struct FileContent {
     /// 只支持文本；二进制文件（前 8 KiB 含 NUL 字节）返回
     /// [`crate::ErrorCode::InvalidRequest`]（P0 不做下载与十六进制视图）。
     pub content: String,
-    /// 内容是否被截断。**当前恒为 `false`**：超过大小上限（5 MiB）的文件直接
+    /// 内容是否被截断。**当前恒为 `false`**：超过大小上限（640 KiB）的文件直接
     /// 返回 [`crate::ErrorCode::InvalidRequest`] 而不是截断——半个文件比报错更
     /// 误导。字段保留给后续的分段读取。
     pub truncated: bool,
     /// 内容里是否有无效 UTF-8 序列被替换成 U+FFFD。为 `true` 时不宜原样写回。
     #[serde(default)]
     pub lossy: bool,
+}
+
+/// 文件访问用途；只读凭证不能用作普通管理 API 登录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAccessPurpose {
+    Preview,
+    Download,
+}
+
+/// 创建绑定到当前会话和路径的短期读记录。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FileAccessRequest {
+    pub path: String,
+    pub purpose: FileAccessPurpose,
+}
+
+/// URL 与 id 均不包含秘密；浏览器需同时携带文件专用 HttpOnly Cookie。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FileAccessResponse {
+    pub id: String,
+    pub url: String,
+    pub expires_in_secs: u64,
 }

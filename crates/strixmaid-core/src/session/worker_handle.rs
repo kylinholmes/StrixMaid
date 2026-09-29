@@ -114,7 +114,19 @@ struct Inner {
     subs: StdMutex<HashMap<u64, Sub>>,
     next_id: AtomicU64,
     closed: AtomicBool,
+    closed_signal: tokio::sync::watch::Sender<bool>,
     reader: StdMutex<Option<JoinHandle<()>>>,
+}
+
+/// 请求被客户端取消时也摘除 pending，不只在应答与超时分支清理。
+struct PendingCall {
+    inner: Arc<Inner>,
+    id: u64,
+}
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        self.inner.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
 }
 
 impl Inner {
@@ -209,6 +221,7 @@ impl WorkerHandle {
             subs: StdMutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            closed_signal: tokio::sync::watch::channel(false).0,
             reader: StdMutex::new(None),
         });
 
@@ -226,6 +239,11 @@ impl WorkerHandle {
     /// worker 运行的 uid。
     pub fn uid(&self) -> u32 {
         self.uid
+    }
+
+    /// 连接退出通知；附件流即使堵在 HTTP 背压上也能及时释放资源。
+    pub fn closed_signal(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.closed_signal.subscribe()
     }
 
     /// 连接是否还在。
@@ -265,6 +283,7 @@ impl WorkerHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, tx);
+        let _pending = PendingCall { inner: self.inner.clone(), id };
 
         let msg = ToWorker::Call {
             id,
@@ -286,29 +305,12 @@ impl WorkerHandle {
             }
         })
         .await;
-        // 除「拿到应答」（read_loop 已摘牌）外，其余出路都要把 pending 里
-        // 自己这一格摘掉，否则表随失败调用无限涨。remove 幂等，多摘无害。
-        let cleanup = || {
-            self.inner
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-        };
         match attempt {
-            Ok(result) => {
-                if result.is_err() {
-                    cleanup();
-                }
-                result
-            }
-            Err(_) => {
-                cleanup();
-                Err(ApiError::new(
-                    ErrorCode::Timeout,
-                    format!("worker 对 {method} {} 秒未应答", RPC_TIMEOUT.as_secs()),
-                ))
-            }
+            Ok(result) => result,
+            Err(_) => Err(ApiError::new(
+                ErrorCode::Timeout,
+                format!("worker 对 {method} {} 秒未应答", RPC_TIMEOUT.as_secs()),
+            )),
         }
     }
 
@@ -692,6 +694,7 @@ fn deliver(inner: &Inner, id: u64, result: Result<(Value, Vec<Attachment>), ApiE
 }
 
 fn fail_all(inner: &Inner) {
+    inner.closed_signal.send_replace(true);
     let drained: Vec<_> = inner
         .pending
         .lock()
@@ -717,6 +720,39 @@ mod rpc_timeout_tests {
         WorkerHandle::connect(main_side, -1, None)
             .await
             .expect("进程内 worker 握手失败")
+    }
+
+    #[tokio::test]
+    async fn cancelled_call_removes_pending_without_waiting_for_worker() {
+        let started=Arc::new(tokio::sync::Notify::new());
+        let mut dispatcher=Dispatcher::new();
+        let notify=started.clone();
+        dispatcher.register_fn("test.hang",move |_| {
+            let notify=notify.clone();
+            async move {
+                notify.notify_one();
+                std::future::pending::<Result<Value,ApiError>>().await
+            }
+        });
+        let handle=handle_for(dispatcher).await;
+        let cloned=handle.clone();
+        let task=tokio::spawn(async move { cloned.call("test.hang",Value::Null).await });
+        tokio::time::timeout(Duration::from_secs(2),started.notified()).await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(handle.inner.pending.lock().unwrap().is_empty());
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_signal_observes_real_worker_shutdown() {
+        let handle=handle_for(Dispatcher::new()).await;
+        let mut closed=handle.closed_signal();
+        assert!(!*closed.borrow());
+        handle.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(2),closed.changed()).await.unwrap().unwrap();
+        assert!(*closed.borrow());
+        assert!(!handle.is_alive());
     }
 
     /// 2026-09-25 事故那一类「活着但不应答」的回归：卡死的调用必须在

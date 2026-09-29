@@ -559,15 +559,37 @@ CREATE TABLE settings (
   DELETE /api/v1/terminals/{id}
   POST   /api/v1/terminals/{id}/resize     { cols, rows }
 
-文件（P0 仅留壳，后续专门打磨）
+文件（只读浏览、预览与下载；写操作按 13 号方案分期）
   GET    /api/v1/files?path=
-  GET    /api/v1/files/content?path=
+  GET    /api/v1/files/content?path=       文本，640 KiB 上限
+  POST   /api/v1/file-access              Bearer 创建绑定会话/路径/用途的访问记录
+  POST   /api/v1/file-access/{id}/renew   Bearer 续期，返回文件 Cookie
+  DELETE /api/v1/file-access/{id}         Bearer 释放记录
+  GET/HEAD /api/v1/file-access/{id}/content 文件 Cookie 读取，支持单段 Range
 
 审计
   GET    /api/v1/audit                     需管理访问
 ```
 
 写操作一律走 REST（幂等、易调试、好审计）。`curl` 可以完成全部管理操作，只有实时流才需要 WS 客户端。
+
+文件读流的秘密不进入 URL：访问 id 本身不授予权限，服务端仅保存文件 Cookie 的
+摘要，并关联仍有效的 PAM 会话。Cookie 为 HttpOnly / SameSite=Strict，Path 限定为
+`/api/v1/file-access`；HTTPS（包括明确配置的可信代理）设置 Secure，本地 HTTP 开发
+不设置。该 Cookie 不能登录普通管理 API。每条记录有效期 10 分钟，仅 Bearer 创建/
+续期刷新；文件 Cookie 由进程内随机密钥通过 HMAC-SHA256 按会话派生，多标签页并发初始化得到同一值；注册表只存 Cookie 摘要，密钥不持久化。
+
+普通文件由 user worker 打开一次，返回元数据与专用附件；主进程在同一附件上发
+两个大端 u64（offset、length），worker 从同一文件句柄搬运原始字节，控制 RPC 不装
+文件内容。HEAD/416 关闭附件，不启动泵。图片预览在 worker 中生成有界 1600px 档，
+原图下载保持原始字节。HTTP 响应禁止压缩变换，HTML/SVG/未知类型只提供 attachment。
+
+每会话最多 32 条记录、4 条读流，全 node 最多 4096 条记录、32 条流；流使用固定
+缓冲与 30 秒无进展超时。每条文件流使用一个持续阻塞读取任务和容量为 1 的队列，
+避免按块扩张阻塞线程池；取消后仍未返回的磁盘读取继续占用名额。HTTP 断开、
+会话撤销或 worker 退出会关闭通道。记录到期或
+删除只禁止新请求，已获准的下载继续受会话撤销与无进展超时约束，不由 10 分钟总时长
+打断。完整行为与后续写入边界见 [13 号文件方案](roadmap/13-files.md)。
 
 ### 9.2 WebSocket
 

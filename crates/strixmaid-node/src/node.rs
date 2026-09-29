@@ -70,6 +70,7 @@ pub struct Node {
     auth: Arc<AuthState>,
     engine: MetricsEngine,
     terminals: Arc<TerminalRegistry>,
+    file_access: Arc<routes::file_access::Registry>,
     proc: ProcProvider,
     service_icons: ServiceIcons,
     app: AppState,
@@ -110,6 +111,14 @@ impl Node {
             .context("初始化会话管理失败")?;
         let mut tasks = vec![sessions.spawn_sweeper(SESSION_SWEEP)];
         let auth = AuthState::new(sessions.clone(), config.trusted_proxies.clone());
+        let file_access = Arc::new(routes::file_access::Registry::default());
+        tasks.push({
+            let registry = file_access.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(5));
+                loop { ticker.tick().await; registry.prune(); }
+            })
+        });
 
         // ---- 终端注册表（roadmap/03 §4.3）----
         //
@@ -205,6 +214,7 @@ impl Node {
             auth,
             engine,
             terminals,
+            file_access,
             proc,
             service_icons: ServiceIcons::new(),
             app: AppState::new(),
@@ -245,6 +255,9 @@ impl Node {
             files: routes::files::FilesState::new(
                 self.auth.clone(),
                 &self.config.files.allowed_roots,
+            ),
+            file_access: routes::file_access::FileAccessState::new(
+                self.auth.clone(), &self.config.files.allowed_roots, self.file_access.clone(),
             ),
             extra_protected,
         };

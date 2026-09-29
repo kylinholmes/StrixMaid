@@ -371,6 +371,7 @@ struct Admin {
 
 /// 一个活着的会话。
 struct Live {
+    revoked: tokio::sync::watch::Sender<bool>,
     token_hash: String,
     node: String,
     user: AuthUser,
@@ -562,6 +563,7 @@ impl SessionManager {
 
         let now = Instant::now();
         let live = Arc::new(Live {
+            revoked: tokio::sync::watch::channel(false).0,
             token_hash: token_hash.clone(),
             node: self.inner.cfg.node_id.clone(),
             user,
@@ -747,6 +749,16 @@ impl SessionManager {
             live.snapshot(self.inner.cfg.effective_elevated_timeout())
                 .await,
         )
+    }
+
+    /// 订阅会话撤销。流消费者应在撤销或发送端消失时立即关闭通道。
+    /// 不刷新空闲计时，避免长下载阻止会话按策略过期。
+    pub async fn revocation(&self, token_hash: &str) -> Option<tokio::sync::watch::Receiver<bool>> {
+        let live = self.live(token_hash).await?;
+        if live.activity.lock().await.last_active.elapsed() > self.inner.cfg.idle_timeout {
+            return None;
+        }
+        Some(live.revoked.subscribe())
     }
 
     /// 会话的 user worker。
@@ -1076,6 +1088,7 @@ impl SessionManager {
     }
 
     async fn teardown(&self, live: Arc<Live>) {
+        live.revoked.send_replace(true);
         // **先关终端，再关 worker**：终端的 PTY 跑在这个 worker 里，关闭要靠
         // 一次 `term.close` RPC 送进去。worker 先没了，那个 RPC 就发不出去，
         // shell 只能等 worker 进程死掉时被动收场——而那条路径不保证 SIGHUP

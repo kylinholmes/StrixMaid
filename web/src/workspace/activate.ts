@@ -13,7 +13,8 @@ export type EntryAction =
   /** 进这个目录。 */
   | { kind: "enter"; path: string }
   /** 跳到 `dir` 并选中其中的 `name`（目标是文件时的跳法）。 */
-  | { kind: "reveal"; dir: string; name: string };
+  | { kind: "reveal"; dir: string; name: string }
+  | { kind: "preview"; path: string; reason?: string };
 
 /** [`activateEntry`] 需要的最小条目形状；`DirEntry` 结构上满足它。 */
 export interface ActivatableEntry {
@@ -62,8 +63,7 @@ function baseName(path: string, p: Platform): string {
  * - 链接 → 跟到目标：目标是目录就进去，是文件就跳到它所在目录并选中它；
  *   **目标类型未知时按目录去试**（断链、或老服务端不给 `target_kind`），
  *   让服务端给出真实的错误，好过点了毫无反应；
- * - 其余（普通文件、设备、fifo……）→ `null`。预览与下载还没有界面
- *   （见 `docs/HANDOFF-2026-09-21.md` §6），有了之后这里再加一种动作。
+ * - 普通文件 → 预览；特殊文件 → 显示不可预览原因，不打开读流。
  */
 export function activateEntry(
   cwd: string | null,
@@ -83,5 +83,9 @@ export function activateEntry(
     return { kind: "enter", path };
   }
 
-  return null;
+  return {
+    kind: "preview",
+    path: joinPath(cwd, entry.name, p),
+    ...(entry.kind === "file" ? {} : { reason: "设备、管道、套接字及未知类型不能预览或下载。" }),
+  };
 }

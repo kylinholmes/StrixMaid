@@ -176,6 +176,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/file-access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/file-access/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["remove"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/file-access/{id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["content"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head: operations["content"];
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/file-access/{id}/renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["renew"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/files": {
         parameters: {
             query?: never;
@@ -1234,7 +1298,7 @@ export interface components {
             /** @description 对本轮 `prompts` 中所有 [`PromptStyle::needs_input`] 项的回应，顺序无关。 */
             responses?: components["schemas"]["PromptResponse"][];
             /**
-             * @description [`AuthStartResp::session`] 或上一轮 [`AuthOutcome::MorePrompts`] 给出的会话 id。
+             * @description [`AuthStartResp::session`] 或上一轮 [`AuthOutcome::More`] 给出的会话 id。
              * @example 0f3c1a9e7b2d4f60
              */
             session: string;
@@ -1498,12 +1562,13 @@ export interface components {
             /** @description 属组名。同上。 */
             group?: string | null;
             /**
-             * @description 这一项在**本平台的约定下**算不算隐藏。
+             * @description 这一项算不算隐藏。判断留在服务端、不交给前端拼——前端只知道对面是
+             *     unix 还是 windows，不掌握属性位。
              *
-             *     两个平台的约定不是一回事，所以判断留在服务端、不交给前端拼：
-             *     Unix 看名字是否以 `.` 开头；Windows 看 `FILE_ATTRIBUTE_HIDDEN` 与
-             *     `FILE_ATTRIBUTE_SYSTEM` 两个属性位（`.gitignore` 在 Explorer 里照样
-             *     显示，而 `NTUSER.DAT` 不显示——按 dotfile 约定判会把两者都弄反）。
+             *     * Unix：名字以 `.` 开头；
+             *     * Windows：`FILE_ATTRIBUTE_HIDDEN` / `FILE_ATTRIBUTE_SYSTEM` 属性位，
+             *       **外加** dotfile 约定（项目负责人 2026-09-21 定；与资源管理器不一致
+             *       是有意的，理由见 `providers/fs/windows.rs` 的 `hidden_of`）。
              *
              *     `#[serde(default)]`：老服务端没有这个字段，反序列化得到 `false`。
              */
@@ -1619,6 +1684,23 @@ export interface components {
              */
             target: string;
         };
+        /**
+         * @description 文件访问用途；只读凭证不能用作普通管理 API 登录。
+         * @enum {string}
+         */
+        FileAccessPurpose: "preview" | "download";
+        /** @description 创建绑定到当前会话和路径的短期读记录。 */
+        FileAccessRequest: {
+            path: string;
+            purpose: components["schemas"]["FileAccessPurpose"];
+        };
+        /** @description URL 与 id 均不包含秘密；浏览器需同时携带文件专用 HttpOnly Cookie。 */
+        FileAccessResponse: {
+            /** Format: int64 */
+            expires_in_secs: number;
+            id: string;
+            url: string;
+        };
         /** @description `GET /api/v1/files/content` 的响应体。 */
         FileContent: {
             /**
@@ -1641,7 +1723,7 @@ export interface components {
              */
             size_bytes: number;
             /**
-             * @description 内容是否被截断。**当前恒为 `false`**：超过大小上限（5 MiB）的文件直接
+             * @description 内容是否被截断。**当前恒为 `false`**：超过大小上限（640 KiB）的文件直接
              *     返回 [`crate::ErrorCode::InvalidRequest`] 而不是截断——半个文件比报错更
              *     误导。字段保留给后续的分段读取。
              */
@@ -1730,7 +1812,7 @@ export interface components {
              */
             driver?: string | null;
             /**
-             * @description 型号串。sysfs 没有营销名，这里给「厂商名 [vendor:device]」这类由 PCI id
+             * @description 型号串。sysfs 没有营销名，这里给「厂商名 `[vendor:device]`」这类由 PCI id
              *     组出的可读串（前端可再经 pci.ids 美化）；认不出为 `None`。
              * @example AMD [1002:73a3]
              */
@@ -3514,6 +3596,207 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Capabilities"];
+                };
+            };
+        };
+    };
+    create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileAccessRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileAccessResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    remove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 原始字节或图片预览 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 范围不可满足 */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 原始字节或图片预览 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 范围不可满足 */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    renew: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileAccessResponse"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };
