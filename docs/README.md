@@ -17,7 +17,7 @@ React + TypeScript + Vite；后端是 Rust workspace，主程序默认嵌入 `we
 | `web/src` | 按功能组织的 React 页面与数据层 |
 
 已实现：概览、实时与历史指标、进程、服务、日志、文件浏览与终端工作区。
-文件侧有分页、图标、缩略图和只读 API；完整预览与写操作仍在设计阶段。
+文件侧有分页、图标、缩略图、文本/图片/媒体预览与原生 Range 下载；写操作按 B–D 分期推进。
 审计有后端 API，正式前端的审计与设置页面仍为占位。
 
 `strixmaid agent` 当前采集、聚合、存储并推送指标，没有装载完整 node 运行时。
@@ -29,10 +29,11 @@ SSH 推装未实现。不要把设计目标当成可用功能。
 - [2026-09-29 后续修复](reviews/2026-09-29-follow-up.md)：连接竞态、日志分页、终端与配置拆分、CLI 校验及剩余验证。
 - [2026-09-29 Linux / D-Bus 验证](reviews/2026-09-29-linux-dbus.md)：模块拆分、Fedora ARM 真实总线压测与主任务复核。
 - [2026-09-29 会话生命周期](reviews/2026-09-29-session-lifecycle.md)：修复过期管理访问被续活，真实 PAM 与进程回收验证。
+- [2026-09-29 文件访问验收](reviews/2026-09-29-files-live.md)：真实 PAM/UID、Range、五轮并发与取消、内存增长修复。
 - [2026-09-27 审查报告](reviews/2026-09-27-quality-and-architecture.md)：问题证据、优先级与实测范围。
 - [设计与边界](design.md)：进程、权限、存储、API 契约。
 - [路线索引](roadmap/README.md)：已落地设计、后续方案与验收。
-- [下一阶段：文件预览与下载](roadmap/13-files.md)：已批准的实施方案，包含字节通道与浏览器文件凭证。
+- [文件模块分期与验收](roadmap/13-files.md)：A 预览/下载已实现，包含字节通道与浏览器文件凭证；后续 B–D 为写操作。
 - [后续模块与文件通道历史交接](HANDOFF-2026-09-21.md)：保留决策背景，文件方案以 13 号路线为准。
 - [macOS](macos-platform.md) / [Windows](windows-platform.md)：平台差异。
 - [D-Bus 事故](incidents/2026-09-25-dbus-wedge.md)：死锁机制与真实系统压测条件。

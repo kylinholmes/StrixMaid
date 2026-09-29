@@ -469,6 +469,30 @@ mod tests {
 
     #[tokio::test]
     async fn 真实文件背压超时取消阻塞发送并归还名额() {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        // 显式通知写端已停滞，避免靠 yield/睡眠猜测线程调度时机。
+        struct StalledSink(Option<tokio::sync::oneshot::Sender<()>>);
+        impl AsyncWrite for StalledSink {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                if let Some(ready) = self.0.take() {
+                    let _ = ready.send(());
+                }
+                Poll::Pending
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
         let temp = Temp::new();
         let path = temp.0.join("stalled");
         File::create(&path)
@@ -478,15 +502,14 @@ mod tests {
         let file = File::open(&path).unwrap();
         let slots = Arc::new(Semaphore::new(1));
         let permit = Arc::new(slots.clone().acquire_owned().await.unwrap());
-        let (mut tx, mut rx) = tokio::io::duplex(1);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut tx = StalledSink(Some(started));
         let task =
             tokio::spawn(async move { pump_file(file, &mut tx, 0, 8 * 1024 * 1024, permit).await });
-        tokio::time::timeout(Duration::from_secs(2), rx.read_u8())
+        tokio::time::timeout(Duration::from_secs(2), ready)
             .await
             .unwrap()
             .unwrap();
-        // 读取首字节会腾出一格；让写端再次填满并进入等待后再推进时钟。
-        tokio::task::yield_now().await;
         tokio::time::pause();
         tokio::time::advance(STALL + Duration::from_secs(1)).await;
         assert_eq!(
